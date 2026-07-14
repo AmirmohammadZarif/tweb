@@ -1,0 +1,337 @@
+import {AppManager} from '@appManagers/manager';
+import {getDatabaseState} from '@config/databases/state';
+import AppStorage from '@lib/storage';
+import {
+  CRM_API_PREFIX,
+  CRM_CONFIG_STORAGE_KEY,
+  CRM_ENDPOINTS,
+  CrmAttributionMap,
+  CrmConfig,
+  CrmRealtimeConfig,
+  CrmReverbConfig,
+  CrmCustomer,
+  CrmFaq,
+  CrmTemplate,
+  CrmTemplateImage,
+  CrmTicketLookupResult,
+  CrmTicketRef,
+  CrmTicketStatus,
+  CrmUser,
+  EMPTY_CRM_CONFIG
+} from '@lib/crm/types';
+
+export default class AppCrmManager extends AppManager {
+  private storage: AppStorage<Record<string, CrmConfig>, ReturnType<typeof getDatabaseState>>;
+  private config: CrmConfig;
+  private loadPromise: Promise<void>;
+
+  protected after() {
+    this.name = 'CRM';
+    this.storage = new AppStorage(getDatabaseState(this.getAccountNumber()), 'session');
+    this.config = {...EMPTY_CRM_CONFIG};
+
+    this.loadPromise = this.load();
+    // Refresh the agent's profile (incl. is_super_admin) once per app start so
+    // a role change in the CRM propagates without re-login. Fire-and-forget —
+    // gated UI simply stays hidden until the flag lands.
+    this.loadPromise.then(() => this.refreshMe());
+    return this.loadPromise;
+  }
+
+  private async load() {
+    const stored = await this.storage.get(CRM_CONFIG_STORAGE_KEY);
+    if(stored) {
+      this.config = {...EMPTY_CRM_CONFIG, ...stored};
+      // An older stored config may carry an empty baseUrl; fall back to the
+      // production default so agents never face a blank field.
+      if(!this.config.baseUrl) this.config.baseUrl = EMPTY_CRM_CONFIG.baseUrl;
+    }
+  }
+
+  private async persist() {
+    await this.storage.set({[CRM_CONFIG_STORAGE_KEY]: this.config});
+    this.rootScope.dispatchEvent('crm_config_update');
+  }
+
+  public async getConfig(): Promise<CrmConfig> {
+    await this.loadPromise;
+    return {...this.config};
+  }
+
+  public async setConfig(config: Partial<Pick<CrmConfig, 'enabled' | 'baseUrl'>>): Promise<void> {
+    await this.loadPromise;
+    this.config = {
+      ...this.config,
+      ...config,
+      baseUrl: (config.baseUrl ?? this.config.baseUrl).trim().replace(/\/+$/, '')
+    };
+    await this.persist();
+  }
+
+  public async isConnected(): Promise<boolean> {
+    await this.loadPromise;
+    return this.config.enabled && !!this.config.baseUrl && !!this.config.token;
+  }
+
+  // ── HTTP ──────────────────────────────────────────────────────────────────
+  private async request<T>(
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+    path: string,
+    options: {body?: object, query?: Record<string, string>, auth?: boolean} = {}
+  ): Promise<T> {
+    await this.loadPromise;
+
+    if(!this.config.baseUrl) throw new Error('CRM_NO_BASE_URL');
+    if(options.auth !== false && !this.config.token) throw new Error('CRM_NO_TOKEN');
+
+    let url = this.config.baseUrl + CRM_API_PREFIX + path;
+    if(options.query) {
+      const params = new URLSearchParams();
+      for(const key in options.query) {
+        if(options.query[key] != null) params.set(key, options.query[key]);
+      }
+      const qs = params.toString();
+      if(qs) url += '?' + qs;
+    }
+
+    const headers: Record<string, string> = {
+      'Accept': 'application/json'
+    };
+    if(options.body) headers['Content-Type'] = 'application/json';
+    if(options.auth !== false) headers['Authorization'] = 'Bearer ' + this.config.token;
+
+    const response = await fetch(url, {
+      method,
+      headers,
+      body: options.body ? JSON.stringify(options.body) : undefined
+    });
+
+    if(!response.ok) {
+      let serverMessage: string;
+      try {
+        const body = await response.json();
+        serverMessage = body?.message;
+      } catch{}
+      const error = new Error(serverMessage || ('CRM_HTTP_' + response.status)) as Error & {status: number, serverMessage?: string};
+      error.status = response.status;
+      error.serverMessage = serverMessage;
+      if(response.status === 401) {
+        this.config.token = '';
+        this.config.user = undefined;
+        this.config.enabled = false;
+        this.persist();
+        this.rootScope.dispatchEvent('crm_auth_required');
+      }
+      throw error;
+    }
+
+    if(response.status === 204) return undefined;
+    return response.json();
+  }
+
+  private unwrap<T>(payload: {data?: T}): T {
+    return (payload?.data ?? []) as T;
+  }
+
+  // ── Auth (per-agent OTP → Sanctum token) ──────────────────────────────────
+  public async sendOtp(mobile: string): Promise<void> {
+    await this.request('POST', CRM_ENDPOINTS.sendOtp, {body: {mobile: mobile.trim()}, auth: false});
+  }
+
+  public async verifyOtp(mobile: string, code: string): Promise<CrmUser> {
+    const result = await this.request<{token: string, user: CrmUser}>('POST', CRM_ENDPOINTS.verifyOtp, {
+      auth: false,
+      body: {mobile: mobile.trim(), code: code.trim(), device_name: 'Telegram Web (tweb)'}
+    });
+
+    this.config.token = result.token;
+    this.config.user = result.user;
+    this.config.enabled = true;
+    await this.persist();
+    // verify-otp's payload has no is_super_admin — pull the full profile so
+    // role-gated UI unlocks right after login, not on the next app start.
+    return (await this.refreshMe()) || result.user;
+  }
+
+  public async me(): Promise<CrmUser> {
+    return this.request<CrmUser>('GET', CRM_ENDPOINTS.me);
+  }
+
+  // Synchronous session/role checks for worker-side hot paths (dialog
+  // filtering) that can't await. They read the in-memory config: false until
+  // load() settles, which fails safe — gated content stays hidden. In practice
+  // they're accurate from the first manager call, because createManagers awaits
+  // every after() (and thus load()) before serving anything.
+  public isLoggedInCached(): boolean {
+    return !!(this.config?.enabled && this.config.baseUrl && this.config.token);
+  }
+
+  public isSuperAdminCached(): boolean {
+    return this.isLoggedInCached() && !!this.config.user?.is_super_admin;
+  }
+
+  // Re-fetch /auth/me and merge into the stored user. persist() dispatches
+  // crm_config_update, which is what the main-thread role store listens for.
+  public async refreshMe(): Promise<CrmUser | undefined> {
+    if(!(await this.isConnected())) return undefined;
+    try {
+      const user = await this.me();
+      this.config.user = {...this.config.user, ...user};
+      await this.persist();
+      return this.config.user;
+    } catch(err) {
+      this.log.error('refreshMe failed', err);
+      return this.config.user;
+    }
+  }
+
+  // Params for the main-thread Reverb client (realtime attribution). Bundles the
+  // public Reverb endpoint (from the public /config) with this agent's base url +
+  // bearer token so the client can run the /broadcasting/auth handshake. The token
+  // is already a client-side credential, so handing it to the UI thread is fine.
+  public async getRealtimeConfig(): Promise<CrmRealtimeConfig | undefined> {
+    if(!(await this.isConnected())) return undefined;
+    try {
+      const result = await this.request<{data: {reverb?: CrmReverbConfig}}>('GET', CRM_ENDPOINTS.config, {auth: false});
+      const reverb = result?.data?.reverb;
+      if(!reverb?.key || !reverb?.host) return undefined;
+      return {baseUrl: this.config.baseUrl, token: this.config.token, reverb};
+    } catch(err) {
+      this.log.error('getRealtimeConfig failed', err);
+      return undefined;
+    }
+  }
+
+  public async disconnect(): Promise<void> {
+    await this.loadPromise;
+    if(this.config.token) {
+      try {
+        await this.request('DELETE', CRM_ENDPOINTS.logout);
+      } catch{}
+    }
+    this.config.token = '';
+    this.config.user = undefined;
+    this.config.enabled = false;
+    await this.persist();
+  }
+
+  // ── 1) FAQ / canned answers ───────────────────────────────────────────────
+  public async getTemplates(): Promise<CrmTemplate[]> {
+    if(!(await this.isConnected())) return [];
+    try {
+      return this.unwrap(await this.request<{data: CrmTemplate[]}>('GET', CRM_ENDPOINTS.templates));
+    } catch(err) {
+      this.log.error('getTemplates failed', err);
+      return [];
+    }
+  }
+
+  public async getFaqs(departmentId?: number): Promise<CrmFaq[]> {
+    if(!(await this.isConnected())) return [];
+    try {
+      return this.unwrap(await this.request<{data: CrmFaq[]}>('GET', CRM_ENDPOINTS.faqs, {
+        query: departmentId ? {department_id: '' + departmentId} : undefined
+      }));
+    } catch(err) {
+      this.log.error('getFaqs failed', err);
+      return [];
+    }
+  }
+
+  // The bytes of a template's attached images (base64 data URIs), fetched lazily
+  // when an image-bearing template is picked so they can be staged in the
+  // send-preview. Served under api/mobile to avoid the cross-origin /storage CORS wall.
+  public async getTemplateImages(templateId: number): Promise<CrmTemplateImage[]> {
+    if(!(await this.isConnected())) return [];
+    try {
+      return this.unwrap(await this.request<{data: CrmTemplateImage[]}>('GET', CRM_ENDPOINTS.templateImages(templateId)));
+    } catch(err) {
+      this.log.error('getTemplateImages failed', err);
+      return [];
+    }
+  }
+
+  // ── 3) Customer context ───────────────────────────────────────────────────
+  public async searchCustomers(q: string): Promise<CrmCustomer[]> {
+    if(!(await this.isConnected()) || (q || '').trim().length < 2) return [];
+    try {
+      return this.unwrap(await this.request<{data: CrmCustomer[]}>('GET', CRM_ENDPOINTS.customersSearch, {
+        query: {q: q.trim()}
+      }));
+    } catch(err) {
+      this.log.error('searchCustomers failed', err);
+      return [];
+    }
+  }
+
+  // ── Ticket lifecycle (open/close) for the chat's customer ─────────────────
+  public async getTicketByTelegram(chatId: string): Promise<CrmTicketLookupResult> {
+    if(!(await this.isConnected()) || !chatId) return {failed: true};
+    try {
+      const result = await this.request<{ticket: CrmTicketRef | null}>('GET', `${CRM_ENDPOINTS.tickets}/by-telegram/${encodeURIComponent(chatId)}`);
+      if(!result?.ticket) return {noTicket: true};
+      return {ticket: result.ticket};
+    } catch(err) {
+      this.log.error('getTicketByTelegram failed', err);
+      return {failed: true, httpStatus: (err as Error & {status?: number})?.status};
+    }
+  }
+
+  // Claim the customer's latest open ticket for THIS agent. Agents share one
+  // department Telegram account, so the userbot can't tell them apart — but each
+  // agent has their own CRM token, and that token is what authenticates this call.
+  // The CRM binds the ticket to this agent (assigned_admin_id), which is what
+  // outbound-message attribution and per-agent reports key off. Fire-and-forget.
+  public async claimTicketByTelegram(chatId: string): Promise<void> {
+    if(!(await this.isConnected()) || !chatId) return;
+    try {
+      await this.request('POST', `${CRM_ENDPOINTS.tickets}/by-telegram/${encodeURIComponent(chatId)}/claim`);
+    } catch(err) {
+      this.log.error('claimTicketByTelegram failed', err);
+    }
+  }
+
+  // Stamp a single outbound message with THIS agent. The agent's CRM token (this
+  // request's auth) identifies them; the Telegram message id ties it to the message
+  // the CRM's userbot independently ingests — so attribution is exact per message,
+  // even when several agents share the department Telegram session. Fire-and-forget.
+  public async attributeOutboundMessage(chatId: string, messageId: number): Promise<void> {
+    if(!(await this.isConnected()) || !chatId || !messageId) return;
+    try {
+      await this.request('POST', `${CRM_ENDPOINTS.tickets}/by-telegram/${encodeURIComponent(chatId)}/attribute`, {
+        body: {message_id: messageId}
+      });
+    } catch(err) {
+      this.log.error('attributeOutboundMessage failed', err);
+    }
+  }
+
+  // Per-message author map for a chat: {<telegram message id>: {admin_id, name}}.
+  // Backfills which agent sent each outbound message so EVERY session — not just
+  // the sender's — can label the bubbles. Pairs with the realtime broadcast for
+  // live messages; this REST call covers history on chat open. Empty on failure
+  // so the caller can render unlabeled rather than break.
+  public async getAttributionsByTelegram(chatId: string): Promise<CrmAttributionMap> {
+    if(!(await this.isConnected()) || !chatId) return {};
+    try {
+      const result = await this.request<{data: CrmAttributionMap}>('GET', `${CRM_ENDPOINTS.tickets}/by-telegram/${encodeURIComponent(chatId)}/attributions`);
+      return result?.data || {};
+    } catch(err) {
+      this.log.error('getAttributionsByTelegram failed', err);
+      return {};
+    }
+  }
+
+  // ── 4) Records: act on an existing ticket ─────────────────────────────────
+  public async sendTicketMessage(ticketId: number, text: string) {
+    return this.request('POST', `${CRM_ENDPOINTS.tickets}/${ticketId}/message`, {body: {text}});
+  }
+
+  public async addTicketNote(ticketId: number, text: string) {
+    return this.request('POST', `${CRM_ENDPOINTS.tickets}/${ticketId}/note`, {body: {text}});
+  }
+
+  public async updateTicketStatus(ticketId: number, status: CrmTicketStatus) {
+    return this.request('PATCH', `${CRM_ENDPOINTS.tickets}/${ticketId}/status`, {body: {status}});
+  }
+}

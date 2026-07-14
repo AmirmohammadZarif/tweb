@@ -1335,6 +1335,15 @@ export default class ChatBubbles {
       }
     });
     attachClickEvent(this.scrollable.container, this.onBubblesClick, {listenerSetter: this.listenerSetter});
+    if(IS_TOUCH_SUPPORTED) {
+      // `attachClickEvent` uses mousedown on touch-capable devices. Web page
+      // previews must wait for click so a long press can start text selection.
+      this.listenerSetter.add(this.scrollable.container)('click', (e) => {
+        if(findUpClassName(e.target, 'webpage')) {
+          this.onBubblesClick(e);
+        }
+      });
+    }
     // this.listenerSetter.add(this.bubblesContainer)('click', this.onBubblesClick/* , {capture: true, passive: false} */);
 
     this.listenerSetter.add(this.scrollable.container)('mousedown', (e) => {
@@ -3480,6 +3489,10 @@ export default class ChatBubbles {
 
     const webPageContainer = findUpClassName(target, 'webpage') as HTMLAnchorElement;
     if(webPageContainer) {
+      if(e.type === 'mousedown') {
+        return;
+      }
+
       if(findUpClassName(target, 'webpage-name-tip')) {
         return;
       }

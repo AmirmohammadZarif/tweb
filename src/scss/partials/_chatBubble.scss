@@ -2708,6 +2708,15 @@
   color: var(--primary-text-color);
   display: block;
 
+  &-content {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  > .c-ripple {
+    pointer-events: none;
+  }
+
   & + .time {
     display: block;
     float: unset;

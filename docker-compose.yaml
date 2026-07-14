@@ -25,5 +25,10 @@ services:
     build:
       context: .
       dockerfile: .docker/Dockerfile_production
-    ports:
-      - 80:80
+    restart: unless-stopped
+    networks:
+      - shared
+
+networks:
+  shared:
+    external: true
