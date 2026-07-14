@@ -1,6 +1,7 @@
 import {JSX, Ref} from 'solid-js';
 import {getDirection} from '@helpers/dom/setInnerHTML';
 import classNames from '@helpers/string/classNames';
+import cancelEvent from '@helpers/dom/cancelEvent';
 import {IconTsx} from '@components/iconTsx';
 import {Ripple} from '@components/rippleTsx';
 import {Dynamic} from 'solid-js/web';
@@ -130,7 +131,17 @@ export default function WebPageBox(props: {
   const ret = (
     <Dynamic
       component={props.clickable ? 'a' : 'div'}
-      ref={props.ref}
+      ref={(el: HTMLAnchorElement) => {
+        // * a click that finishes (or follows) a text selection inside the box
+        // * shouldn't open the link — swallow it before the anchor navigates
+        // * or the delegated bubbles handler fires any callback
+        el.addEventListener('click', (e) => {
+          if(!window.getSelection().isCollapsed) {
+            cancelEvent(e);
+          }
+        }, {capture: true});
+        props.ref?.(el);
+      }}
       draggable={false} // * allow text selection inside the anchor instead of dragging the link
       class={classNames(
         className,

@@ -368,6 +368,11 @@
 }
 
 .popup-crm-login {
+
+  .popup-body{
+    padding: 1rem;
+    max-width: 400px;
+  }
   .popup-crm-login-caption {
     margin: 0 0 1.25rem;
     font-size: var(--font-size-14);

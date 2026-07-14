@@ -61,6 +61,7 @@ import useHasFoldersSidebar, {useIsSidebarCollapsed} from '@stores/foldersSideba
 import appNavigationController from '@components/appNavigationController';
 import {preventCrossTabDynamicImportDeadlock} from '@helpers/preventDeadlock';
 import appChatBackground from '@components/chat/bubbles/chatBackground';
+import {startBootWatchdog, bootProgress, bootSucceeded, onBootStall} from '@helpers/bootWatchdog';
 
 // import commonStateStorage from '@lib/commonStateStorage';
 // import { STATE_INIT } from '@config/state';
@@ -404,7 +405,7 @@ function setDocumentLangPackProperties(langPack: LangPackDifference.langPackDiff
   showIconLibrary();
 };
 
-/* false &&  */document.addEventListener('DOMContentLoaded', async() => {
+const boot = async() => {
   const perf = performance.now();
   randomlyChooseVersionFromSearch();
   setSidebarLeftWidth();
@@ -459,6 +460,7 @@ function setDocumentLangPackProperties(langPack: LangPackDifference.langPackDiff
   // await pause(10000000);
 
   console.timeLog(TIME_LABEL, 'allStates loaded');
+  bootProgress();
 
   // * (2)
   singleInstance.addEventListener('deactivated', onInstanceDeactivated);
@@ -473,6 +475,7 @@ function setDocumentLangPackProperties(langPack: LangPackDifference.langPackDiff
   // * (3)
   await sendAllStatesPromise;
   console.timeLog(TIME_LABEL, 'sent all states (1)');
+  bootProgress();
 
   const setUnreadMessagesText = () => {
     const text = I18n.format('UnreadMessages', true);
@@ -493,6 +496,9 @@ function setDocumentLangPackProperties(langPack: LangPackDifference.langPackDiff
 
   // * (4)
   if(!sendAllStatesPromise) {
+    // instance deactivated (another tab is primary / version bumped): a popup
+    // is shown, this is an intentional exit — not a hang.
+    bootSucceeded();
     return;
   }
 
@@ -500,6 +506,7 @@ function setDocumentLangPackProperties(langPack: LangPackDifference.langPackDiff
   await apiManagerProxy.sendAllStates(allStates);
 
   console.timeLog(TIME_LABEL, 'sent all states (2)');
+  bootProgress();
 
   const [, setHasFoldersSidebar] = useHasFoldersSidebar();
   setHasFoldersSidebar(!!appSettings.tabsInSidebar);
@@ -540,6 +547,7 @@ function setDocumentLangPackProperties(langPack: LangPackDifference.langPackDiff
   await IMAGE_MIME_TYPES_SUPPORTED_PROMISE;
 
   console.timeLog(TIME_LABEL, 'IMAGE_MIME_TYPES_SUPPORTED_PROMISE');
+  bootProgress();
 
   appChatBackground.attach();
   appChatBackground.setBackground({transition: 'instant'});
@@ -568,6 +576,8 @@ function setDocumentLangPackProperties(langPack: LangPackDifference.langPackDiff
         url.searchParams.delete('test');
       }
 
+      // navigating away to toggle test DC — leaving this document.
+      bootSucceeded();
       appNavigationController.navigateToUrl(url.toString());
       return;
     }
@@ -608,6 +618,7 @@ function setDocumentLangPackProperties(langPack: LangPackDifference.langPackDiff
 
     const {mountAuthFlow} = await import('./pages/mountAuthFlow');
     mountAuthFlow(authState);
+    bootSucceeded();
   } else {
     console.log('Will mount IM page:', Date.now() / 1000);
 
@@ -640,5 +651,12 @@ function setDocumentLangPackProperties(langPack: LangPackDifference.langPackDiff
     } else {
       await bootstrapIm();
     }
+
+    bootSucceeded();
   }
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+  startBootWatchdog();
+  boot().catch((err) => onBootStall('error: ' + (err?.message || err)));
 });

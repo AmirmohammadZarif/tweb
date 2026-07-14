@@ -13,6 +13,7 @@ import {
   CrmFaq,
   CrmTemplate,
   CrmTemplateImage,
+  CrmTicketLookupResult,
   CrmTicketRef,
   CrmTicketStatus,
   CrmUser,
@@ -264,14 +265,15 @@ export default class AppCrmManager extends AppManager {
   }
 
   // ── Ticket lifecycle (open/close) for the chat's customer ─────────────────
-  public async getTicketByTelegram(chatId: string): Promise<CrmTicketRef> {
-    if(!(await this.isConnected()) || !chatId) return undefined;
+  public async getTicketByTelegram(chatId: string): Promise<CrmTicketLookupResult> {
+    if(!(await this.isConnected()) || !chatId) return {failed: true};
     try {
-      const result = await this.request<{ticket: CrmTicketRef}>('GET', `${CRM_ENDPOINTS.tickets}/by-telegram/${encodeURIComponent(chatId)}`);
-      return result?.ticket || undefined;
+      const result = await this.request<{ticket: CrmTicketRef | null}>('GET', `${CRM_ENDPOINTS.tickets}/by-telegram/${encodeURIComponent(chatId)}`);
+      if(!result?.ticket) return {noTicket: true};
+      return {ticket: result.ticket};
     } catch(err) {
       this.log.error('getTicketByTelegram failed', err);
-      return undefined;
+      return {failed: true, httpStatus: (err as Error & {status?: number})?.status};
     }
   }
 

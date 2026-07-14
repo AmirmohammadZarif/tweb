@@ -124,6 +124,16 @@ export type CrmTicketRef = {
   events?: CrmTicketEvent[]
 };
 
+/** Outcome of resolving a chat to its CRM ticket — separates "no ticket" from errors. */
+export type CrmTicketLookupResult = {
+  ticket?: CrmTicketRef,
+  /** CRM answered OK but returned ticket: null (no customer / no access / none open). */
+  noTicket?: boolean,
+  /** Network/HTTP failure or CRM not connected — distinct from an empty ticket. */
+  failed?: boolean,
+  httpStatus?: number
+};
+
 // GET /tickets/by-telegram/{chatId}/attributions -> {data: CrmAttributionMap}
 // Per-message author map: <telegram message id> -> {admin_id, name}. Lets every
 // agent session label outbound bubbles with who replied, even though all agents
