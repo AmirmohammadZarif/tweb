@@ -1,29 +1,24 @@
-# Base image
-FROM node:24
+# Build stage
+FROM node:22 AS builder
 
-# Set the working directory in the container
 WORKDIR /app
 
-# copy src
-COPY .. .
+COPY . .
 
-# install pnpm
 RUN npm install -g pnpm
 
-# install initial depenancies
 RUN pnpm install
 
-# install production depencancies
-RUN pnpm install --production
+RUN pnpm build
 
-# build
-RUN node build
+# Replicate build.js onCompiled(): merge compiled dist/ on top of public/,
+# which already holds the static assets (assets/, manifests, wasm, workers).
+# The served root is public/, exactly as the upstream deploy expects.
+RUN cp -r /app/dist/. /app/public/
 
-
-#pull nginx as webser and load balancer
+# Serve stage
 FROM nginx:stable-alpine3.20-slim
 
 RUN apk update && apk upgrade --no-cache
 
-# copy the build files to nginx entry point
-COPY ./public /usr/share/nginx/html
+COPY --from=builder /app/public /usr/share/nginx/html
