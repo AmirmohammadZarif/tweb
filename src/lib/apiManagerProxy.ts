@@ -707,30 +707,40 @@ class ApiManagerProxy extends MTProtoMessagePort {
       this.log('SW registered', registration);
       this.serviceWorkerRegistration = registration;
 
+      // Belt-and-suspenders with the SW activate handler: enabling
+      // NavigationPreload opts the origin out of Chrome's
+      // ServiceWorkerAutoPreload (Android cold-start blank pages).
+      registration.navigationPreload?.enable().catch((err) => {
+        this.log.error('navigationPreload.enable failed', err);
+      });
+
       const url = new URL(window.location.href);
       const FIX_KEY = 'swfix';
       const swfix = +url.searchParams.get(FIX_KEY) || 0;
+      // Uncontrolled document with an already-active worker: common after a
+      // hard refresh, and also after long idle / PWA relaunch when claim has
+      // not landed yet. Wait for clients.claim() first.
+      //
+      // If claim never arrives, soft-reload so the *existing* active worker
+      // can control the next navigation. Do NOT unregister here — that forces
+      // a reinstall race (active disappears, new install, claim async) which
+      // re-triggers this branch, drives ?swfix=N, and can leave the app on a
+      // white screen after login / overnight relaunch (PWA and Chrome).
       if(registration.active && !navigator.serviceWorker.controller) {
-        // The page is loaded uncontrolled (typically after a hard refresh).
-        // The active worker calls clients.claim(), so wait briefly for the
-        // controller to arrive via 'controllerchange' before resorting to the
-        // unregister + reload hack below.
         const controller = await this.waitForController(1500).catch((): ServiceWorker => undefined);
         if(!controller) {
-          if(swfix >= 3) {
-            // Registration succeeded, but this page can't be controlled (common
-            // after a force-reload). Give up quietly instead of throwing: don't
-            // spam an error, just mark the SW offline so streaming falls back.
-            this.log.warn('no controller after', swfix, 'attempts, giving up');
-            this.invokeVoid('serviceWorkerOnline', false);
+          if(swfix < 3) {
+            url.searchParams.set(FIX_KEY, '' + (swfix + 1));
+            appNavigationController.navigateToUrl(url.toString());
             return;
           }
 
-          // ! doubtful fix for hard refresh
-          return registration.unregister().then(() => {
-            url.searchParams.set(FIX_KEY, '' + (swfix + 1));
-            appNavigationController.navigateToUrl(url.toString());
-          });
+          // Give up on becoming controlled (force-reload often cannot be
+          // claimed). Keep the active worker attached for push/ports; mark
+          // fetch-based streaming offline. Fall through — never return early
+          // without attach, and never leave ?swfix stuck in the URL.
+          this.log.warn('no controller after', swfix, 'attempts, giving up');
+          this.invokeVoid('serviceWorkerOnline', false);
         }
       }
 

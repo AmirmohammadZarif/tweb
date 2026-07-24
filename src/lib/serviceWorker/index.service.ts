@@ -351,13 +351,57 @@ const onChangeState = () => {
 
 ctx.addEventListener('install', (event) => {
   log('installing');
+
+  // Opt out of Chrome's ServiceWorkerAutoPreload. On Android Chrome / PWA cold
+  // starts (SW killed overnight), AutoPreload races the navigation with SW
+  // bootstrap and has shipped blank/white documents. Registering a catch-all
+  // static route to the fetch handler is the documented opt-out
+  // (WICG/service-worker-auto-preload). Also: send document navigations
+  // straight to the network — this SW never respondWith()'s HTML, and share
+  // targets stay on fetch-event because they are POST.
+  try {
+    const installEvent = event as ExtendableEvent & {
+      addRoutes?: (rules: any) => void
+    };
+    if(typeof installEvent.addRoutes === 'function' && typeof URLPattern !== 'undefined') {
+      installEvent.addRoutes([
+        {
+          condition: {
+            requestMode: 'navigate',
+            requestMethod: 'get',
+            urlPattern: new URLPattern({pathname: '/**'}, ctx.location.origin)
+          },
+          source: 'network'
+        },
+        {
+          condition: {urlPattern: new URLPattern({})},
+          source: 'fetch-event'
+        }
+      ]);
+      log('static routes registered (AutoPreload opt-out)');
+    }
+  } catch(err) {
+    log.error('addRoutes failed', err);
+  }
+
   event.waitUntil(ctx.skipWaiting().then(() => log('skipped waiting'))); // Activate worker immediately
 });
 
 ctx.addEventListener('activate', (event) => {
   log('activating', ctx);
   event.waitUntil(ctx.caches.delete(CACHE_ASSETS_NAME).then(() => log('cleared assets cache')));
-  event.waitUntil(ctx.clients.claim().then(() => log('claimed clients')));
+  event.waitUntil((async() => {
+    await ctx.clients.claim();
+    log('claimed clients');
+    // Second AutoPreload opt-out: NavigationPreload enabled → Chrome skips
+    // ServiceWorkerAutoPreload. We don't consume preloadResponse for HTML
+    // (navigations go network via static routes / default fallback).
+    try {
+      await ctx.registration.navigationPreload?.enable();
+    } catch(err) {
+      log.error('navigationPreload.enable failed', err);
+    }
+  })());
 });
 
 // ctx.onerror = (error) => {
