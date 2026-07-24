@@ -363,18 +363,20 @@ ctx.addEventListener('install', (event) => {
     const installEvent = event as ExtendableEvent & {
       addRoutes?: (rules: any) => void
     };
-    if(typeof installEvent.addRoutes === 'function' && typeof URLPattern !== 'undefined') {
+    // URLPattern is not in our TS lib DOM typings yet; resolve from globalThis.
+    const URLPatternCtor = (globalThis as any).URLPattern as (new(...args: any[]) => any) | undefined;
+    if(typeof installEvent.addRoutes === 'function' && URLPatternCtor) {
       installEvent.addRoutes([
         {
           condition: {
             requestMode: 'navigate',
             requestMethod: 'get',
-            urlPattern: new URLPattern({pathname: '/**'}, ctx.location.origin)
+            urlPattern: new URLPatternCtor({pathname: '/**'}, ctx.location.origin)
           },
           source: 'network'
         },
         {
-          condition: {urlPattern: new URLPattern({})},
+          condition: {urlPattern: new URLPatternCtor({})},
           source: 'fetch-event'
         }
       ]);
