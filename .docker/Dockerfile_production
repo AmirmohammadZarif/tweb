@@ -21,4 +21,8 @@ FROM nginx:stable-alpine3.20-slim
 
 RUN apk update && apk upgrade --no-cache
 
+# Custom server config: never heuristically cache index.html / sw.js (prevents
+# the stale-HTML white screen after a redeploy), cache hashed assets forever.
+COPY .docker/nginx.conf /etc/nginx/conf.d/default.conf
+
 COPY --from=builder /app/public /usr/share/nginx/html
