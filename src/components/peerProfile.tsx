@@ -902,8 +902,10 @@ PeerProfile.Bio = () => {
   const {i18n, PopupPremium, HotReloadGuard, I18n, wrapRichText, toast} = useHotReloadGuard();
   const appConfig = useAppConfig();
   const peerTranslation = usePeerTranslation(context.peerId);
+  const isCrmSuperAdmin = useIsCrmSuperAdmin();
 
-  const about = createMemo(() => context.fullPeer?.about);
+  // Bio is CRM-superadmin-only: regular agents must not see a customer's bio.
+  const about = createMemo(() => isCrmSuperAdmin() ? context.fullPeer?.about : undefined);
   const bioLanguagePromise = createMemo(() => detectLanguageForTranslation(about()));
 
   const aboutWrapped = createMemo(() => {
@@ -1339,6 +1341,7 @@ PeerProfile.StoryPreviews = (props: {
 }) => {
   const {rootScope} = useHotReloadGuard();
   const context = useContext(PeerProfileContext);
+  const isCrmSuperAdmin = useIsCrmSuperAdmin();
   const MAX_PREVIEWS = 3;
   const CIRCLE_SIZE = 36;
 
@@ -1446,7 +1449,8 @@ PeerProfile.StoryPreviews = (props: {
 
   return (
     <div class="profile-story-previews-container">
-      <Show when={context.peerId !== rootScope.myId}>
+      {/* Stories are CRM-superadmin-only: regular agents must not see a customer's stories. */}
+      <Show when={context.peerId !== rootScope.myId && isCrmSuperAdmin()}>
         <StoriesProvider needUpdates peerId={context.peerId}>
           <StoryPreviewsInner />
         </StoriesProvider>

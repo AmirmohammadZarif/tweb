@@ -397,6 +397,9 @@ export default class ChatTopbar {
   };
 
   private verifyCallButton = async(type?: CallType) => {
+    // Calls are CRM-superadmin-only: regular agents share the support account
+    // and must not place voice/video calls from it.
+    if(!useIsCrmSuperAdmin()()) return false;
     if(!IS_CALL_SUPPORTED || !this.peerId.isUser() || this.chat.type !== ChatType.Chat) return false;
     const userId = this.peerId.toUserId();
     const userFull = await this.managers.appProfileManager.getCachedFullUser(userId);
@@ -405,6 +408,10 @@ export default class ChatTopbar {
   };
 
   private verifyIfCanDeleteChat = async() => {
+    // Deleting a chat is CRM-superadmin-only: regular agents must not wipe
+    // conversation history from the shared support account.
+    if(!useIsCrmSuperAdmin()()) return false;
+
     if(this.chat.isMonoforum) {
       const chat = this.chat.peer;
       return chat?._ === 'channel' && !chat?.pFlags?.creator && !chat?.pFlags?.left;
@@ -423,7 +430,9 @@ export default class ChatTopbar {
       options: {
         text: 'AutoDeleteMessagesShort',
         separatorDown: true,
-        verify: this.chat.canManageAutoDelete
+        // Auto-delete is CRM-superadmin-only: regular agents must not change
+        // the shared support account's message-destruction timer.
+        verify: () => useIsCrmSuperAdmin()() && this.chat.canManageAutoDelete()
       },
       createSubmenu: this.createAutoDeleteSubmenu.bind(this),
       direction: 'left-start'

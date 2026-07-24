@@ -1,4 +1,4 @@
-import {createSignal, For, onMount, Show} from 'solid-js';
+import {createEffect, createMemo, createSignal, For, onMount, Show} from 'solid-js';
 import ButtonMenuToggle from '@components/buttonMenuToggle';
 import {AppPrivacyAndSecurityTab} from '@components/solidJsTabs/tabs';
 import {AppChatFoldersTab} from '@components/solidJsTabs/tabs';
@@ -86,6 +86,10 @@ const Settings = () => {
   const promiseCollector = usePromiseCollector();
   const [tab] = useSuperTab();
 
+  // Regular agents share the support account; profile-editing, privacy and
+  // active-session controls are CRM-superadmin-only (fails closed by default).
+  const isCrmSuperAdmin = useIsCrmSuperAdmin();
+
   // ── Header (qr + edit + overflow menu)
   const qrBtn = ButtonIcon('qr');
   const editBtn = ButtonIcon('edit');
@@ -102,6 +106,11 @@ const Settings = () => {
   onMount(() => {
     tab.container.classList.add('settings-container');
     tab.header.append(qrBtn, editBtn, btnMenu);
+  });
+
+  // Editing the (shared) profile is CRM-superadmin-only.
+  createEffect(() => {
+    editBtn.classList.toggle('hide', !isCrmSuperAdmin());
   });
 
   attachClickEvent(qrBtn, () => {
@@ -125,17 +134,19 @@ const Settings = () => {
   });
 
   // ── Sub-tab rows (notifications/data/privacy/general/folders/stickers).
-  const subTabConfigs: SubTabConfig[] = [
+  //    Privacy and Security is CRM-superadmin-only — regular agents must not
+  //    touch the shared support account's privacy policy.
+  const subTabConfigs = createMemo<SubTabConfig[]>(() => [
     makeSubTabConfig('unmute', 'AccountSettings.Notifications', AppNotificationsTab, tab),
     makeSubTabConfig('data', 'DataSettings', AppDataAndStorageTab, tab),
-    makeSubTabConfig('lock', 'AccountSettings.PrivacyAndSecurity', AppPrivacyAndSecurityTab, tab),
+    isCrmSuperAdmin() && makeSubTabConfig('lock', 'AccountSettings.PrivacyAndSecurity', AppPrivacyAndSecurityTab, tab),
     makeSubTabConfig('settings', 'Telegram.GeneralSettingsViewController', AppGeneralSettingsTab, tab),
     makeSubTabConfig('folder', 'AccountSettings.Filters', AppChatFoldersTab, tab),
     makeSubTabConfig('stickers_face', 'StickersName', AppStickersAndEmojiTab, tab),
     makeSubTabConfig('statistics', 'AgentMetrics.Title', AppAgentMetricsTab, tab),
     makeSubTabConfig('list', 'QuickReplies.Title', AppQuickRepliesTab, tab),
     makeSubTabConfig('videocamera', 'AccountSettings.SpeakersAndCamera', AppSpeakersAndCameraTab, tab)
-  ];
+  ].filter(Boolean) as SubTabConfig[]);
 
   const onSubTabClick = (item: SubTabConfig) => async() => {
     const args = item.args ? await item.args : [];
@@ -176,8 +187,7 @@ const Settings = () => {
   };
 
   // Active sessions are CRM-superadmin-only: regular agents share the support
-  // account and must not see (or kill) its sessions.
-  const isCrmSuperAdmin = useIsCrmSuperAdmin();
+  // account and must not see (or kill) its sessions (see `isCrmSuperAdmin` above).
 
   // Fire-and-forget: `account.getAuthorizations` is a real MTProto roundtrip
   // every time (no caching). Letting the device count fill in via the
@@ -246,7 +256,7 @@ const Settings = () => {
       {peerProfileElement}
       <Section>
         <div class="profile-buttons">
-          <For each={subTabConfigs}>
+          <For each={subTabConfigs()}>
             {(item) => (
               <Row clickable={onSubTabClick(item)}>
                 <Row.Icon icon={item.icon} />
