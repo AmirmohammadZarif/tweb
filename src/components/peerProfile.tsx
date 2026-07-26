@@ -19,7 +19,10 @@ import anchorCopy from '@helpers/dom/anchorCopy';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
 import getPeerActiveUsernames from '@appManagers/utils/peers/getPeerActiveUsernames';
 import {useAppConfig} from '@stores/appState';
-import useIsCrmSuperAdmin from '@stores/crmRole';
+import useIsCrmSuperAdmin, {useIsCrmLoggedIn} from '@stores/crmRole';
+import {useContactInfoApproved} from '@stores/crmSensitiveReveals';
+import {triggerSensitiveReveal} from '@lib/crm/triggerReveal';
+import {CONTACT_INFO_MID} from '@lib/crm/types';
 import detectLanguageForTranslation from '@helpers/detectLanguageForTranslation';
 import usePeerTranslation from '@hooks/usePeerTranslation';
 import makeGoogleMapsUrl from '@helpers/makeGoogleMapsUrl';
@@ -634,17 +637,21 @@ PeerProfile.Phone = () => {
   const {I18n, i18n, toast} = useHotReloadGuard();
   const appConfig = useAppConfig();
   const isCrmSuperAdmin = useIsCrmSuperAdmin();
+  const isCrmLoggedIn = useIsCrmLoggedIn();
+  const contactApproved = useContactInfoApproved(context.peerId);
+
+  // Superadmins always see contact info; a regular agent sees it only after a
+  // reveal is approved (or self-approved with a reason when approval is off).
+  const canSeeReal = createMemo(() => isCrmSuperAdmin() || contactApproved());
+
+  const rawPhone = createMemo(() => {
+    if(!context.peerId.isUser() || !context.canBeDetailed()) return;
+    return (context.peer as User.user).phone;
+  });
 
   const phoneDetails = createMemo(() => {
-    // Phone numbers are CRM-superadmin-only.
-    if(!isCrmSuperAdmin() || !context.peerId.isUser() || !context.canBeDetailed()) {
-      return;
-    }
-
-    const phone = (context.peer as User.user).phone;
-    if(!phone) {
-      return;
-    }
+    const phone = rawPhone();
+    if(!canSeeReal() || !phone) return;
 
     return {
       phone,
@@ -653,41 +660,54 @@ PeerProfile.Phone = () => {
     };
   });
 
+  // Locked placeholder: there's a phone but this agent can't see it yet. Never
+  // renders the number itself, so it stays out of the DOM until revealed.
+  const showLocked = createMemo(() => !canSeeReal() && isCrmLoggedIn() && !!rawPhone());
+
   const copyPhoneNumber = () => {
     copyTextToClipboard(phoneDetails().formatted.replace(/\s/g, ''));
     toast(I18n.format('PhoneCopied', true));
   };
 
   return (
-    <Show when={!!phoneDetails()?.phone}>
-      <Row
-        clickable={copyPhoneNumber}
-        contextMenu={{
-          buttons: [{
-            icon: 'copy',
-            text: 'Text.CopyLabel_PhoneNumber',
-            onClick: copyPhoneNumber
-          }, {
-            icon: 'info',
-            text: 'PeerInfo.Phone.AnonymousInfo',
-            textArgs: [(() => {
-              const a = document.createElement('a');
-              return a;
-            })()],
-            onClick: () => {
-              safeWindowOpen('https://fragment.com/numbers');
-            },
-            separator: true,
-            secondary: true,
-            verify: () => phoneDetails().isAnonymous
-          }]
-        }}
-      >
-        <Row.Icon icon="phone" />
-        <Row.Title>{phoneDetails().formatted}</Row.Title>
-        <Row.Subtitle>{i18n(phoneDetails().isAnonymous ? 'AnonymousNumber' : 'Phone')}</Row.Subtitle>
-      </Row>
-    </Show>
+    <>
+      <Show when={!!phoneDetails()?.phone}>
+        <Row
+          clickable={copyPhoneNumber}
+          contextMenu={{
+            buttons: [{
+              icon: 'copy',
+              text: 'Text.CopyLabel_PhoneNumber',
+              onClick: copyPhoneNumber
+            }, {
+              icon: 'info',
+              text: 'PeerInfo.Phone.AnonymousInfo',
+              textArgs: [(() => {
+                const a = document.createElement('a');
+                return a;
+              })()],
+              onClick: () => {
+                safeWindowOpen('https://fragment.com/numbers');
+              },
+              separator: true,
+              secondary: true,
+              verify: () => phoneDetails().isAnonymous
+            }]
+          }}
+        >
+          <Row.Icon icon="phone" />
+          <Row.Title>{phoneDetails().formatted}</Row.Title>
+          <Row.Subtitle>{i18n(phoneDetails().isAnonymous ? 'AnonymousNumber' : 'Phone')}</Row.Subtitle>
+        </Row>
+      </Show>
+      <Show when={showLocked()}>
+        <Row clickable={() => triggerSensitiveReveal(context.peerId, CONTACT_INFO_MID, formatUserPhone(rawPhone()))}>
+          <Row.Icon icon="lock" />
+          <Row.Title>{i18n('Crm.Sensitive.Hidden')}</Row.Title>
+          <Row.Subtitle>{i18n('Phone')}</Row.Subtitle>
+        </Row>
+      </Show>
+    </>
   );
 };
 
@@ -695,19 +715,19 @@ PeerProfile.Username = () => {
   const context = useContext(PeerProfileContext);
   const {I18n, i18n, toast, showMyQrCodePopup, rootScope} = useHotReloadGuard();
   const isCrmSuperAdmin = useIsCrmSuperAdmin();
-  const usernames = createMemo(() => {
-    if(!context.peerId.isUser() || !context.canBeDetailed()) {
-      return;
-    }
+  const isCrmLoggedIn = useIsCrmLoggedIn();
+  const contactApproved = useContactInfoApproved(context.peerId);
 
-    // Customer usernames are CRM-superadmin-only, like their phone numbers
-    // (bots stay visible). Hiding the row also hides the QR-code button.
-    if(!isCrmSuperAdmin() && !(context.peer as User.user).pFlags?.bot) {
-      return;
-    }
+  const isUser = createMemo(() => context.peerId.isUser() && context.canBeDetailed());
+  const isBot = createMemo(() => (context.peer as User.user)?.pFlags?.bot);
+  // Customer usernames are gated like phone numbers (bots stay visible);
+  // superadmins, or agents with an approved reveal, see the real handle.
+  const canSeeReal = createMemo(() => isBot() || isCrmSuperAdmin() || contactApproved());
 
-    return getPeerActiveUsernames(context.peer as User.user);
-  });
+  const rawUsernames = createMemo(() => isUser() ? getPeerActiveUsernames(context.peer as User.user) : undefined);
+  const usernames = createMemo(() => canSeeReal() ? rawUsernames() : undefined);
+
+  const showLocked = createMemo(() => !canSeeReal() && isCrmLoggedIn() && !!rawUsernames()?.length);
 
   const mainUsername = createMemo(() => usernames()?.[0]);
 
@@ -717,25 +737,34 @@ PeerProfile.Username = () => {
   };
 
   return (
-    <Show when={usernames()?.length}>
-      <Row
-        clickable={onClick}
-        contextMenu={{
-          buttons: [{
-            icon: 'copy',
-            text: 'Text.CopyLabel_Username',
-            onClick: onClick
-          }]
-        }}
-      >
-        <Row.Icon icon="username" />
-        <Row.Title>{mainUsername()}</Row.Title>
-        <Row.Subtitle>{
-          getUsernamesAlso(usernames()) || i18n('Username')
-        }</Row.Subtitle>
-        <PeerProfile.QrButton />
-      </Row>
-    </Show>
+    <>
+      <Show when={usernames()?.length}>
+        <Row
+          clickable={onClick}
+          contextMenu={{
+            buttons: [{
+              icon: 'copy',
+              text: 'Text.CopyLabel_Username',
+              onClick: onClick
+            }]
+          }}
+        >
+          <Row.Icon icon="username" />
+          <Row.Title>{mainUsername()}</Row.Title>
+          <Row.Subtitle>{
+            getUsernamesAlso(usernames()) || i18n('Username')
+          }</Row.Subtitle>
+          <PeerProfile.QrButton />
+        </Row>
+      </Show>
+      <Show when={showLocked()}>
+        <Row clickable={() => triggerSensitiveReveal(context.peerId, CONTACT_INFO_MID, '@' + (rawUsernames()?.[0] ?? ''))}>
+          <Row.Icon icon="lock" />
+          <Row.Title>{i18n('Crm.Sensitive.Hidden')}</Row.Title>
+          <Row.Subtitle>{i18n('Username')}</Row.Subtitle>
+        </Row>
+      </Show>
+    </>
   );
 };
 

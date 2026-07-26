@@ -9,7 +9,7 @@ import rootScope from '@lib/rootScope';
 import Chat from '@components/chat/chat';
 import type ChatTopbar from '@components/chat/topbar';
 import TopbarPlate, {createTopbarPlate, TopbarPlateController} from '@components/chat/topbarPlate';
-import {CrmTicketEvent, CrmTicketRef} from '@lib/crm/types';
+import {CrmNote, CrmTicketEvent, CrmTicketRef} from '@lib/crm/types';
 import crmRealtime from '@lib/crm/crmRealtime';
 import {showCrmLoginIfNeeded} from '@components/popups/crmLogin';
 import {toastNew} from '@components/toast';
@@ -30,7 +30,14 @@ export type ChatCrmTicketPlate = TopbarPlateController & {
   /** The currently loaded ticket for this peer (cached signal), or undefined. */
   getTicket: () => CrmTicketRef | undefined,
   /** Close the current open ticket. No-op unless there is an open ticket. */
-  close: () => Promise<void>
+  close: () => Promise<void>,
+  /** Internal notes for the current chat's ticket (cached signal). */
+  getNotes: () => CrmNote[],
+  /** Whether the chat has a ticket notes can attach to (a note can be added). */
+  hasTicketForNotes: () => boolean,
+  /** Add an internal note to the current chat's ticket. Resolves to the created
+   * note, or undefined on failure (a toast is shown). */
+  addNote: (text: string) => Promise<CrmNote | undefined>
 };
 
 function CrmTicketPlateBody(props: {
@@ -117,6 +124,9 @@ export default function createChatCrmTicketPlate(
   const [loadState, setLoadState] = createSignal<LoadState>('idle');
   const [busy, setBusy] = createSignal(false);
   const [reconnectNeeded, setReconnectNeeded] = createSignal(false);
+  const [notes, setNotes] = createSignal<CrmNote[]>([]);
+  // ticket id the notes attach to (from getNotesByTelegram); null = no ticket.
+  let notesTicketId: number | null = null;
 
   // Token to discard responses for a peer the user already navigated away from.
   let currentPeerId: PeerId;
@@ -257,16 +267,93 @@ export default function createChatCrmTicketPlate(
     });
   };
 
+  // Sensitive-message reveal state: which blurred messages THIS agent may see,
+  // plus pending requests for superadmins. Backfill on chat open; the Reverb
+  // push (subscribed alongside attributions) keeps it live.
+  const loadSensitiveReveals = (peerId: PeerId) => {
+    if(!peerId?.isUser()) {
+      rootScope.dispatchEvent('crm_sensitive_reveals_update', {peerId, state: {approved: [], pending: []}});
+      return;
+    }
+
+    managers.appCrmManager.isConnected().then((connected) => {
+      if(peerId !== currentPeerId || !connected) return;
+      managers.appCrmManager.getSensitiveReveals('' + peerId.toUserId()).then((state) => {
+        if(peerId !== currentPeerId) return;
+        rootScope.dispatchEvent('crm_sensitive_reveals_update', {peerId, state});
+      });
+    });
+  };
+
+  // Internal agent notes for the chat: backfill on chat open; the Reverb push
+  // (subscribed alongside attributions) delivers a colleague's note live.
+  const applyNotes = (peerId: PeerId, list: CrmNote[]) => {
+    if(peerId !== currentPeerId) return;
+    setNotes(list);
+    rootScope.dispatchEvent('crm_notes_update', {peerId, notes: list});
+  };
+
+  const loadNotes = (peerId: PeerId) => {
+    if(!peerId?.isUser()) {
+      notesTicketId = null;
+      applyNotes(peerId, []);
+      return;
+    }
+
+    managers.appCrmManager.isConnected().then((connected) => {
+      if(peerId !== currentPeerId || !connected) return;
+      managers.appCrmManager.getNotesByTelegram('' + peerId.toUserId()).then((result) => {
+        if(peerId !== currentPeerId) return;
+        notesTicketId = result.ticketId;
+        applyNotes(peerId, result.notes);
+      });
+    });
+  };
+
+  // Merge a single live/optimistic note, dropping any existing row with the same
+  // id (the local optimistic append races the Reverb echo of our own note) and
+  // keeping the list ordered by creation time.
+  const mergeNote = (peerId: PeerId, note: CrmNote) => {
+    if(peerId !== currentPeerId || !note?.id) return;
+    const next = notes().filter((n) => n.id !== note.id);
+    next.push(note);
+    next.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    applyNotes(peerId, next);
+  };
+
+  const addNote = async(text: string): Promise<CrmNote | undefined> => {
+    const value = (text || '').trim();
+    const peerId = currentPeerId;
+    if(!value || !peerId?.isUser()) return undefined;
+    try {
+      const note = await managers.appCrmManager.addNoteByTelegram('' + peerId.toUserId(), value);
+      if(!note) {
+        toastNew({langPackKey: 'Crm.Note.NoTicket'});
+        return undefined;
+      }
+      mergeNote(peerId, note);
+      return note;
+    } catch(err) {
+      const status = (err as Error & {status?: number})?.status;
+      toastNew({langPackKey: status === 404 ? 'Crm.Note.NoTicket' : 'Crm.Note.AddFailed'});
+      return undefined;
+    }
+  };
+
   let claimedTicketId: number;
 
   const setPeerId = (peerId: PeerId) => {
     currentPeerId = peerId;
     claimedTicketId = undefined;
+    notesTicketId = null;
+    setNotes([]);
     loadGeneration++;
     hide();
     load(peerId);
     scheduleFollowUpLoad(peerId);
     loadAttributions(peerId);
+    loadSensitiveReveals(peerId);
+    loadNotes(peerId);
   };
 
   const maybeClaim = (peerId: PeerId) => {
@@ -288,7 +375,13 @@ export default function createChatCrmTicketPlate(
   const refresh = debounce(() => {
     load(currentPeerId);
     loadAttributions(currentPeerId);
+    loadSensitiveReveals(currentPeerId);
+    loadNotes(currentPeerId);
   }, 800, false, true);
+
+  const onNotePush = ({peerId, note}: {peerId: PeerId, note: CrmNote}) => {
+    mergeNote(peerId, note);
+  };
 
   const onChatMessage = (payload: MyMessage | {message: MyMessage}) => {
     const message = (payload as {message: MyMessage})?.message ?? (payload as MyMessage);
@@ -315,6 +408,8 @@ export default function createChatCrmTicketPlate(
     load(currentPeerId);
     scheduleFollowUpLoad(currentPeerId);
     loadAttributions(currentPeerId);
+    loadSensitiveReveals(currentPeerId);
+    loadNotes(currentPeerId);
   };
 
   rootScope.addEventListener('history_multiappend', onChatMessage);
@@ -322,6 +417,7 @@ export default function createChatCrmTicketPlate(
   rootScope.addEventListener('message_sent', onMessageSent);
   rootScope.addEventListener('crm_auth_required', onAuthRequired);
   rootScope.addEventListener('crm_config_update', onConfigUpdate);
+  rootScope.addEventListener('crm_note_push', onNotePush);
 
   const closeTicket = async() => {
     const current = ticket();
@@ -349,12 +445,16 @@ export default function createChatCrmTicketPlate(
     hide,
     getTicket: () => ticket(),
     close: () => closeTicket(),
+    getNotes: () => notes(),
+    hasTicketForNotes: () => notesTicketId != null || ticket()?.status === 'open',
+    addNote,
     destroy: () => {
       rootScope.removeEventListener('history_multiappend', onChatMessage);
       rootScope.removeEventListener('message_sent', onChatMessage);
       rootScope.removeEventListener('message_sent', onMessageSent);
       rootScope.removeEventListener('crm_auth_required', onAuthRequired);
       rootScope.removeEventListener('crm_config_update', onConfigUpdate);
+      rootScope.removeEventListener('crm_note_push', onNotePush);
       crmRealtime.leave();
       plate.destroy();
     }

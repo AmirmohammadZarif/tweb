@@ -18,7 +18,12 @@ export type CrmConfig = {
   enabled: boolean,
   baseUrl: string, // e.g. https://andropay.xyzlocalhost:8000
   token: string,
-  user?: CrmUser
+  user?: CrmUser,
+  // Global setting from GET /config: whether revealing sensitive content needs
+  // super-admin approval (true) or the agent may self-reveal with a logged reason
+  // (false). Cached with the config; refreshed by AppCrmManager.refreshMe.
+  // Defaults to true (fail-safe) until the first /config fetch lands.
+  requireSensitiveApproval?: boolean
 };
 
 // Production CRM. Agents connect to this by default; the base-url field is
@@ -44,8 +49,51 @@ export const CRM_ENDPOINTS = {
   faqs: '/faqs',
   agents: '/agents',
   customersSearch: '/customers/search',
-  tickets: '/tickets'
+  tickets: '/tickets',
+  // Internal agent-only notes for a chat (keyed by the customer's telegram chat
+  // id, like attributions). See CrmNote.
+  notes: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/notes`,
+  addNote: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/note`,
+  // Sensitive-message reveal workflow (all keyed by the customer's telegram
+  // chat id, like attributions). See CrmSensitiveRevealState.
+  sensitiveReveals: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/sensitive-reveals`,
+  sensitiveRevealRequest: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/sensitive-reveals/request`,
+  sensitiveRevealApprove: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/sensitive-reveals/approve`
 };
+
+// ── Sensitive-message reveal workflow ────────────────────────────────────────
+// Agents share one department Telegram account and must not casually read a
+// customer's financial/identity details. The client blurs any message it
+// detects as sensitive (see @lib/crm/sensitiveContent); a CRM-superadmin then
+// approves the reveal per requesting agent. Approvals reach every open session
+// live over Reverb and are backfilled on chat open via GET sensitiveReveals.
+
+// GET /tickets/by-telegram/{chatId}/sensitive-reveals -> {data: CrmSensitiveRevealState}
+export type CrmSensitiveRevealState = {
+  // Telegram message ids this agent is allowed to see in the clear.
+  approved: number[],
+  // Outstanding requests, surfaced to superadmins so they can approve.
+  pending: CrmSensitiveRequest[]
+};
+
+export type CrmSensitiveRequest = {
+  message_id: number,
+  requested_by: number, // CRM admin id of the agent who asked
+  name: string
+};
+
+// Reverb (Pusher protocol) channel + events for the reveal workflow, mirroring
+// the attribution channel. The backend broadcasts on the private per-peer
+// channel; the client dispatches rootScope events off these.
+export const CRM_SENSITIVE_CHANNEL = (chatId: string) => 'private-sensitive.peer.' + chatId;
+export const CRM_SENSITIVE_REQUESTED_EVENT = 'sensitive.reveal.requested';
+export const CRM_SENSITIVE_APPROVED_EVENT = 'sensitive.reveal.approved';
+
+// Reserved pseudo message-id for a peer's CONTACT INFO (phone + username) in the
+// reveal workflow — real Telegram message ids are >= 1, so 0 never collides with
+// a message. A regular agent requests it like any message; approving it reveals
+// the contact rows in the peer profile.
+export const CONTACT_INFO_MID = 0;
 
 // GET /config -> {data: {... , reverb: CrmReverbConfig}}. The public Reverb
 // endpoint tweb opens a WebSocket to for realtime per-message attribution. The
@@ -144,3 +192,30 @@ export type CrmMessageAttribution = {
 };
 
 export type CrmAttributionMap = Record<string, CrmMessageAttribution>;
+
+// ── Internal agent notes ─────────────────────────────────────────────────────
+// Agents share one department Telegram account, so an internal note is how they
+// hand context to a colleague from inside the conversation. Notes are agent-only
+// (never sent to the customer): backfilled on chat open via GET notes, pushed
+// live over Reverb (note.added), rendered both inline in the timeline and in a
+// dedicated notes panel.
+
+// GET /tickets/by-telegram/{chatId}/notes -> {data: {ticket_id, notes: CrmNote[]}}
+export type CrmNote = {
+  id: number,
+  text: string,
+  author_id: number | null,
+  author_name: string,
+  created_at: string // ISO8601
+};
+
+export type CrmNotesResult = {
+  ticketId: number | null,
+  notes: CrmNote[]
+};
+
+// Reverb (Pusher protocol) channel + event for live note hand-off, mirroring the
+// attribution channel. The backend broadcasts on the private per-peer channel;
+// the client turns each push into a `crm_note_push` rootScope event.
+export const CRM_NOTES_CHANNEL = (chatId: string) => 'private-notes.peer.' + chatId;
+export const CRM_NOTE_ADDED_EVENT = 'note.added';

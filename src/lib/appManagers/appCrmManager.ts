@@ -11,12 +11,15 @@ import {
   CrmReverbConfig,
   CrmCustomer,
   CrmFaq,
+  CrmNote,
+  CrmNotesResult,
   CrmTemplate,
   CrmTemplateImage,
   CrmTicketLookupResult,
   CrmTicketRef,
   CrmTicketStatus,
   CrmUser,
+  CrmSensitiveRevealState,
   EMPTY_CRM_CONFIG
 } from '@lib/crm/types';
 
@@ -177,6 +180,14 @@ export default class AppCrmManager extends AppManager {
     try {
       const user = await this.me();
       this.config.user = {...this.config.user, ...user};
+      // Refresh the global reveal-approval setting from the public /config in the
+      // same app-start pass. Default true (fail-safe) if the fetch/field is absent.
+      try {
+        const mobileConfig = await this.request<{data?: {sensitive_reveal_require_approval?: boolean}}>('GET', CRM_ENDPOINTS.config, {auth: false});
+        this.config.requireSensitiveApproval = mobileConfig?.data?.sensitive_reveal_require_approval ?? true;
+      } catch(configErr) {
+        this.log.error('refreshMe config fetch failed', configErr);
+      }
       await this.persist();
       return this.config.user;
     } catch(err) {
@@ -322,6 +333,54 @@ export default class AppCrmManager extends AppManager {
     }
   }
 
+  // ── Sensitive-message reveal workflow ─────────────────────────────────────
+  // Which sensitive messages THIS agent may see in the clear, plus (for
+  // superadmins) the outstanding requests. Backfills on chat open, paired with
+  // the Reverb push for liveness. Empty on failure → everything stays blurred,
+  // which fails safe. Fire-and-forget from the chat-open path (non-blocking).
+  public async getSensitiveReveals(chatId: string): Promise<CrmSensitiveRevealState> {
+    const empty: CrmSensitiveRevealState = {approved: [], pending: []};
+    if(!(await this.isConnected()) || !chatId) return empty;
+    try {
+      const result = await this.request<{data: CrmSensitiveRevealState}>('GET', CRM_ENDPOINTS.sensitiveReveals(chatId));
+      return {approved: result?.data?.approved || [], pending: result?.data?.pending || []};
+    } catch(err) {
+      this.log.error('getSensitiveReveals failed', err);
+      return empty;
+    }
+  }
+
+  // A regular agent asks to reveal one message's hidden spans (messageId 0 =
+  // contact info). With approval ON the CRM records a pending request + notifies
+  // superadmins → returns 'pending'. With approval OFF the agent self-reveals
+  // with a logged `reason` → returns 'approved' (reveal right away). Returns
+  // false on failure. `messageId` may be 0, so no truthiness check on it.
+  public async requestSensitiveReveal(chatId: string, messageId: number, reason?: string, content?: string): Promise<'pending' | 'approved' | false> {
+    if(!(await this.isConnected()) || !chatId || messageId == null) return false;
+    try {
+      const result = await this.request<{status?: 'pending' | 'approved'}>('POST', CRM_ENDPOINTS.sensitiveRevealRequest(chatId), {
+        body: {message_id: messageId, ...(reason ? {reason} : {}), ...(content ? {content} : {})}
+      });
+      return result?.status || 'pending';
+    } catch(err) {
+      this.log.error('requestSensitiveReveal failed', err);
+      return false;
+    }
+  }
+
+  // A superadmin approves a reveal for a specific agent (CRM user id). The CRM
+  // broadcasts `sensitive.reveal.approved` so that agent's session reveals it.
+  public async approveSensitiveReveal(chatId: string, messageId: number, userId: number): Promise<boolean> {
+    if(!(await this.isConnected()) || !chatId || !messageId) return false;
+    try {
+      await this.request('POST', CRM_ENDPOINTS.sensitiveRevealApprove(chatId), {body: {message_id: messageId, user_id: userId}});
+      return true;
+    } catch(err) {
+      this.log.error('approveSensitiveReveal failed', err);
+      return false;
+    }
+  }
+
   // ── 4) Records: act on an existing ticket ─────────────────────────────────
   public async sendTicketMessage(ticketId: number, text: string) {
     return this.request('POST', `${CRM_ENDPOINTS.tickets}/${ticketId}/message`, {body: {text}});
@@ -333,5 +392,29 @@ export default class AppCrmManager extends AppManager {
 
   public async updateTicketStatus(ticketId: number, status: CrmTicketStatus) {
     return this.request('PATCH', `${CRM_ENDPOINTS.tickets}/${ticketId}/status`, {body: {status}});
+  }
+
+  // ── Internal agent notes (keyed by telegram chat id) ──────────────────────
+  // Notes let agents hand context to each other from inside the chat; they are
+  // agent-only and never reach the customer. Both endpoints resolve the chat's
+  // ticket server-side, so the UI works with chat ids only.
+  public async getNotesByTelegram(chatId: string): Promise<CrmNotesResult> {
+    if(!(await this.isConnected()) || !chatId) return {ticketId: null, notes: []};
+    try {
+      const result = await this.request<{data: {ticket_id: number | null, notes: CrmNote[]}}>('GET', CRM_ENDPOINTS.notes(chatId));
+      return {ticketId: result?.data?.ticket_id ?? null, notes: result?.data?.notes || []};
+    } catch(err) {
+      this.log.error('getNotesByTelegram failed', err);
+      return {ticketId: null, notes: []};
+    }
+  }
+
+  // Add an internal note to the chat's ticket. Returns the created note (so the UI
+  // can append it optimistically) or undefined on failure — the caller surfaces a
+  // toast. Rethrows nothing; a 404 (no ticket) resolves to undefined.
+  public async addNoteByTelegram(chatId: string, text: string): Promise<CrmNote | undefined> {
+    if(!(await this.isConnected()) || !chatId || !text.trim()) return undefined;
+    const result = await this.request<{data: CrmNote}>('POST', CRM_ENDPOINTS.addNote(chatId), {body: {text: text.trim()}});
+    return result?.data;
   }
 }

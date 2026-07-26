@@ -74,6 +74,7 @@ import {createAutoDeleteIcon} from '@components/autoDeleteIcon';
 import PopupBoost from '@components/popups/boost';
 import PopupPremium from '@components/popups/premium';
 import showNoForwardsPopup from '@components/popups/noForwards';
+import {showCrmNotesPopup} from '@components/popups/crmNotes';
 
 type ButtonToVerify = {element?: HTMLElement, verify: () => boolean | Promise<boolean>};
 
@@ -458,6 +459,16 @@ export default class ChatTopbar {
       // crowded out by other plates (pinned message / translate). Reads the plate's
       // already-loaded ticket signal — no extra round-trip on menu open.
       verify: () => this.plates?.crmTicket.getTicket()?.status === 'open'
+    }, {
+      icon: 'note',
+      text: 'Crm.Note.MenuButton',
+      onClick: () => {
+        const crmTicket = this.plates?.crmTicket;
+        if(crmTicket) showCrmNotesPopup(this.peerId, crmTicket);
+      },
+      // Internal notes for the customer's ticket. Shown whenever a ticket exists for
+      // this chat (reads the plate's already-loaded note state — no round-trip).
+      verify: () => !!this.peerId?.isUser() && !!this.plates?.crmTicket.hasTicketForNotes()
     }, {
       icon: 'search',
       text: 'Search',

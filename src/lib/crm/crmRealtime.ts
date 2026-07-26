@@ -1,6 +1,14 @@
 import Pusher, {Channel} from 'pusher-js';
 import rootScope from '@lib/rootScope';
 import type {CrmRealtimeConfig} from '@lib/crm/types';
+import {
+  CRM_SENSITIVE_CHANNEL,
+  CRM_SENSITIVE_REQUESTED_EVENT,
+  CRM_SENSITIVE_APPROVED_EVENT,
+  CRM_NOTES_CHANNEL,
+  CRM_NOTE_ADDED_EVENT,
+  CrmNote
+} from '@lib/crm/types';
 
 // Realtime per-message agent attribution over Laravel Reverb (Pusher protocol).
 //
@@ -15,6 +23,9 @@ import type {CrmRealtimeConfig} from '@lib/crm/types';
 // is the fallback if the socket is down; this only adds liveness.
 
 type AttributionPush = {message_id: number, admin_id: number, name: string};
+type SensitiveRequestPush = {message_id: number, requested_by: number, name: string, reason?: string};
+type SensitiveApprovedPush = {message_id: number, user_id: number | null};
+type NotePush = {ticket_id: number, note: CrmNote};
 
 const ATTRIBUTION_EVENT = 'outbound.attributed';
 const channelNameFor = (chatId: string) => 'private-attribution.peer.' + chatId;
@@ -26,6 +37,10 @@ class CrmRealtime {
   private configKey: string;
   private channel: Channel;
   private channelName: string;
+  private sensitiveChannel: Channel;
+  private sensitiveChannelName: string;
+  private notesChannel: Channel;
+  private notesChannelName: string;
   // The peer we should currently be listening to — guards against a stale async
   // ensure() resolving after the user already switched chats.
   private currentPeerId: PeerId;
@@ -85,6 +100,37 @@ class CrmRealtime {
         attribution: {admin_id: data.admin_id, name: data.name}
       });
     });
+
+    // Sensitive-message reveal workflow rides a sibling per-peer channel.
+    this.sensitiveChannelName = CRM_SENSITIVE_CHANNEL(chatId);
+    this.sensitiveChannel = pusher.subscribe(this.sensitiveChannelName);
+    this.sensitiveChannel.bind(CRM_SENSITIVE_REQUESTED_EVENT, (data: SensitiveRequestPush) => {
+      if(this.currentPeerId !== peerId || !data?.message_id) return;
+      rootScope.dispatchEvent('crm_sensitive_request_push', {
+        peerId,
+        messageId: data.message_id,
+        requestedBy: data.requested_by,
+        name: data.name,
+        reason: data.reason
+      });
+    });
+    this.sensitiveChannel.bind(CRM_SENSITIVE_APPROVED_EVENT, (data: SensitiveApprovedPush) => {
+      if(this.currentPeerId !== peerId || !data?.message_id) return;
+      rootScope.dispatchEvent('crm_sensitive_reveal_push', {
+        peerId,
+        messageId: data.message_id,
+        userId: data.user_id ?? null
+      });
+    });
+
+    // Internal agent notes ride another sibling per-peer channel — a colleague's
+    // note appears live in the timeline + notes panel.
+    this.notesChannelName = CRM_NOTES_CHANNEL(chatId);
+    this.notesChannel = pusher.subscribe(this.notesChannelName);
+    this.notesChannel.bind(CRM_NOTE_ADDED_EVENT, (data: NotePush) => {
+      if(this.currentPeerId !== peerId || !data?.note?.id) return;
+      rootScope.dispatchEvent('crm_note_push', {peerId, note: data.note});
+    });
   }
 
   // Stop listening (peer is not a CRM customer chat, or the chat closed). Keeps the
@@ -98,8 +144,18 @@ class CrmRealtime {
     if(this.channelName && this.pusher) {
       this.pusher.unsubscribe(this.channelName);
     }
+    if(this.sensitiveChannelName && this.pusher) {
+      this.pusher.unsubscribe(this.sensitiveChannelName);
+    }
+    if(this.notesChannelName && this.pusher) {
+      this.pusher.unsubscribe(this.notesChannelName);
+    }
     this.channel = undefined;
     this.channelName = undefined;
+    this.sensitiveChannel = undefined;
+    this.sensitiveChannelName = undefined;
+    this.notesChannel = undefined;
+    this.notesChannelName = undefined;
   }
 
   private teardown() {

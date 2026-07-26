@@ -18,6 +18,7 @@ import PopupElement from '@components/popups';
 import showChatPreviewPopup, {chatPreviewAnchorFromDialogRow} from '@components/popups/chatPreview';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import IS_SHARED_WORKER_SUPPORTED from '@environment/sharedWorkerSupport';
+import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import appImManager from '@lib/appImManager';
 import {isDialog, isForumTopic, isMonoforumDialog, isSavedDialog} from '@appManagers/utils/dialogs/isDialog';
 import createSubmenuTrigger, {CreateSubmenuArgs} from '@components/createSubmenuTrigger';
@@ -50,6 +51,27 @@ export default class DialogsContextMenu {
       listenTo: element,
       buttons: this.getButtons(),
       onOpen: async(e, li) => {
+        // Touch long-press on the AVATAR → chat preview instead of the context menu. We ride the
+        // context menu's own long-press detection (so there's no second timer racing this one);
+        // throwing here aborts the menu — the native menu is already suppressed by `preventDefault`.
+        // Long-pressing anywhere else on the row still opens the menu. Desktop right-click is
+        // untouched (this is gated on touch).
+        if(IS_TOUCH_SUPPORTED && (e.target as HTMLElement).closest?.('.avatar') && !li.dataset.isAllChats) {
+          const peerId = li.dataset.peerId.toPeerId();
+          const monoforumParentPeerId = +li.dataset.monoforumParentPeerId || undefined;
+          showChatPreviewPopup({
+            peerId: monoforumParentPeerId || peerId,
+            monoforumThreadId: monoforumParentPeerId ? peerId : undefined,
+            threadId: +li.dataset.threadId || undefined,
+            anchor: chatPreviewAnchorFromDialogRow(li)
+          });
+          // The menu normally guards against the long-press's trailing tap opening the chat by
+          // cancelling `touchend`. We're aborting the menu, so add that guard ourselves —
+          // otherwise the browser synthesizes a click that opens the chat under the preview.
+          document.addEventListener('touchend', cancelEvent, {capture: true, once: true});
+          throw 'chat preview instead of context menu';
+        }
+
         this.li = li;
         li.classList.add('menu-open');
         this.peerId = li.dataset.peerId.toPeerId();

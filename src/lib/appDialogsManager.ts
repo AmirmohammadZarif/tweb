@@ -1840,11 +1840,106 @@ export class AppDialogsManager {
     const setWillOpenStory = (e: Event) => willOpenStory = !isOpeningStoriesDisabled() && !!getOpenStoryCallback(e.target);
 
     list.dataset.autonomous = '' + +autonomous;
-    list.addEventListener('mousedown', (e) => {
+
+    // Long-press / mouse-hold on a dialog's AVATAR → floating chat preview (the same popup as
+    // Shift+Click and the context-menu "Preview" entry). Scoped to the avatar so the row's own
+    // long-press context menu (touch) stays reachable everywhere else on the row.
+    const LONG_PRESS_MS = 0.4e3;
+    const LONG_PRESS_MOVE_THRESHOLD = 10;
+    let avatarLongPress: {timer: number, fired: boolean, x: number, y: number} | null = null;
+
+    // The avatar's dialog row, but only for a real peer row (topic rows have no `.avatar`,
+    // archive rows use a different tag → both naturally excluded).
+    const getDialogAvatarElem = (target: EventTarget) => {
+      const avatarEl = (target as HTMLElement).closest?.('.avatar');
+      if(!avatarEl) return null;
+      const elem = findUpTag(avatarEl as HTMLElement, DIALOG_LIST_ELEMENT_TAG);
+      return elem?.dataset.peerId && elem.dataset.sponsored !== 'true' ? elem : null;
+    };
+
+    const clearAvatarLongPress = () => {
+      if(!avatarLongPress) return;
+      clearTimeout(avatarLongPress.timer);
+      avatarLongPress = null;
+    };
+
+    const startAvatarLongPress = (clientX: number, clientY: number, elem: HTMLElement) => {
+      clearAvatarLongPress();
+      const peerId = elem.dataset.peerId.toPeerId();
+      avatarLongPress = {
+        fired: false,
+        x: clientX,
+        y: clientY,
+        timer: window.setTimeout(() => {
+          if(!avatarLongPress) return;
+          avatarLongPress.fired = true;
+
+          const lastMsgId = +elem.dataset.mid || undefined;
+          const threadId = +elem.dataset.threadId || undefined;
+          const monoforumParentPeerId = +elem.dataset.monoforumParentPeerId || undefined;
+
+          showChatPreviewPopup({
+            peerId: monoforumParentPeerId || peerId,
+            monoforumThreadId: monoforumParentPeerId ? peerId : undefined,
+            threadId,
+            lastMsgId,
+            anchor: chatPreviewAnchorFromDialogRow(elem)
+          });
+
+          // A hold on a story avatar would otherwise open the story on the ensuing click.
+          willOpenStory = false;
+        }, LONG_PRESS_MS)
+      };
+    };
+
+    const maybeCancelLongPressOnMove = (clientX: number, clientY: number) => {
+      if(!avatarLongPress || avatarLongPress.fired) return;
       if(
-        e.button !== 0 ||
-        setWillOpenStory(e)
+        Math.abs(clientX - avatarLongPress.x) > LONG_PRESS_MOVE_THRESHOLD ||
+        Math.abs(clientY - avatarLongPress.y) > LONG_PRESS_MOVE_THRESHOLD
       ) {
+        clearAvatarLongPress();
+      }
+    };
+
+    // Desktop: while the button is held, watch for movement (→ drag, cancel) and for release.
+    // `onTap` runs only on a genuine short tap — not when the hold already opened the preview
+    // and not when the pointer was dragged away.
+    const wireDesktopHoldRelease = (onTap?: () => void) => {
+      const onMove = (ev: MouseEvent) => maybeCancelLongPressOnMove(ev.clientX, ev.clientY);
+      document.addEventListener('mousemove', onMove, true);
+      document.addEventListener('mouseup', () => {
+        document.removeEventListener('mousemove', onMove, true);
+        const state = avatarLongPress;
+        clearAvatarLongPress();
+        if(!state || state.fired) return;
+        onTap?.();
+      }, {capture: true, once: true});
+    };
+
+    // Touch long-press → preview is driven by the row's own context-menu gesture handler
+    // (see `DialogsContextMenu`, which shows the preview instead of the menu when the press
+    // lands on the avatar) — no second timer here, so the two can't race.
+
+    list.addEventListener('mousedown', (e) => {
+      if(e.button !== 0) {
+        return;
+      }
+
+      // `plainAvatarPress` = the gesture that maps to a preview on hold. Modified presses fall
+      // through untouched: Shift → preview immediately, Ctrl/Cmd → open in new tab.
+      const plainAvatarPress = !IS_TOUCH_SUPPORTED && !e.shiftKey && !e.ctrlKey && !e.metaKey ?
+        getDialogAvatarElem(e.target) :
+        undefined;
+
+      if(setWillOpenStory(e)) {
+        // Story avatar: the story opens on the *click* that follows, so a short tap needs no
+        // help. Arm a hold timer anyway — if it fires it shows the preview and clears
+        // `willOpenStory` so that click won't also open the story.
+        if(plainAvatarPress) {
+          startAvatarLongPress(e.clientX, e.clientY, plainAvatarPress);
+          wireDesktopHoldRelease();
+        }
         return;
       }
 
@@ -1908,68 +2003,81 @@ export class AppDialogsManager {
         return;
       }
 
-      const peer = apiManagerProxy.getPeer(peerId);
+      const performRowAction = () => {
+        const peer = apiManagerProxy.getPeer(peerId);
 
-      const linkedChat = peer?._ === 'channel' && peer?.pFlags?.monoforum && peer?.linked_monoforum_id ?
-        apiManagerProxy.getChat(peer.linked_monoforum_id) :
-        undefined;
+        const linkedChat = peer?._ === 'channel' && peer?.pFlags?.monoforum && peer?.linked_monoforum_id ?
+          apiManagerProxy.getChat(peer.linked_monoforum_id) :
+          undefined;
 
-      if(
-        linkedChat?._ === 'channel' &&
-        linkedChat?.admin_rights?.pFlags?.manage_direct_messages &&
-        !elem.dataset.isAllChats &&
-        !lastMsgId &&
-        !e.shiftKey
-      ) {
-        this.toggleForumTabByPeerId(peerId).then(() => {
-          if(appImManager.chat?.peerId?.toChatId() !== linkedChat?.id && !mediaSizes.isLessThanFloatingLeftSidebar) openChat();
-        });
-        return;
-      }
-
-
-      if(peer?._ === 'user' && peer?.pFlags?.bot_forum_view && !lastMsgId && !threadId && !elem.dataset.isAllChats && !e.shiftKey) {
-        this.toggleForumTabByPeerId(peerId).then(() => {
-          if(appImManager.chat?.peerId?.toUserId() !== peer.id && !mediaSizes.isLessThanFloatingLeftSidebar) openChat();
-        });
-        return;
-      }
-
-      const isForum = !!elem.querySelector('.is-forum');
-      if(isForum && !e.shiftKey && !lastMsgId) {
-        this.toggleForumTabByPeerId(peerId, undefined, false);
-        return;
-      }
-
-      if(e.ctrlKey || e.metaKey) {
-        // TODO: How about opening a monoforum in new tab?
-        this.openDialogInNewTab(elem);
-        cancelEvent(e);
-        return;
-      }
-
-      if(autonomous) {
-        const sameElement = lastActiveListElement === elem;
-        if(lastActiveListElement && !sameElement) {
-          this.setDialogActiveStatus(lastActiveListElement, false);
+        if(
+          linkedChat?._ === 'channel' &&
+          linkedChat?.admin_rights?.pFlags?.manage_direct_messages &&
+          !elem.dataset.isAllChats &&
+          !lastMsgId &&
+          !e.shiftKey
+        ) {
+          this.toggleForumTabByPeerId(peerId).then(() => {
+            if(appImManager.chat?.peerId?.toChatId() !== linkedChat?.id && !mediaSizes.isLessThanFloatingLeftSidebar) openChat();
+          });
+          return;
         }
 
-        if(elem) {
-          this.setDialogActiveStatus(elem, true);
-          lastActiveListElement = elem;
-          this.lastActiveElements.add(elem);
+
+        if(peer?._ === 'user' && peer?.pFlags?.bot_forum_view && !lastMsgId && !threadId && !elem.dataset.isAllChats && !e.shiftKey) {
+          this.toggleForumTabByPeerId(peerId).then(() => {
+            if(appImManager.chat?.peerId?.toUserId() !== peer.id && !mediaSizes.isLessThanFloatingLeftSidebar) openChat();
+          });
+          return;
         }
+
+        const isForum = !!elem.querySelector('.is-forum');
+        if(isForum && !e.shiftKey && !lastMsgId) {
+          this.toggleForumTabByPeerId(peerId, undefined, false);
+          return;
+        }
+
+        if(e.ctrlKey || e.metaKey) {
+          // TODO: How about opening a monoforum in new tab?
+          this.openDialogInNewTab(elem);
+          cancelEvent(e);
+          return;
+        }
+
+        if(autonomous) {
+          const sameElement = lastActiveListElement === elem;
+          if(lastActiveListElement && !sameElement) {
+            this.setDialogActiveStatus(lastActiveListElement, false);
+          }
+
+          if(elem) {
+            this.setDialogActiveStatus(elem, true);
+            lastActiveListElement = elem;
+            this.lastActiveElements.add(elem);
+          }
+        }
+
+        if(
+          (!threadId && !monoforumParentPeerId || lastMsgId) &&
+          this.xd.sortedList.list === list &&
+          this.xd !== this.xds[FOLDER_ID_ARCHIVE]
+        ) {
+          this.toggleForumTab();
+        }
+
+        openChat();
+      };
+
+      // Desktop, plain press on a (non-story) avatar: the chat normally opens on THIS mousedown,
+      // which would flash under a hold-triggered preview. Arm the hold and defer the open to
+      // release — a short tap opens the chat as before, a hold shows the preview instead.
+      if(plainAvatarPress) {
+        startAvatarLongPress(e.clientX, e.clientY, elem);
+        wireDesktopHoldRelease(performRowAction);
+        return;
       }
 
-      if(
-        (!threadId && !monoforumParentPeerId || lastMsgId) &&
-        this.xd.sortedList.list === list &&
-        this.xd !== this.xds[FOLDER_ID_ARCHIVE]
-      ) {
-        this.toggleForumTab();
-      }
-
-      openChat();
+      performRowAction();
     }, {capture: true});
 
     // cancel link click

@@ -2021,6 +2021,39 @@
     color: var(--message-out-primary-color);
   }
 
+  // Sensitive-content chip: replaces a redacted span (card / SHABA / phone / …)
+  // inline. The real text is never in the DOM — clicking asks a CRM-superadmin to
+  // approve the reveal, after which the bubble re-renders with the real value.
+  .crm-sensitive-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: .125rem;
+    vertical-align: baseline;
+    padding: 0 .375rem;
+    border-radius: var(--border-radius-medium);
+    background-color: var(--light-secondary-text-color);
+    color: var(--secondary-text-color);
+    font-size: var(--messages-secondary-text-size);
+    font-weight: var(--font-weight-medium);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    transition: opacity var(--transition-standard-in);
+
+    > .tgico {
+      font-size: 1rem;
+    }
+
+    &:hover {
+      opacity: .85;
+    }
+
+    &.is-requested {
+      cursor: default;
+      opacity: .6;
+    }
+  }
+
   // Precise inline lifecycle divider — full-width line above the bubble, same
   // technique as `.is-first-unread::before`.
   &.has-crm-divider::before {
@@ -2045,6 +2078,38 @@
     color: var(--primary-color);
     background-color: var(--light-primary-color);
     font-weight: var(--font-weight-medium);
+  }
+
+  // Internal agent note drawn inline above the first message after it — a
+  // full-width note card, distinct from lifecycle dividers (left-aligned, warm
+  // note color, multi-line). Agent-only content, never shown to the customer.
+  &.has-crm-note::before {
+    content: var(--crm-note-text);
+    display: block;
+    white-space: pre-line;
+    margin: $bubble-overflow-big auto;
+    max-width: 480px;
+    width: fit-content;
+    padding: .375rem .625rem;
+    border-radius: $border-radius-medium;
+    border-inline-start: 3px solid #e3a008;
+    text-align: start;
+    color: var(--primary-text-color);
+    line-height: 1.35;
+    font-weight: var(--font-weight-normal);
+    font-size: var(--font-size-14);
+    background-color: rgba(#e3a008, .12);
+    z-index: 2;
+    position: relative;
+  }
+
+  // Bottom-fallback note bubble (note left after the last message).
+  &.is-crm-note .service-msg {
+    white-space: pre-line;
+    text-align: start;
+    color: var(--primary-text-color);
+    background-color: rgba(#e3a008, .16);
+    font-weight: var(--font-weight-normal);
   }
 
   &-name-forwarded {

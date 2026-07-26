@@ -12,15 +12,25 @@ import rootScope from '@lib/rootScope';
 // crm_auth_required, flipping both back to false.
 const [isCrmLoggedIn, setIsCrmLoggedIn] = createRoot(() => createSignal(false));
 const [isCrmSuperAdmin, setIsCrmSuperAdmin] = createRoot(() => createSignal(false));
+// The signed-in agent's own CRM id (undefined when logged out). Used to match
+// per-agent sensitive-reveal approvals — see the sensitive-message workflow.
+const [crmUserId, setCrmUserId] = createRoot(() => createSignal<number | undefined>(undefined));
+// Whether revealing sensitive content needs superadmin approval. Defaults true
+// (fail-safe): approval is assumed required until /config says otherwise.
+const [requireSensitiveApproval, setRequireSensitiveApproval] = createRoot(() => createSignal(true));
 
 const refresh = () => {
   rootScope.managers.appCrmManager.getConfig().then((config) => {
     const loggedIn = !!(config.enabled && config.baseUrl && config.token);
     setIsCrmLoggedIn(loggedIn);
     setIsCrmSuperAdmin(loggedIn && !!config.user?.is_super_admin);
+    setCrmUserId(loggedIn ? config.user?.id : undefined);
+    setRequireSensitiveApproval(config.requireSensitiveApproval !== false);
   }, () => {
     setIsCrmLoggedIn(false);
     setIsCrmSuperAdmin(false);
+    setCrmUserId(undefined);
+    setRequireSensitiveApproval(true);
   });
 };
 
@@ -34,6 +44,14 @@ if(rootScope.myId) {
 
 export function useIsCrmLoggedIn() {
   return isCrmLoggedIn;
+}
+
+export function useCrmUserId() {
+  return crmUserId;
+}
+
+export function useSensitiveRequireApproval() {
+  return requireSensitiveApproval;
 }
 
 export default function useIsCrmSuperAdmin() {

@@ -50,7 +50,9 @@ import assumeType from '@helpers/assumeType';
 import debounce, {DebounceReturnType} from '@helpers/schedulers/debounce';
 import windowSize from '@helpers/windowSize';
 import {formatPhoneNumber} from '@helpers/formatPhoneNumber';
-import useIsCrmSuperAdmin from '@stores/crmRole';
+import useIsCrmSuperAdmin, {useCrmUserId, useIsCrmLoggedIn} from '@stores/crmRole';
+import {detectSensitiveRanges} from '@lib/crm/sensitiveContent';
+import {triggerSensitiveReveal} from '@lib/crm/triggerReveal';
 import AppMediaViewer from '@components/appMediaViewer';
 import SetTransition from '@components/singleTransition';
 import handleHorizontalSwipe from '@helpers/dom/handleHorizontalSwipe';
@@ -485,6 +487,13 @@ type AddMessageSpoilerOverlayArgs = {
   canTranslate?: boolean;
 };
 
+// Redaction sentinel for sensitive spans (see redactSensitiveText): a Private-Use
+// char that never collides with real content. Sensitive substrings are replaced
+// by an equal-length run of it before wrapping, so the real characters never
+// enter the DOM; decorateSensitiveChips then turns each run into a locked chip.
+const SENSITIVE_SENTINEL = '\uE000';
+const SENSITIVE_RUN_REGEX = /(\uE000+)/;
+
 type RenderLogArgs = {
   log: AdminLog;
   reverse?: boolean;
@@ -549,9 +558,20 @@ export default class ChatBubbles {
   // so outbound bubbles are labeled with which agent replied — for EVERY session,
   // not just the one that sent them (all agents share one Telegram account).
   private crmAttributions: import('@lib/crm/types').CrmAttributionMap = {};
+  // Sensitive-message reveal state for the open chat. `crmSensitiveApproved` are
+  // server message ids THIS agent may see in the clear; anything detected as
+  // sensitive and not in the set stays blurred. Superadmins never blur.
+  private crmSensitiveApproved = new Set<number>();
   private crmMarkedBubbles: HTMLElement[] = []; // message bubbles carrying a ::before divider
   private crmDividers: HTMLElement[] = []; // appended fallback dividers (closed-at-end)
   private updateCrmTicketDividersDebounced: () => void;
+  // Internal agent notes for the peer, rendered inline in the timeline (a ::before
+  // note line above the first message after each note, same positioner-safe trick
+  // as the lifecycle dividers). See updateCrmNoteDividers.
+  private crmNotes: import('@lib/crm/types').CrmNote[] = [];
+  private crmNoteMarkedBubbles: HTMLElement[] = [];
+  private crmNoteDividers: HTMLElement[] = [];
+  private updateCrmNoteDividersDebounced: () => void;
 
   private scrolledDown = true;
   private isScrollingTimeout = 0;
@@ -1125,6 +1145,16 @@ export default class ChatBubbles {
       this.updateCrmTicketDividers();
     });
 
+    // Internal agent notes → inline note lines in the timeline. The crmTicket plate
+    // is the single source of this event (both REST backfill and the Reverb push,
+    // which it merges), so listening here alone covers live + historical notes.
+    this.updateCrmNoteDividersDebounced = debounce(() => this.updateCrmNoteDividers(), 150, false, true);
+    this.listenerSetter.add(rootScope)('crm_notes_update', ({peerId, notes}) => {
+      if(peerId !== this.peerId) return;
+      this.crmNotes = notes || [];
+      this.updateCrmNoteDividers();
+    });
+
     this.listenerSetter.add(rootScope)('crm_attributions_update', ({peerId, attributions}) => {
       if(peerId !== this.peerId) return;
       this.crmAttributions = attributions || {};
@@ -1135,6 +1165,36 @@ export default class ChatBubbles {
       if(peerId !== this.peerId) return;
       this.crmAttributions['' + messageId] = attribution;
       this.retagAgentBubbles();
+    });
+
+    // Sensitive-reveal backfill for the open chat → reveal any now-approved spans.
+    this.listenerSetter.add(rootScope)('crm_sensitive_reveals_update', ({peerId, state}) => {
+      if(peerId !== this.peerId) return;
+      this.crmSensitiveApproved = new Set(state?.approved || []);
+      this.rerenderApprovedSensitive();
+    });
+
+    // A superadmin approved a reveal. Reveal only if it's for this agent (or all).
+    this.listenerSetter.add(rootScope)('crm_sensitive_reveal_push', ({peerId, messageId, userId}) => {
+      if(peerId !== this.peerId) return;
+      const myId = useCrmUserId()();
+      if(userId !== null && userId !== myId) return;
+      this.crmSensitiveApproved.add(messageId);
+      this.rerenderApprovedSensitive();
+    });
+
+    // A regular agent asked to reveal a message — offer superadmins a one-tap
+    // approve, showing who asked and their reason.
+    this.listenerSetter.add(rootScope)('crm_sensitive_request_push', ({peerId, messageId, requestedBy, name, reason}) => {
+      if(peerId !== this.peerId || !useIsCrmSuperAdmin()()) return;
+      confirmationPopup({
+        titleLangKey: 'Crm.Sensitive.RequestTitle',
+        descriptionLangKey: reason ? 'Crm.Sensitive.RequestFromAgentReason' : 'Crm.Sensitive.RequestFromAgent',
+        descriptionLangArgs: reason ? [name, reason] : [name],
+        button: {langKey: 'Crm.Sensitive.Approve'}
+      }).then(() => {
+        this.managers.appCrmManager.approveSensitiveReveal('' + peerId.toUserId(), messageId, requestedBy);
+      }, () => {});
     });
 
     this.listenerSetter.add(rootScope)('message_edit', ({storageKey, message}) => {
@@ -4905,6 +4965,95 @@ export default class ChatBubbles {
     }
   };
 
+  private createCrmNoteBubble(text: string) {
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble service is-crm-note';
+    const bubbleContent = document.createElement('div');
+    bubbleContent.classList.add('bubble-content');
+    const serviceMsg = document.createElement('div');
+    serviceMsg.classList.add('service-msg');
+    serviceMsg.append(text);
+    bubbleContent.append(serviceMsg);
+    bubble.append(bubbleContent);
+    return bubble;
+  }
+
+  // Internal agent notes drawn inline in the timeline: each note becomes a note
+  // line above the first message at/after its creation time (a `::before` on that
+  // bubble — the same positioner-safe technique as the lifecycle dividers, since
+  // inserting real nodes into the index-positioned group tree corrupts ordering).
+  // Notes after the last rendered message fall back to a service bubble appended
+  // at the very bottom. Notes are agent-only and never shown to the customer.
+  private updateCrmNoteDividers = () => {
+    this.crmNoteMarkedBubbles.forEach((bubble) => {
+      bubble.classList.remove('has-crm-note');
+      bubble.style.removeProperty('--crm-note-text');
+    });
+    this.crmNoteMarkedBubbles.length = 0;
+    this.crmNoteDividers.forEach((node) => node.remove());
+    this.crmNoteDividers.length = 0;
+
+    if(!this.crmNotes?.length || !this.peerId?.isUser()) return;
+
+    // Rendered messages of the current peer, sorted by date ascending.
+    const entries: {bubble: HTMLElement, date: number}[] = [];
+    for(const fullMid in this.bubbles) {
+      const bubble = this.bubbles[fullMid];
+      const message = apiManagerProxy.getMessageById(+bubble.dataset.mid);
+      const date = (message as MyMessage)?.date;
+      if(date) entries.push({bubble, date});
+    }
+    entries.sort((a, b) => a.date - b.date);
+
+    const format = (note: import('@lib/crm/types').CrmNote) =>
+      `📝 ${note.author_name}: ${note.text}`;
+
+    // Bucket notes by the bubble they anchor to, so multiple notes on one bubble
+    // become one `::before`. Notes with no following message trail into a bottom
+    // bubble, in order, reading as one block at the end of the conversation.
+    const byBubble = new Map<HTMLElement, string[]>();
+    const trailing: string[] = [];
+
+    for(const note of this.crmNotes) {
+      const timestamp = Math.floor(new Date(note.created_at).getTime() / 1000);
+      if(!timestamp) continue;
+      const text = format(note);
+
+      const following = entries.find((entry) => entry.date >= timestamp);
+      if(following) {
+        const bucket = byBubble.get(following.bubble);
+        if(bucket) bucket.push(text);
+        else byBubble.set(following.bubble, [text]);
+      } else {
+        trailing.push(text);
+      }
+    }
+
+    // A `::before` renders `content: var(--crm-note-text)`, so the value must be a
+    // valid CSS string: escape backslashes/quotes and turn newlines into `\A `
+    // (a plain `\n` would render as the literal char `n`). pre-line keeps the breaks.
+    const toCssString = (lines: string[]) => {
+      const escaped = lines.map((line) => line.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\A '));
+      return '"' + escaped.join('\\A ') + '"';
+    };
+
+    byBubble.forEach((lines, bubble) => {
+      bubble.style.setProperty('--crm-note-text', toCssString(lines));
+      if(!bubble.classList.contains('has-crm-note')) {
+        bubble.classList.add('has-crm-note');
+        this.crmNoteMarkedBubbles.push(bubble);
+      }
+    });
+
+    if(trailing.length) {
+      // Real text node in an appended (positioner-safe) bubble — newlines render
+      // directly under `white-space: pre-line`, no CSS escaping needed.
+      const divider = this.createCrmNoteBubble(trailing.join('\n'));
+      this.chatInner.append(divider);
+      this.crmNoteDividers.push(divider);
+    }
+  };
+
   public getDateForDateContainer(timestamp: number) {
     const date = new Date(timestamp * 1000);
     if(timestamp !== SEND_WHEN_ONLINE_TIMESTAMP) {
@@ -5034,6 +5183,10 @@ export default class ChatBubbles {
     this.crmDividers.length = 0;
     this.crmTicket = undefined;
     this.crmAttributions = {};
+    this.crmSensitiveApproved.clear();
+    this.crmNoteMarkedBubbles.length = 0;
+    this.crmNoteDividers.length = 0;
+    this.crmNotes = [];
     this.bubbleGroups?.cleanup();
     this.bubbleGroups = new BubbleGroups(this.chat);
     this.unreadOut.clear();
@@ -6309,6 +6462,93 @@ export default class ChatBubbles {
     }
   }
 
+  // ── Sensitive-message redaction ────────────────────────────────────────────
+  // Financial/identity spans in a message are hidden from regular agents until a
+  // CRM-superadmin approves the reveal. We REDACT at the string level before the
+  // text is wrapped (redactSensitiveText, called from renderMessage) — the real
+  // characters are replaced by a sentinel run and never enter the DOM, so
+  // "Inspect Element" can't read them (unlike a CSS blur). decorateSensitiveChips
+  // then turns each sentinel run into a locked, clickable chip. On approval the
+  // bubble is simply re-rendered from the original message (rerenderSensitive).
+  // Superadmins are the approvers, so nothing is ever redacted for them.
+
+  // Should this message's sensitive spans be hidden from the current session?
+  private shouldRedactSensitive(mid: number): boolean {
+    if(!useIsCrmLoggedIn()() || useIsCrmSuperAdmin()()) return false;
+    const serverMid = getServerMessageId(mid);
+    return !!serverMid && !this.crmSensitiveApproved.has(serverMid);
+  }
+
+  // Replace each sensitive range in `text` with an equal-length run of the
+  // sentinel char, so surrounding entity offsets stay valid (equal length is why
+  // `entities` need no adjustment). Ranges are sorted+merged and use the same
+  // UTF-16 indexing as text.slice, so this is emoji/surrogate-safe.
+  private redactSensitiveText(text: string): string {
+    const ranges = detectSensitiveRanges(text);
+    if(!ranges.length) return text;
+
+    let result = '';
+    let cursor = 0;
+    for(const {start, end} of ranges) {
+      if(start < cursor || end > text.length) continue; // safety against overlap/OOB
+      result += text.slice(cursor, start) + SENSITIVE_SENTINEL.repeat(end - start);
+      cursor = end;
+    }
+    return result + text.slice(cursor);
+  }
+
+  // After the redacted text is in the DOM, swap each sentinel run for a locked
+  // chip. The real text is NOT present here — revealing happens by re-render.
+  private decorateSensitiveChips(container: HTMLElement, serverMid: number, content?: string) {
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    const sentinelNodes: Text[] = [];
+    let node: Node;
+    while((node = walker.nextNode())) {
+      if(node.textContent.includes(SENSITIVE_SENTINEL)) sentinelNodes.push(node as Text);
+    }
+
+    for(const textNode of sentinelNodes) {
+      const parts = textNode.textContent.split(SENSITIVE_RUN_REGEX);
+      const frag = document.createDocumentFragment();
+      for(const part of parts) {
+        if(!part) continue;
+        if(part[0] === SENSITIVE_SENTINEL) {
+          frag.append(this.createSensitiveChip(serverMid, content));
+        } else {
+          frag.append(document.createTextNode(part));
+        }
+      }
+      textNode.replaceWith(frag);
+    }
+  }
+
+  private createSensitiveChip(serverMid: number, content?: string): HTMLElement {
+    const chip = document.createElement('span');
+    chip.classList.add('crm-sensitive-chip');
+    chip.append(Icon('lock'), i18n('Crm.Sensitive.Hidden'));
+    attachClickEvent(chip, (e) => {
+      cancelEvent(e);
+      // Reveal flow (approval request or reason-gated self-reveal) is shared with
+      // the peer profile's contact rows. `content` is the original message text,
+      // sent so the superadmin can see what they approve. A live approval →
+      // crm_sensitive_reveal_push re-renders this bubble with the real text.
+      triggerSensitiveReveal(this.peerId, serverMid, content);
+    }, {listenerSetter: this.listenerSetter});
+    return chip;
+  }
+
+  // Re-render every redacted bubble that is now approved, so its real text
+  // replaces the chips. Called when the backfill lands or an approval arrives.
+  private rerenderApprovedSensitive() {
+    for(const fullMid in this.bubbles) {
+      const bubble = this.bubbles[fullMid];
+      const midStr = bubble.dataset.crmRedactedMid;
+      if(!midStr || !this.crmSensitiveApproved.has(+midStr)) continue;
+      const message = this.chat.getMessage(getBubbleFullMid(bubble));
+      if(message) this.safeRenderMessage({message, bubble});
+    }
+  }
+
   private async safeRenderMessage({
     message,
     reverse,
@@ -7355,6 +7595,8 @@ export default class ChatBubbles {
     context.messageMedia = isMessage && message.media;
     let needToSetHTML = true;
     let totalEntities: MessageEntity[], messageWithMessage: Message.message, groupedTextMessage: Message.message;
+    let redactedSensitiveMid: number; // server mid whose sensitive spans were redacted in this render
+    let redactedOriginalText: string; // its original (un-redacted) text, sent as the reveal-request snapshot
     if(isMessage) {
       if(groupedId && groupedMustBeRenderedFull) {
         const t = groupedTextMessage = getGroupedText(groupedMessages);
@@ -7380,6 +7622,20 @@ export default class ChatBubbles {
 
       if(context.messageMedia?._ === 'messageMediaPoll') {
         context.messageMessage = totalEntities = undefined;
+      }
+
+      // Redact sensitive spans out of the text BEFORE it is wrapped, so the real
+      // characters never reach the DOM. Equal-length sentinel run keeps entity
+      // offsets valid; decorateSensitiveChips (after setInnerHTML) turns each run
+      // into a locked chip. The bubble is flagged so an approval can re-render it.
+      delete bubble.dataset.crmRedactedMid;
+      if(context.messageMessage && this.shouldRedactSensitive(messageWithMessage.mid)) {
+        const redacted = this.redactSensitiveText(context.messageMessage);
+        if(redacted !== context.messageMessage) {
+          redactedOriginalText = context.messageMessage; // capture before overwriting
+          context.messageMessage = redacted;
+          redactedSensitiveMid = getServerMessageId(messageWithMessage.mid);
+        }
       }
     } else {
       if(message.action._ === 'messageActionPhoneCall') {
@@ -7460,7 +7716,10 @@ export default class ChatBubbles {
       passMaskedLinks: !!(message as Message.message).sponsoredMessage
     });
 
-    const canTranslate = !bigEmojis && (!our || (isMessage && message.summary_from_language)) && this.chat.type !== ChatType.Search;
+    // A redacted message must go through wrapRichText(redacted text); the
+    // translate path renders from the original message object and would leak the
+    // real text into the DOM. Translation of hidden content is meaningless anyway.
+    const canTranslate = !redactedSensitiveMid && !bigEmojis && (!our || (isMessage && message.summary_from_language)) && this.chat.type !== ChatType.Search;
     const [summarizing, setSummarizing] = createSignal(false);
     const translatableParams: Parameters<typeof TranslatableMessage>[0] = canTranslate ? {
       peerId: message.peerId,
@@ -7575,6 +7834,11 @@ export default class ChatBubbles {
 
     if(needToSetHTML) {
       setInnerHTML(messageDiv, richText);
+
+      if(redactedSensitiveMid) {
+        bubble.dataset.crmRedactedMid = '' + redactedSensitiveMid;
+        this.decorateSensitiveChips(messageDiv, redactedSensitiveMid, redactedOriginalText);
+      }
 
       const canShowPreviousMessage = ((originalMessage?: Message): originalMessage is Message.message  => {
         if(originalMessage?._ !== 'message' || !originalMessage.message) return false;
@@ -9701,6 +9965,7 @@ export default class ChatBubbles {
     if(isMessage) {
       this.setBubbleAgentTag(bubble, message.peerId, message.mid, isOut);
       this.updateCrmTicketDividersDebounced?.();
+      this.updateCrmNoteDividersDebounced?.();
     }
 
     // * reserve room for the forced guest-bot avatar in 1-on-1 chats (group chats already indent)

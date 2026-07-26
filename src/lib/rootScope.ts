@@ -215,6 +215,18 @@ export type BroadcastEvents = {
   'crm_ticket_update': {peerId: PeerId, ticket?: import('@lib/crm/types').CrmTicketRef},
   'crm_attributions_update': {peerId: PeerId, attributions: import('@lib/crm/types').CrmAttributionMap},
   'crm_attribution_push': {peerId: PeerId, messageId: number, attribution: import('@lib/crm/types').CrmMessageAttribution},
+  // Sensitive-message reveal workflow. `state` is the REST backfill on chat open
+  // (which message ids are approved for THIS agent, plus pending requests).
+  'crm_sensitive_reveals_update': {peerId: PeerId, state: import('@lib/crm/types').CrmSensitiveRevealState},
+  // A superadmin approved a reveal — `userId` is the agent (CRM user id) it's
+  // approved FOR (null = everyone). Each session reveals only if it matches.
+  'crm_sensitive_reveal_push': {peerId: PeerId, messageId: number, userId: number | null},
+  // A regular agent requested a reveal — only superadmin sessions act on this.
+  'crm_sensitive_request_push': {peerId: PeerId, messageId: number, requestedBy: number, name: string, reason?: string},
+  // Internal agent notes for a chat. `update` is the full list (REST backfill on
+  // chat open + after a local add); `push` is a single live note over Reverb.
+  'crm_notes_update': {peerId: PeerId, notes: import('@lib/crm/types').CrmNote[]},
+  'crm_note_push': {peerId: PeerId, note: import('@lib/crm/types').CrmNote},
 
   'account_logged_in': {accountNumber: ActiveAccountNumber, userId: UserId},
 

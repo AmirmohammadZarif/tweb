@@ -4292,13 +4292,30 @@ export default class ChatInput {
     // raw "/close" text to the customer — return early in every branch below.
     if(!editMsgId && chat.peerId?.isUser()) {
       const {value} = getRichValueWithCaret(this.messageInputField.input, true, false);
-      if(value.trim().toLowerCase() === '/close') {
+      const trimmed = value.trim();
+      if(trimmed.toLowerCase() === '/close') {
         const crmTicket = chat.topbar?.plates?.crmTicket;
         if(crmTicket?.getTicket()?.status === 'open') {
           this.clearInput();
           crmTicket.close();
         } else {
           toastNew({langPackKey: 'Crm.Ticket.NoOpen'});
+        }
+        return;
+      }
+
+      // Support-fork: "/note <text>" leaves an internal agent note on the
+      // customer's ticket instead of sending a message to the customer. Notes are
+      // agent-only; other agents' sessions see it inline + in the notes panel.
+      const noteMatch = /^\/note(?:\s+([\s\S]+))?$/i.exec(trimmed);
+      if(noteMatch) {
+        const crmTicket = chat.topbar?.plates?.crmTicket;
+        const noteText = (noteMatch[1] || '').trim();
+        if(!noteText) {
+          toastNew({langPackKey: 'Crm.Note.Empty'});
+        } else {
+          this.clearInput();
+          crmTicket?.addNote(noteText);
         }
         return;
       }
