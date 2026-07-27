@@ -18,12 +18,31 @@ function runNow(fn: NoneToVoidFunction) {
   fn();
 } */
 
+// iOS Safari pauses (and can outright drop) requestAnimationFrame while the tab
+// is backgrounded — e.g. the user switches to the Telegram app to scan the
+// login QR. Boot leans on rAF heavily (#main-columns fade-in, doubleRaf gating
+// large parts of startup), so a paused rAF leaves the page stuck blank over the
+// chat background. Race rAF against a timeout fallback: when the tab is visible
+// rAF fires first (unchanged behaviour); when it's paused/dropped the timeout
+// still runs the frame so boot completes.
+function scheduleFrame(callback: NoneToVoidFunction) {
+  let done = false;
+  const run = () => {
+    if(done) return;
+    done = true;
+    clearTimeout(timer);
+    callback();
+  };
+  const timer = setTimeout(run, 1000 / 60 * 3);
+  requestAnimationFrame(run);
+}
+
 let fastRafCallbacks: NoneToVoidFunction[] | undefined;
 export function fastRaf(callback: NoneToVoidFunction) {
   if(!fastRafCallbacks) {
     fastRafCallbacks = [callback];
 
-    requestAnimationFrame(() => {
+    scheduleFrame(() => {
       const currentCallbacks = fastRafCallbacks!;
       fastRafCallbacks = undefined;
       currentCallbacks.forEach((cb) => cb());
@@ -38,7 +57,7 @@ export function fastRafConventional(callback: NoneToVoidFunction) {
   if(!fastRafConventionalCallbacks) {
     fastRafConventionalCallbacks = [callback];
 
-    requestAnimationFrame(() => {
+    scheduleFrame(() => {
       processing = true;
       for(let i = 0; i < fastRafConventionalCallbacks.length; ++i) {
         fastRafConventionalCallbacks[i]();

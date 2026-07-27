@@ -536,9 +536,18 @@ const boot = async() => {
     elem.style.opacity = '0';
 
     promise.then(() => {
-      window.requestAnimationFrame(() => {
+      // Restore via rAF for a smooth paint, but guarantee it with a timeout
+      // fallback: iOS Safari pauses/drops rAF while backgrounded (e.g. the user
+      // switched to the Telegram app to scan the login QR), which would leave
+      // #main-columns stuck at opacity 0 — a blank UI over the chat background.
+      let restored = false;
+      const restore = () => {
+        if(restored) return;
+        restored = true;
         elem.style.opacity = '';
-      });
+      };
+      window.requestAnimationFrame(restore);
+      setTimeout(restore, 100);
     });
   }
 
