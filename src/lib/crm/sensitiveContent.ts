@@ -43,6 +43,8 @@ const CATEGORY_PATTERNS: {category: SensitiveCategory, re: RegExp}[] = [
   {category: 'financial', re: new RegExp(digitRun(24), 'g')},                 // bare 24-digit SHABA
   {category: 'contact', re: /(?<![\d])(?:(?:\+|00)98|0)9\d{9}(?![\d])/g},     // Iranian mobile
   {category: 'contact', re: /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi},       // email
+  {category: 'contact', re: /(?<![\w@.])@[a-z][a-z0-9_]{4,31}\b/gi},          // telegram @username (5–32 chars)
+  {category: 'contact', re: /(?<![\w@.])(?:https?:\/\/)?t\.me\/[a-z0-9_+]{3,}/gi}, // t.me link
   {category: 'identity', re: new RegExp(digitRun(10), 'g')}                   // national id / postal code (both 10 digits)
 ];
 

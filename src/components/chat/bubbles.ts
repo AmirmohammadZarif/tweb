@@ -6481,12 +6481,9 @@ export default class ChatBubbles {
 
   // Replace each sensitive range in `text` with an equal-length run of the
   // sentinel char, so surrounding entity offsets stay valid (equal length is why
-  // `entities` need no adjustment). Ranges are sorted+merged and use the same
+  // kept entities need no adjustment). Ranges are sorted+merged and use the same
   // UTF-16 indexing as text.slice, so this is emoji/surrogate-safe.
-  private redactSensitiveText(text: string): string {
-    const ranges = detectSensitiveRanges(text);
-    if(!ranges.length) return text;
-
+  private redactSensitiveText(text: string, ranges: {start: number, end: number}[]): string {
     let result = '';
     let cursor = 0;
     for(const {start, end} of ranges) {
@@ -6495,6 +6492,19 @@ export default class ChatBubbles {
       cursor = end;
     }
     return result + text.slice(cursor);
+  }
+
+  // Remove entities that overlap any redacted range: a mention / url / textUrl
+  // entity encodes the @username or peer in the ENTITY (not the visible text), so
+  // it would leak through the link even though the text is masked. Returns a new
+  // array (never mutates the cached message entities).
+  private stripEntitiesInRanges(entities: MessageEntity[], ranges: {start: number, end: number}[]): MessageEntity[] {
+    if(!entities?.length) return entities;
+    return entities.filter((entity) => {
+      const start = entity.offset;
+      const end = entity.offset + entity.length;
+      return !ranges.some((r) => start < r.end && end > r.start);
+    });
   }
 
   // After the redacted text is in the DOM, swap each sentinel run for a locked
@@ -7630,10 +7640,13 @@ export default class ChatBubbles {
       // into a locked chip. The bubble is flagged so an approval can re-render it.
       delete bubble.dataset.crmRedactedMid;
       if(context.messageMessage && this.shouldRedactSensitive(messageWithMessage.mid)) {
-        const redacted = this.redactSensitiveText(context.messageMessage);
-        if(redacted !== context.messageMessage) {
+        const ranges = detectSensitiveRanges(context.messageMessage);
+        if(ranges.length) {
           redactedOriginalText = context.messageMessage; // capture before overwriting
-          context.messageMessage = redacted;
+          context.messageMessage = this.redactSensitiveText(context.messageMessage, ranges);
+          // Drop entities overlapping a redacted span — a mention/link entity's
+          // href carries the @username even after the visible text is masked.
+          totalEntities = this.stripEntitiesInRanges(totalEntities, ranges);
           redactedSensitiveMid = getServerMessageId(messageWithMessage.mid);
         }
       }

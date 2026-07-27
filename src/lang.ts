@@ -223,6 +223,7 @@ const lang = {
   'Crm.Sensitive.Hidden': 'Hidden',
   'Crm.Sensitive.Requested': 'Sent — waiting for a manager to approve',
   'Crm.Sensitive.RequestFailed': 'Could not send the request, please try again',
+  'Crm.Sensitive.RateLimited': 'You\'ve reached today\'s limit for viewing sensitive data',
   'Crm.Sensitive.RequestTitle': 'Sensitive content',
   'Crm.Sensitive.RequestFromAgent': '%1$s asked to reveal hidden content. Approve?',
   'Crm.Sensitive.RequestFromAgentReason': '%1$s asked to reveal hidden content.\nReason: %2$s',

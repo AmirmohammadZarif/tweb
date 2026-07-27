@@ -135,6 +135,7 @@ import {MyMessage} from '@appManagers/appMessagesManager';
 import {canUploadAsWhenEditing} from '@components/chat/utils';
 import getPeerActiveUsernames from '@appManagers/utils/peers/getPeerActiveUsernames';
 import {usePeer} from '@stores/peers';
+import useIsCrmSuperAdmin, {useIsCrmLoggedIn} from '@stores/crmRole';
 import {untrack} from 'solid-js';
 import showStoriesStealthModePopup from '@components/popups/storiesStealthMode';
 import {ButtonMenuItemOptions, ButtonMenuSync} from '@components/buttonMenu';
@@ -2569,8 +2570,14 @@ export class AppImManager extends EventListenerBase<{
   private overrideHash(peerId?: PeerId) {
     let str: string;
     if(peerId) {
-      const username = untrack(() => getPeerActiveUsernames(usePeer(peerId))[0]);
-      str = username ? '@' + username : '' + peerId;
+      // CRM: never leak a customer's @username or numeric id into the URL for a
+      // regular agent (matches the gated dialog-list hrefs). No deep link for them.
+      if(peerId.isUser() && useIsCrmLoggedIn()() && !useIsCrmSuperAdmin()()) {
+        str = undefined;
+      } else {
+        const username = untrack(() => getPeerActiveUsernames(usePeer(peerId))[0]);
+        str = username ? '@' + username : '' + peerId;
+      }
     }
 
     appNavigationController.overrideHash(str);

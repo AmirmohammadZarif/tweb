@@ -44,6 +44,8 @@ export async function triggerSensitiveReveal(peerId: PeerId, messageId: number, 
     rootScope.dispatchEvent('crm_sensitive_reveal_push', {peerId, messageId, userId: useCrmUserId()() ?? null});
   } else if(status === 'pending') {
     toastNew({langPackKey: 'Crm.Sensitive.Requested'});
+  } else if(status === 'rate_limited') {
+    toastNew({langPackKey: 'Crm.Sensitive.RateLimited'});
   } else {
     toastNew({langPackKey: 'Crm.Sensitive.RequestFailed'});
   }

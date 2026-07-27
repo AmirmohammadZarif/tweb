@@ -1965,7 +1965,8 @@ export default class AppSearchSuper {
         dom.lastMessageSpan.append(await getChatMembersString(peerId.toChatId()));
       } else if('bot_active_users' in peer) {
         dom.lastMessageSpan.append(i18n('BotUsers', [numberThousandSplitter(peer.bot_active_users)]));
-      } else if(username) {
+      } else if(username && (useIsCrmSuperAdmin()() || !!(peer as User.user).pFlags?.bot)) {
+        // Customer @usernames are CRM-superadmin-only (bots stay visible).
         dom.lastMessageSpan.append('@' + username);
       } else if(type === 'bots') {
         dom.lastMessageSpan.append(i18n('UnknownBotUsers'));

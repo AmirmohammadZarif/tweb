@@ -355,7 +355,7 @@ export default class AppCrmManager extends AppManager {
   // superadmins → returns 'pending'. With approval OFF the agent self-reveals
   // with a logged `reason` → returns 'approved' (reveal right away). Returns
   // false on failure. `messageId` may be 0, so no truthiness check on it.
-  public async requestSensitiveReveal(chatId: string, messageId: number, reason?: string, content?: string): Promise<'pending' | 'approved' | false> {
+  public async requestSensitiveReveal(chatId: string, messageId: number, reason?: string, content?: string): Promise<'pending' | 'approved' | 'rate_limited' | false> {
     if(!(await this.isConnected()) || !chatId || messageId == null) return false;
     try {
       const result = await this.request<{status?: 'pending' | 'approved'}>('POST', CRM_ENDPOINTS.sensitiveRevealRequest(chatId), {
@@ -363,6 +363,8 @@ export default class AppCrmManager extends AppManager {
       });
       return result?.status || 'pending';
     } catch(err) {
+      // 429 = per-agent daily self-reveal cap reached (see the reveal settings).
+      if((err as Error & {status?: number})?.status === 429) return 'rate_limited';
       this.log.error('requestSensitiveReveal failed', err);
       return false;
     }
