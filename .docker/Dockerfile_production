@@ -9,20 +9,31 @@ RUN npm install -g pnpm
 
 RUN pnpm install
 
+# Stamp a fresh build number. App.build is what singleInstance.ts and
+# loadState.ts compare against the stored k_build to decide "a new version
+# shipped, deactivate this tab and reload". The committed .env value is only
+# bumped by `node build`, which this image does not run — so without this step
+# every deploy ships build 660 and already-open tabs are never told to reload.
+# Pass BUILD_NUMBER for a reproducible value; it defaults to unix seconds.
+ARG BUILD_NUMBER
+RUN pnpm run set-build ${BUILD_NUMBER:-}
+
 RUN pnpm build
 
-# Replicate build.js onCompiled(): merge compiled dist/ on top of public/,
-# which already holds the static assets (assets/, manifests, wasm, workers).
-# The served root is public/, exactly as the upstream deploy expects.
-RUN cp -r /app/dist/. /app/public/
+# Merge dist/ into the served root AND prune the previous build's chunks.
+# The old `cp -r dist/. public/` only did the merge half of build.js's
+# onCompiled(); public/ is a tracked build-output dir, so skipping the prune
+# left every historical content-hashed chunk in the deployed root forever.
+RUN pnpm run collect-dist
 
 # Serve stage
 FROM nginx:stable-alpine3.20-slim
 
 RUN apk update && apk upgrade --no-cache
 
-# Custom server config: never heuristically cache index.html / sw.js (prevents
-# the stale-HTML white screen after a redeploy), cache hashed assets forever.
+# Custom server config: never heuristically cache index.html, cache
+# content-hashed assets forever, and keep service-worker routes off the SPA
+# fallback. See the comments in nginx.conf.
 COPY .docker/nginx.conf /etc/nginx/conf.d/default.conf
 
 COPY --from=builder /app/public /usr/share/nginx/html

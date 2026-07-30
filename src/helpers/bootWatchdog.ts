@@ -12,8 +12,9 @@
  * This watchdog fires when boot makes no progress for a while (or throws) and
  * performs a graduated, loop-guarded recovery instead of leaving the user on a
  * blank page:
- *   attempt 0 → clear CacheStorage + unregister service workers, then reload
- *               (fixes stale HTML/JS and a broken/uncontrolled service worker)
+ *   attempt 0 → drop the service worker's asset cache + unregister service
+ *               workers, then reload (fixes stale HTML/JS and a broken or
+ *               uncontrolled service worker)
  *   attempt 1 → reload with `?noSharedWorker=1` (bypasses a wedged SharedWorker)
  *   attempt ≥2 → show a minimal, self-contained error screen with manual
  *               recovery actions (never auto-loop forever)
@@ -21,9 +22,22 @@
  * The attempt counter lives in `window.sessionStorage` so it survives the
  * recovery reloads but resets on a fresh app launch; `bootSucceeded()` also
  * resets it so a transient stall that recovers doesn't poison later boots.
+ *
+ * Two properties matter for not making things worse. The timeout is generous
+ * and is pushed forward at every boot milestone, because the failure mode we
+ * are guarding against is an *infinite* wait, not a slow one — and misfiring on
+ * a slow cold start used to guarantee the next boot was slower still. And the
+ * automatic recovery only drops `cachedAssets` (the compiled JS/CSS the service
+ * worker caches), never the user's media caches: wiping `cachedFiles` and the
+ * stream-chunk stores forces a full re-download of everything the user had
+ * already cached, which cannot fix a boot hang and makes the retry heavier.
  */
 
-const DEFAULT_TIMEOUT = 30000;
+const DEFAULT_TIMEOUT = 60000;
+
+// Mirrors CACHE_ASSETS_NAME in @lib/serviceWorker/cache — inlined rather than
+// imported so this module stays dependency-free and safe to load first.
+const ASSETS_CACHE_NAME = 'cachedAssets';
 const ATTEMPTS_KEY = 'boot_recovery_attempts';
 const MAX_AUTO_RECOVERIES = 2;
 const RECOVERY_HARD_TIMEOUT = 5000;
@@ -89,15 +103,7 @@ function withHardTimeout<T>(promise: Promise<T>, ms: number) {
   ]);
 }
 
-async function clearCachesAndServiceWorkers() {
-  const jobs: Promise<any>[] = [];
-
-  try {
-    if('caches' in window) {
-      jobs.push(caches.keys().then((keys) => Promise.all(keys.map((key) => caches.delete(key)))));
-    }
-  } catch(err) {}
-
+function unregisterServiceWorkers(jobs: Promise<any>[]) {
   try {
     if('serviceWorker' in navigator) {
       jobs.push(
@@ -106,6 +112,40 @@ async function clearCachesAndServiceWorkers() {
       );
     }
   } catch(err) {}
+}
+
+/**
+ * Automatic recovery: everything that can plausibly hold a stale *app bundle*,
+ * and nothing else. The user's downloaded media stays put.
+ */
+async function clearAssetCacheAndServiceWorkers() {
+  const jobs: Promise<any>[] = [];
+
+  try {
+    if('caches' in window) {
+      jobs.push(caches.delete(ASSETS_CACHE_NAME));
+    }
+  } catch(err) {}
+
+  unregisterServiceWorkers(jobs);
+
+  await withHardTimeout(Promise.allSettled(jobs), RECOVERY_HARD_TIMEOUT);
+}
+
+/**
+ * Manual "Reset app data" only — the user explicitly asked for the big hammer,
+ * so this does drop every cache including downloaded media.
+ */
+async function clearAllCachesAndServiceWorkers() {
+  const jobs: Promise<any>[] = [];
+
+  try {
+    if('caches' in window) {
+      jobs.push(caches.keys().then((keys) => Promise.all(keys.map((key) => caches.delete(key)))));
+    }
+  } catch(err) {}
+
+  unregisterServiceWorkers(jobs);
 
   await withHardTimeout(Promise.allSettled(jobs), RECOVERY_HARD_TIMEOUT);
 }
@@ -138,7 +178,7 @@ async function recover(reason: string) {
 
   try {
     if(attempts === 0) {
-      await clearCachesAndServiceWorkers();
+      await clearAssetCacheAndServiceWorkers();
       reload();
     } else {
       reloadWithNoSharedWorker();
@@ -194,7 +234,7 @@ function showBootErrorScreen(reason: string) {
     resetButton.onclick = async() => {
       resetButton.disabled = true;
       resetButton.textContent = 'Resetting…';
-      await clearCachesAndServiceWorkers();
+      await clearAllCachesAndServiceWorkers();
       setAttempts(0);
       reload();
     };

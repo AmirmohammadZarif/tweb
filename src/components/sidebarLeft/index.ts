@@ -914,19 +914,10 @@ export class AppSidebarLeft extends SidebarSlider {
       },
       verify: () => liteMode.isEnabled()
     }, {
-      icon: 'aversion',
-      text: 'ChatList.Menu.SwitchTo.A',
-      onClick: () => {
-        Promise.all([
-          sessionStorage.set({kz_version: 'Z'}),
-          sessionStorage.delete('tgme_sync')
-        ]).then(() => {
-          appNavigationController.navigateToUrl('https://web.andropay.xyz');
-        });
-      },
-      separator: App.isMainDomain,
-      verify: () => App.isMainDomain
-    }, {
+      // NOTE: upstream has a "Switch to Telegram A version" entry here, gated on
+      // App.isMainDomain. This deployment is in MAIN_DOMAINS, so it rendered —
+      // but it pointed at our own origin, so agents got a menu item that just
+      // reloaded the app. Dropped; there is no A version of this client.
       icon: 'help',
       text: 'TelegramFeatures',
       onClick: () => {

@@ -25,6 +25,11 @@ services:
     build:
       context: .
       dockerfile: .docker/Dockerfile_production
+      args:
+        # Bump per deploy so open tabs detect the new version. Defaults to unix
+        # seconds inside the image when unset; set it explicitly (e.g.
+        # BUILD_NUMBER=$(date +%s)) to make a rebuild reproducible.
+        BUILD_NUMBER: "${BUILD_NUMBER:-}"
     restart: unless-stopped
     networks:
       - shared

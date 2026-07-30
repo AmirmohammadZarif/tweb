@@ -3,13 +3,11 @@
 const {spawn, execSync} = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const keepAsset = require('./keepAsset');
+const {collectDist, publicPath} = require('./collect-dist');
 const {NodeSSH} = require('node-ssh');
 const zlib = require('zlib');
 
 const npmCmd = /^win/.test(process.platform) ? 'npm.cmd' : 'npm';
-const publicPath = path.join(__dirname, 'public');
-const distPath = path.join(__dirname, 'dist');
 
 function readSSHConfig() {
   let sshConfig;
@@ -20,38 +18,6 @@ function readSSHConfig() {
   }
 
   return sshConfig;
-}
-
-function copyFiles(source, destination) {
-  if(!fs.existsSync(destination)) {
-    fs.mkdirSync(destination);
-  }
-
-  const files = fs.readdirSync(source, {withFileTypes: true});
-  files.forEach((file) => {
-    const sourcePath = path.join(source, file.name);
-    const destinationPath = path.join(destination, file.name);
-
-    if(file.isFile()) {
-      fs.copyFileSync(sourcePath, destinationPath);
-    } else if(file.isDirectory()) {
-      copyFiles(sourcePath, destinationPath);
-    }
-  });
-}
-
-function clearOldFiles() {
-  const bundleFiles = fs.readdirSync(distPath);
-  const files = fs.readdirSync(publicPath, {withFileTypes: true});
-  files.forEach((file) => {
-    if(file.isDirectory() ||
-      bundleFiles.some((bundleFile) => bundleFile === file.name) ||
-      keepAsset(file.name)) {
-      return;
-    }
-
-    fs.unlinkSync(path.join(publicPath, file.name));
-  });
 }
 
 function changeVersion(langVersion) {
@@ -111,8 +77,7 @@ function formatLang() {
 
 const onCompiled = async() => {
   console.log('Compiled successfully.');
-  copyFiles(distPath, publicPath);
-  clearOldFiles();
+  collectDist();
 
   const sshConfig = readSSHConfig();
   if(!sshConfig) {

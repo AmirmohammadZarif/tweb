@@ -36,7 +36,6 @@ import DEBUG, {IS_BETA} from '@config/debug';
 import IS_INSTALL_PROMPT_SUPPORTED from '@environment/installPrompt';
 import cacheInstallPrompt from '@helpers/dom/installPrompt';
 import {fillLocalizedDates} from '@helpers/date';
-import {nextRandomUint} from '@helpers/random';
 import {createEffect} from 'solid-js';
 import {IS_OVERLAY_SCROLL_SUPPORTED, USE_CUSTOM_SCROLL, USE_NATIVE_SCROLL} from '@environment/overlayScrollSupport';
 import IMAGE_MIME_TYPES_SUPPORTED, {IMAGE_MIME_TYPES_SUPPORTED_PROMISE} from '@environment/imageMimeTypesSupport';
@@ -85,24 +84,11 @@ IMAGE_MIME_TYPES_SUPPORTED_PROMISE.then((mimeTypes) => {
   apiManagerProxy.sendEnvironment();
 });
 
-// * Randomly choose a version if user came from a search engine
-function randomlyChooseVersionFromSearch() {
-  try {
-    if(
-      App.isMainDomain &&
-      document.referrer &&
-      /(^|\.)(google|bing|duckduckgo|ya|yandex)\./i.test(new URL(document.referrer).host)
-    ) {
-      const version = localStorage.getItem('kz_version');
-      if(version === 'Z' || nextRandomUint(8) > 127) {
-        localStorage.setItem('kz_version', 'Z');
-        appNavigationController.navigateToUrl('https://web.andropay.xyz/');
-      } else {
-        localStorage.setItem('kz_version', 'K');
-      }
-    }
-  } catch(err) {}
-}
+// NOTE: upstream splits search-engine visitors between the K and A clients
+// here. This deployment is in MAIN_DOMAINS so the branch was live, but it
+// navigated to our own origin — costing search-referred visitors an extra full
+// reload to land back on the same page. There is no A version of this client,
+// so the split is gone.
 
 async function checkLastActiveAccountFromTMe() {
   try {
@@ -407,7 +393,6 @@ function setDocumentLangPackProperties(langPack: LangPackDifference.langPackDiff
 
 const boot = async() => {
   const perf = performance.now();
-  randomlyChooseVersionFromSearch();
   setSidebarLeftWidth();
   toggleAttributePolyfill();
   replaceChildrenPolyfill();
@@ -638,6 +623,11 @@ const boot = async() => {
       import('./pages/bootstrapIm'),
       sessionStorage.get('should_animate_main')
     ]);
+
+    // Separate budget for the chunk fetch and the mount below — together they
+    // are by far the longest stretch of boot, and charging both to a single
+    // watchdog deadline makes a merely slow cold start look like a hang.
+    bootProgress();
 
     const pageChatsEl = document.getElementById('page-chats') as HTMLDivElement;
 

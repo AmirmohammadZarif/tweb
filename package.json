@@ -16,6 +16,8 @@
     "generate-changelog": "node ./src/scripts/generate_changelog.js",
     "generate-icons": "node ./src/scripts/icomoon/icomoon_generate.js",
     "change-version": "node ./src/scripts/change_version.js",
+    "set-build": "node ./src/scripts/set_build.js",
+    "collect-dist": "node ./collect-dist.js",
     "apply-new-lang": "node ./src/scripts/apply_new_lang.js",
     "watch-lang": "node watch-lang.js",
     "lint": "npx eslint \"src/**/**.ts\"",
