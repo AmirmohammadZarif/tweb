@@ -53,9 +53,13 @@ const ADDRESS_RE = /(?:خیابان|کوچه|بلوار|پلاک|میدان|من
 
 // URLs the agent legitimately shares (youtube, etc.) must stay intact — their
 // path can contain a `@handle` or long digit runs that would otherwise trip the
-// patterns above. Matches http(s)/www URLs and bare `domain.tld/path` (the `/path`
-// requirement + `(?<![\w@])` keep it from eating email domains like `a@gmail.com`).
-const URL_RE = /(?:https?:\/\/|www\.)\S+|(?<![\w@])[a-z0-9-]+(?:\.[a-z0-9-]+)+\/\S*/gi;
+// patterns above. Matches http(s)/www URLs and bare `domain.tld(/path)` in any
+// form. Guards:
+// - the TLD must be alphabetic (`[a-z]{2,}`), so a dotted card/IP like
+//   `6037.9981.3176.3590` is NOT mistaken for a domain (and stays redacted);
+// - `(?<![\w@.])` keeps it from eating an email's domain (`a@gmail.com`) or a
+//   sub-label, so emails stay redacted.
+const URL_RE = /(?:https?:\/\/|www\.)\S+|(?<![\w@.])(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/\S*|\?\S*)?/gi;
 
 function overlapsAny(range: SensitiveRange, spans: {start: number, end: number}[]): boolean {
   return spans.some((s) => range.start < s.end && range.end > s.start);
