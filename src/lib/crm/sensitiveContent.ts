@@ -44,13 +44,22 @@ const CATEGORY_PATTERNS: {category: SensitiveCategory, re: RegExp}[] = [
   {category: 'contact', re: /(?<![\d])(?:(?:\+|00)98|0)9\d{9}(?![\d])/g},     // Iranian mobile
   {category: 'contact', re: /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi},       // email
   {category: 'contact', re: /(?<![\w@.])@[a-z][a-z0-9_]{4,31}\b/gi},          // telegram @username (5–32 chars)
-  {category: 'contact', re: /(?<![\w@.])(?:https?:\/\/)?t\.me\/[a-z0-9_+]{3,}/gi}, // t.me link
   {category: 'identity', re: new RegExp(digitRun(10), 'g')}                   // national id / postal code (both 10 digits)
 ];
 
 // Address is free text with no distinctive shape, so we redact from a Persian
 // address keyword to the end of that line — a coarse but useful heuristic.
 const ADDRESS_RE = /(?:خیابان|کوچه|بلوار|پلاک|میدان|منزل|واحد|طبقه|آدرس)[^\n]*/g;
+
+// URLs the agent legitimately shares (youtube, etc.) must stay intact — their
+// path can contain a `@handle` or long digit runs that would otherwise trip the
+// patterns above. Matches http(s)/www URLs and bare `domain.tld/path` (the `/path`
+// requirement + `(?<![\w@])` keep it from eating email domains like `a@gmail.com`).
+const URL_RE = /(?:https?:\/\/|www\.)\S+|(?<![\w@])[a-z0-9-]+(?:\.[a-z0-9-]+)+\/\S*/gi;
+
+function overlapsAny(range: SensitiveRange, spans: {start: number, end: number}[]): boolean {
+  return spans.some((s) => range.start < s.end && range.end > s.start);
+}
 
 // Merge overlapping/adjacent ranges (keeping the first category) so redaction
 // produces one chip per contiguous sensitive region.
@@ -97,7 +106,14 @@ export function detectSensitiveRanges(
     }
   }
 
-  return mergeRanges(ranges);
+  // Drop matches that fall inside a URL (youtube links, etc. stay intact).
+  const urlSpans: {start: number, end: number}[] = [];
+  for(const m of text.matchAll(URL_RE)) {
+    urlSpans.push({start: m.index, end: m.index + m[0].length});
+  }
+  const filtered = urlSpans.length ? ranges.filter((r) => !overlapsAny(r, urlSpans)) : ranges;
+
+  return mergeRanges(filtered);
 }
 
 export function isSensitive(text: string | undefined, enabled?: SensitiveCategory[]): boolean {

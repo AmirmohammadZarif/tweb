@@ -7639,7 +7639,9 @@ export default class ChatBubbles {
       // offsets valid; decorateSensitiveChips (after setInnerHTML) turns each run
       // into a locked chip. The bubble is flagged so an approval can re-render it.
       delete bubble.dataset.crmRedactedMid;
-      if(context.messageMessage && this.shouldRedactSensitive(messageWithMessage.mid)) {
+      // Don't redact the agent's OWN (outbound) messages — those aren't the
+      // customer's sensitive data, and it lets agents share links freely.
+      if(!our && context.messageMessage && this.shouldRedactSensitive(messageWithMessage.mid)) {
         const ranges = detectSensitiveRanges(context.messageMessage);
         if(ranges.length) {
           redactedOriginalText = context.messageMessage; // capture before overwriting
