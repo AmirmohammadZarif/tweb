@@ -6475,6 +6475,10 @@ export default class ChatBubbles {
   // Should this message's sensitive spans be hidden from the current session?
   private shouldRedactSensitive(mid: number): boolean {
     if(!useIsCrmLoggedIn()() || useIsCrmSuperAdmin()()) return false;
+    // Redaction is a 1:1-customer feature: the whole reveal workflow (tickets,
+    // contact info, per-user approvals) keys on a single user. In groups/channels
+    // the reveal path doesn't apply, so redacting there would just dead-end.
+    if(!this.peerId.isUser()) return false;
     const serverMid = getServerMessageId(mid);
     return !!serverMid && !this.crmSensitiveApproved.has(serverMid);
   }

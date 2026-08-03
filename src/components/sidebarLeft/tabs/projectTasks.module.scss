@@ -1,0 +1,60 @@
+.empty {
+  padding: 0.75rem 1rem;
+  color: var(--secondary-text-color);
+  font-size: var(--font-size-14);
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+}
+
+.badge {
+  border-radius: 0.75rem;
+  padding: 0.0625rem 0.375rem;
+  font-size: var(--font-size-12);
+  background-color: var(--light-secondary-text-color);
+  color: var(--secondary-text-color);
+  white-space: nowrap;
+}
+
+.overdue {
+  color: var(--danger-color);
+  font-weight: var(--font-weight-medium);
+}
+
+.done {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.progressTrack {
+  margin-top: 0.25rem;
+  height: 0.1875rem;
+  border-radius: 0.125rem;
+  background-color: var(--light-secondary-text-color);
+  overflow: hidden;
+}
+
+.progressBar {
+  height: 100%;
+  border-radius: 0.125rem;
+  background-color: var(--primary-color);
+  transition: width 0.2s ease;
+}
+
+.actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0 1rem 0.5rem;
+}
+
+.inlineForm {
+  padding: 0 1rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}

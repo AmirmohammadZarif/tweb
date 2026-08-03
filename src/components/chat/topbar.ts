@@ -75,6 +75,7 @@ import PopupBoost from '@components/popups/boost';
 import PopupPremium from '@components/popups/premium';
 import showNoForwardsPopup from '@components/popups/noForwards';
 import {showCrmNotesPopup} from '@components/popups/crmNotes';
+import {openCrmTasksTab} from '@lib/crm/createTask';
 
 type ButtonToVerify = {element?: HTMLElement, verify: () => boolean | Promise<boolean>};
 
@@ -469,6 +470,16 @@ export default class ChatTopbar {
       // Internal notes for the customer's ticket. Shown whenever a ticket exists for
       // this chat (reads the plate's already-loaded note state — no round-trip).
       verify: () => !!this.peerId?.isUser() && !!this.plates?.crmTicket.hasTicketForNotes()
+    }, {
+      icon: 'check',
+      text: 'Tasks.Title',
+      onClick: () => {
+        openCrmTasksTab();
+      },
+      // In every chat, on every screen size: on mobile the left sidebar is
+      // hidden behind the chat, so this menu is the only one-tap route to the
+      // agent's tasks without typing "/task".
+      verify: () => rootScope.managers.appCrmManager.isConnected()
     }, {
       icon: 'search',
       text: 'Search',

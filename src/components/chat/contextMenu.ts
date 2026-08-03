@@ -90,6 +90,7 @@ import {concatTextsWithEntities} from '@lib/richTextProcessor/concatTextsWithEnt
 import {shouldShufflePollOptions, shufflePollOptions} from './bubbleParts/pollMessageContent/shuffle';
 import {truncateTextWithEntities} from '@lib/richTextProcessor/truncateTextWithEntities';
 import {pollOptionToLink} from './bubbleParts/pollMessageContent/pollToOptionLink';
+import createCrmTaskFromText from '@lib/crm/createTask';
 
 type ChatContextMenuButton = ButtonMenuItemOptions & {
   verify: () => boolean | Promise<boolean>,
@@ -878,6 +879,18 @@ export default class ChatContextMenu {
         !!(this.message as Message.message).message &&
         !this.isTextSelected &&
         (!this.isAnchorTarget || (this.message as Message.message).message !== this.target.innerText)
+    }, {
+      // Support-fork: turn a customer's message straight into a CRM task, so a
+      // request in the conversation becomes tracked work without retyping it.
+      // Uses the selected text when there is one, else the whole message.
+      icon: 'check',
+      text: 'Tasks.CreateFromMessage',
+      onClick: () => {
+        const selection = getAppWindow().getSelection()?.toString()?.trim();
+        createCrmTaskFromText(selection || (this.message as Message.message).message);
+      },
+      verify: () => !!(this.message as Message.message).message &&
+        this.managers.appCrmManager.isConnected()
     }, {
       icon: 'copy',
       text: 'Chat.CopySelectedText',

@@ -67,6 +67,7 @@ import findUpTag from '@helpers/dom/findUpTag';
 import toggleDisability from '@helpers/dom/toggleDisability';
 import callbackify from '@helpers/callbackify';
 import ChatBotCommands from '@components/chat/botCommands';
+import createCrmTaskFromText from '@lib/crm/createTask';
 import copy from '@helpers/object/copy';
 import documentFragmentToHTML from '@helpers/dom/documentFragmentToHTML';
 import PopupElement from '@components/popups';
@@ -4317,6 +4318,17 @@ export default class ChatInput {
           this.clearInput();
           crmTicket?.addNote(noteText);
         }
+        return;
+      }
+
+      // Support-fork: "/task <title>" captures a CRM task without leaving the
+      // conversation, assigned to the agent who typed it. Like /close and /note
+      // above, the raw command must never reach the customer.
+      const taskMatch = /^\/task(?:\s+([\s\S]+))?$/i.exec(trimmed);
+      if(taskMatch) {
+        this.clearInput();
+        // A bare "/task" opens My Tasks; with a title it captures one directly.
+        createCrmTaskFromText(taskMatch[1] || '');
         return;
       }
     }

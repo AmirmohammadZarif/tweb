@@ -112,6 +112,13 @@ export const AppQuickRepliesTab =
   });
 
 
+export const AppProjectTasksTab =
+  scaffoldSolidJSTab({
+    title: 'Tasks.Title',
+    getComponentModule: () => import('../sidebarLeft/tabs/projectTasks')
+  });
+
+
 type AppAdminRecentActionsTabPayload = {
   channelId: ChatId;
   isBroadcast: boolean;

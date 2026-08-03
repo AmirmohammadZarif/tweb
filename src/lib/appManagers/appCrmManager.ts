@@ -7,7 +7,12 @@ import {
   CRM_ENDPOINTS,
   CrmAttributionMap,
   CrmConfig,
+  CrmCreateTaskInput,
+  CrmProject,
   CrmRealtimeConfig,
+  CrmTask,
+  CrmTaskQuery,
+  CrmTaskStatus,
   CrmReverbConfig,
   CrmCustomer,
   CrmFaq,
@@ -417,6 +422,69 @@ export default class AppCrmManager extends AppManager {
   public async addNoteByTelegram(chatId: string, text: string): Promise<CrmNote | undefined> {
     if(!(await this.isConnected()) || !chatId || !text.trim()) return undefined;
     const result = await this.request<{data: CrmNote}>('POST', CRM_ENDPOINTS.addNote(chatId), {body: {text: text.trim()}});
+    return result?.data;
+  }
+
+  // ── Project tasks ─────────────────────────────────────────────────────────
+  // Reads degrade to empty so the panel renders rather than blanking on a CRM
+  // hiccup. Writes deliberately propagate: they are user-initiated, and silently
+  // dropping "I just logged 30 minutes" would be worse than an error toast.
+
+  public async getProjects(): Promise<CrmProject[]> {
+    if(!(await this.isConnected())) return [];
+    try {
+      return this.unwrap(await this.request<{data: CrmProject[]}>('GET', CRM_ENDPOINTS.projects));
+    } catch(err) {
+      this.log.error('getProjects failed', err);
+      return [];
+    }
+  }
+
+  public async getMyTasks(query: CrmTaskQuery = {}): Promise<CrmTask[]> {
+    if(!(await this.isConnected())) return [];
+
+    const params: Record<string, string> = {};
+    if(query.projectId) params.project_id = '' + query.projectId;
+    if(query.includeDone) params.include_done = '1';
+    if(query.status?.length) params.status = query.status.join(',');
+
+    try {
+      return this.unwrap(await this.request<{data: CrmTask[]}>('GET', CRM_ENDPOINTS.tasks, {
+        query: Object.keys(params).length ? params : undefined
+      }));
+    } catch(err) {
+      this.log.error('getMyTasks failed', err);
+      return [];
+    }
+  }
+
+  public async createTask(input: CrmCreateTaskInput): Promise<CrmTask | undefined> {
+    if(!(await this.isConnected()) || !input.title.trim()) return undefined;
+    const result = await this.request<{data: CrmTask}>('POST', CRM_ENDPOINTS.tasks, {
+      body: {...input, title: input.title.trim()}
+    });
+    return result?.data;
+  }
+
+  public async setTaskStatus(taskId: number, status: CrmTaskStatus): Promise<CrmTask | undefined> {
+    if(!(await this.isConnected())) return undefined;
+    const result = await this.request<{data: CrmTask}>('PATCH', CRM_ENDPOINTS.taskStatus(taskId), {body: {status}});
+    return result?.data;
+  }
+
+  public async logTaskTime(taskId: number, minutes: number, note?: string): Promise<CrmTask | undefined> {
+    if(!(await this.isConnected()) || !(minutes > 0)) return undefined;
+    const result = await this.request<{data: CrmTask}>('POST', CRM_ENDPOINTS.taskTime(taskId), {
+      body: {minutes, note: note?.trim() || undefined}
+    });
+    return result?.data;
+  }
+
+  public async setTaskEstimate(taskId: number, minutes: number, note?: string): Promise<CrmTask | undefined> {
+    if(!(await this.isConnected()) || !(minutes > 0)) return undefined;
+    const result = await this.request<{data: CrmTask}>('POST', CRM_ENDPOINTS.taskEstimate(taskId), {
+      body: {estimated_minutes: minutes, note: note?.trim() || undefined}
+    });
     return result?.data;
   }
 }

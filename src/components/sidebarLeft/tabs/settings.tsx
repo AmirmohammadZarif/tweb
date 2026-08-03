@@ -9,6 +9,7 @@ import {
   AppLanguageTab,
   AppAgentMetricsTab,
   AppQuickRepliesTab,
+  AppProjectTasksTab,
   AppNotificationsTab,
   AppSpeakersAndCameraTab,
   getEditProfileInitArgs
@@ -145,6 +146,7 @@ const Settings = () => {
     makeSubTabConfig('stickers_face', 'StickersName', AppStickersAndEmojiTab, tab),
     makeSubTabConfig('statistics', 'AgentMetrics.Title', AppAgentMetricsTab, tab),
     makeSubTabConfig('list', 'QuickReplies.Title', AppQuickRepliesTab, tab),
+    makeSubTabConfig('check', 'Tasks.Title', AppProjectTasksTab, tab),
     makeSubTabConfig('videocamera', 'AccountSettings.SpeakersAndCamera', AppSpeakersAndCameraTab, tab)
   ].filter(Boolean) as SubTabConfig[]);
 

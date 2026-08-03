@@ -58,7 +58,65 @@ export const CRM_ENDPOINTS = {
   // chat id, like attributions). See CrmSensitiveRevealState.
   sensitiveReveals: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/sensitive-reveals`,
   sensitiveRevealRequest: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/sensitive-reveals/request`,
-  sensitiveRevealApprove: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/sensitive-reveals/approve`
+  sensitiveRevealApprove: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/sensitive-reveals/approve`,
+  // Project management — the agent's own tasks, so they can capture work and log
+  // time without leaving the chat client.
+  projects: '/projects',
+  tasks: '/tasks',
+  taskStatus: (id: number) => `/tasks/${id}/status`,
+  taskTime: (id: number) => `/tasks/${id}/time`,
+  taskEstimate: (id: number) => `/tasks/${id}/estimate`
+};
+
+// ── Project tasks ────────────────────────────────────────────────────────────
+// Mirrors MobileProjectController::present() in the CRM. Estimate/spent/progress
+// are PER AGENT, not per task: two people on one task each have their own
+// numbers, which is why every field here is prefixed `my_`.
+
+export type CrmTaskStatus = 'todo' | 'in_progress' | 'review' | 'blocked' | 'done';
+export type CrmTaskPriority = 'low' | 'normal' | 'high' | 'urgent';
+
+// GET /projects -> {data: CrmProject[]}
+export type CrmProject = {
+  id: number,
+  name: string,
+  code?: string,
+  status: string
+};
+
+// GET /tasks -> {data: CrmTask[]}
+export type CrmTask = {
+  id: number,
+  title: string,
+  description?: string,
+  status: CrmTaskStatus,
+  status_label: string,
+  priority: CrmTaskPriority,
+  priority_label: string,
+  project: {id: number, name?: string, code?: string},
+  due_at?: string, // ISO8601
+  is_overdue: boolean,
+  my_estimate_minutes: number,
+  my_spent_minutes: number,
+  my_progress: number
+};
+
+// POST /tasks. project_id + title are the only required fields; the CRM assigns
+// the task to the calling agent when assignee_user_ids is omitted.
+export type CrmCreateTaskInput = {
+  project_id: number,
+  title: string,
+  description?: string,
+  status?: CrmTaskStatus,
+  priority?: CrmTaskPriority,
+  due_at?: string,
+  estimated_minutes?: number
+};
+
+export type CrmTaskQuery = {
+  projectId?: number,
+  includeDone?: boolean,
+  status?: CrmTaskStatus[]
 };
 
 // ── Sensitive-message reveal workflow ────────────────────────────────────────

@@ -47,7 +47,7 @@ import DOCUMENT_PICTURE_IN_PICTURE_SUPPORTED from '@environment/documentPictureI
 import openClientPip, {closeClientPip, isClientPipOpen} from '@components/clientPip';
 import liteMode from '@helpers/liteMode';
 import {AppPowerSavingTab} from '@components/solidJsTabs/tabs';
-import {AppMyStoriesTab} from '@components/solidJsTabs/tabs';
+import {AppMyStoriesTab, AppProjectTasksTab} from '@components/solidJsTabs/tabs';
 import Icon from '@components/icon';
 import AppSelectPeers from '@components/appSelectPeers';
 import setBadgeContent from '@helpers/setBadgeContent';
@@ -1052,6 +1052,16 @@ export class AppSidebarLeft extends SidebarSlider {
       onClick: onContactsClick,
       // Opens the contacts list, which is CRM-superadmin-only.
       verify: () => useIsCrmSuperAdmin()()
+    }, {
+      // The compose button is the one control an agent already reaches for to
+      // start something new, so "a task" belongs alongside channel/group/chat.
+      icon: 'check',
+      text: singular ? 'Tasks.Title' : 'Tasks.New',
+      onClick: () => {
+        closeTabsBefore(() => {
+          this.createTab(AppProjectTasksTab).open();
+        });
+      }
     }];
   }
 
