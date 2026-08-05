@@ -42,6 +42,20 @@ ENV SENTRY_AUTH_TOKEN=${SENTRY_AUTH_TOKEN} \
     SENTRY_ORG=${SENTRY_ORG} \
     SENTRY_PROJECT=${SENTRY_PROJECT}
 
+# Raise Node's heap ceiling for the build.
+#
+# Node sizes its default old-space from host RAM: on the ~5.9G production box
+# that lands near 2G, and `pnpm build` dies with "Ineffective mark-compacts near
+# heap limit" while the HOST still has ~4.9G free. So this is a Node ceiling, not
+# a machine limit — the app is ~2700 modules and build.sourcemap emits ~190 maps,
+# and the Sentry plugin then rewrites every chunk + map to inject debug ids.
+#
+# 4096 leaves headroom on a 5.9G box that also hosts GlitchTip (~325M) and has
+# ~3.9G of swap as a backstop. Raise further only alongside more RAM: this box
+# has wedged (SSH banner timeout) when a build ate the machine.
+ARG NODE_BUILD_HEAP_MB=4096
+ENV NODE_OPTIONS=--max-old-space-size=${NODE_BUILD_HEAP_MB}
+
 RUN pnpm build
 
 # Merge dist/ into the served root AND prune the previous build's chunks.

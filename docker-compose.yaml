@@ -41,6 +41,9 @@ services:
         SENTRY_URL: "${SENTRY_URL:-}"
         SENTRY_ORG: "${SENTRY_ORG:-}"
         SENTRY_PROJECT: "${SENTRY_PROJECT:-}"
+        # Node heap ceiling for `pnpm build` (MB). The default 4096 fits the
+        # ~5.9G production box; lower it when building on something smaller.
+        NODE_BUILD_HEAP_MB: "${NODE_BUILD_HEAP_MB:-4096}"
     restart: unless-stopped
     networks:
       - shared
