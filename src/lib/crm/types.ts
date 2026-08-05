@@ -65,7 +65,10 @@ export const CRM_ENDPOINTS = {
   tasks: '/tasks',
   taskStatus: (id: number) => `/tasks/${id}/status`,
   taskTime: (id: number) => `/tasks/${id}/time`,
-  taskEstimate: (id: number) => `/tasks/${id}/estimate`
+  taskEstimate: (id: number) => `/tasks/${id}/estimate`,
+  // Crash reports — tweb ships as static files, so without this a JS crash in an
+  // agent's browser leaves no trace on our side. See @lib/debug/crashReporter.
+  clientLogs: '/client-logs'
 };
 
 // ── Project tasks ────────────────────────────────────────────────────────────
@@ -277,3 +280,28 @@ export type CrmNotesResult = {
 // the client turns each push into a `crm_note_push` rootScope event.
 export const CRM_NOTES_CHANNEL = (chatId: string) => 'private-notes.peer.' + chatId;
 export const CRM_NOTE_ADDED_EVENT = 'note.added';
+
+// ── Client crash reports ─────────────────────────────────────────────────────
+// POST /client-logs. `entries` is tweb's merged log ring buffer (main thread +
+// MTProto worker + service worker), which is the whole point: the stack alone
+// rarely explains an MTProto or storage failure. The server caps and trims the
+// payload again on its side, and fingerprints it for grouping.
+
+export type CrmClientLogReason = 'error' | 'unhandledrejection' | 'manual';
+
+export type CrmClientLogPayload = {
+  reason: CrmClientLogReason,
+  message: string,
+  stack?: string,
+  url?: string,
+  app_version?: string,
+  app_build?: number,
+  entries?: any[]
+};
+
+export type CrmClientLogResult = {
+  id: number,
+  fingerprint: string,
+  entry_count: number,
+  occurrences: number
+};

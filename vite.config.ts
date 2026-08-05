@@ -1,6 +1,7 @@
 /// <reference types="vitest/config" />
-import {defineConfig} from 'vite';
+import {defineConfig, loadEnv} from 'vite';
 import solidPlugin from 'vite-plugin-solid';
+import {sentryVitePlugin} from '@sentry/vite-plugin';
 // @ts-ignore no type declarations
 import handlebars from 'vite-plugin-handlebars';
 import basicSsl from '@vitejs/plugin-basic-ssl';
@@ -127,6 +128,54 @@ if(USE_OWN_SOLID) {
   console.log('using original solid');
 }
 
+// ── Source-map upload to the self-hosted GlitchTip ───────────────────────────
+// Only active when SENTRY_AUTH_TOKEN is exported, so every normal build (dev,
+// CI, anyone without a token) is completely unaffected — the plugin isn't even
+// constructed. Create the token in GlitchTip -> Profile -> Auth Tokens.
+//
+// Without this, production stacks in GlitchTip are minified chunk offsets and
+// effectively unreadable, since build.sourcemap emits maps but nothing ships or
+// uploads them.
+const SENTRY_AUTH_TOKEN = process.env.SENTRY_AUTH_TOKEN;
+
+// Read through Vite's own loader so the release name is the SAME string the
+// client inlines as App.versionFull (VITE_VERSION_FULL, e.g. "2.2 (660)").
+// If these two ever diverge, uploaded maps silently fail to match events —
+// which looks exactly like "source maps don't work" with no error anywhere.
+// A fixed mode is fine: this project has only .env and .env.local, no
+// per-mode env files.
+const viteEnv = loadEnv('production', rootDir, 'VITE_');
+
+const sentryPlugin = SENTRY_AUTH_TOKEN ? sentryVitePlugin({
+  url: process.env.SENTRY_URL || 'https://glitchtip.avisengine.com',
+  org: process.env.SENTRY_ORG || 'andromeda-network',
+  project: process.env.SENTRY_PROJECT || 'androgram',
+  authToken: SENTRY_AUTH_TOKEN,
+  release: {name: viteEnv.VITE_VERSION_FULL},
+  sourcemaps: {
+    // Upload the maps, then DELETE them from dist/ before the serve stage
+    // copies it. Without this the .map files are published at
+    // web.andropay.xyz and hand out full readable source to anyone.
+    filesToDeleteAfterUpload: ['dist/**/*.map']
+  },
+  // Never phone home to sentry.io about our builds — this is a self-hosted
+  // instance and the point is that the data stays ours.
+  telemetry: false,
+  // Do NOT fail the build when the upload fails. Default behaviour aborts the
+  // whole build, which would mean a GlitchTip hiccup (or an expired token)
+  // blocks deploying tweb itself. Shipping the app matters more than shipping
+  // its source maps — but shout, because the failure is otherwise invisible
+  // until someone opens an unreadable stack weeks later.
+  errorHandler: (err) => {
+    console.warn('\n[sentry] SOURCE MAP UPLOAD FAILED — the build continues, but stacks for this release will be minified in GlitchTip.');
+    console.warn('[sentry]', err.message, '\n');
+  }
+}) : undefined;
+
+if(SENTRY_AUTH_TOKEN) {
+  console.log('sentry: uploading source maps for release', viteEnv.VITE_VERSION_FULL);
+}
+
 export default defineConfig({
   plugins: [
     // devtools({
@@ -155,7 +204,9 @@ export default defineConfig({
     process.env.ANALYZE ? visualizer({
       gzipSize: true,
       template: 'treemap'
-    }) : undefined
+    }) : undefined,
+    // Last: it hooks the emitted bundle, so it must see the final output.
+    sentryPlugin
   ].filter(Boolean),
   test: {
     // include: ['**/*.{test,spec}.?(c|m)[jt]s?(x)'],

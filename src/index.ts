@@ -23,6 +23,8 @@ import I18n, {checkLangPackForUpdates, i18n, LangPackKey} from '@lib/langPack';
 import '@helpers/peerIdPolyfill';
 import '@lib/polyfill';
 import '@lib/debug/mountLogExport'; // main-thread-only: wires window.downloadLogs / collectLogs
+import {installCrashReporter} from '@lib/debug/crashReporter';
+import {installErrorTracking} from '@lib/debug/errorTracking';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import getProxiedManagers from '@lib/getProxiedManagers';
 import themeController from '@helpers/themeController';
@@ -397,6 +399,12 @@ const boot = async() => {
   toggleAttributePolyfill();
   replaceChildrenPolyfill();
   rootScope.managers = getProxiedManagers();
+  // Straight after managers exist: the reporter only registers listeners here,
+  // but a crash during the rest of boot should already be uploadable.
+  installCrashReporter();
+  // Fire-and-forget: loads the Sentry SDK chunk in the background (no-op
+  // without VITE_GLITCHTIP_DSN) so boot never waits on error tracking.
+  installErrorTracking();
   setManifest();
   setViewportHeightListeners();
   setWorkerProxy; // * just to import

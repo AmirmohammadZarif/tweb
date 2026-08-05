@@ -25,6 +25,8 @@ import {
   CrmTicketStatus,
   CrmUser,
   CrmSensitiveRevealState,
+  CrmClientLogPayload,
+  CrmClientLogResult,
   EMPTY_CRM_CONFIG
 } from '@lib/crm/types';
 
@@ -486,5 +488,25 @@ export default class AppCrmManager extends AppManager {
       body: {estimated_minutes: minutes, note: note?.trim() || undefined}
     });
     return result?.data;
+  }
+
+  // ── Crash reports ─────────────────────────────────────────────────────────
+
+  /**
+   * Upload a crash report (error + merged log tail) — see @lib/debug/crashReporter,
+   * which is the only caller and does the collecting/scrubbing on the main thread.
+   *
+   * Never throws and never surfaces anything to the agent: a failed crash upload
+   * must not itself produce an error toast, and above all must not re-enter the
+   * global error handler that triggered it.
+   */
+  public async postClientLogs(payload: CrmClientLogPayload): Promise<CrmClientLogResult | undefined> {
+    if(!(await this.isConnected())) return undefined;
+    try {
+      const result = await this.request<{data: CrmClientLogResult}>('POST', CRM_ENDPOINTS.clientLogs, {body: payload});
+      return result?.data;
+    } catch{
+      return undefined;
+    }
   }
 }

@@ -18,6 +18,30 @@ RUN pnpm install
 ARG BUILD_NUMBER
 RUN pnpm run set-build ${BUILD_NUMBER:-}
 
+# GlitchTip ingest DSN. Vite inlines VITE_* at BUILD time, and this image builds
+# in its own container — so unless the value is passed in here, the deployed
+# bundle silently ships with error tracking disabled (the code no-ops on an
+# empty DSN by design). Not a secret: a DSN is a public client key, meant to be
+# embedded in the bundle. Empty is a valid, supported value.
+ARG VITE_GLITCHTIP_DSN=""
+ENV VITE_GLITCHTIP_DSN=${VITE_GLITCHTIP_DSN}
+
+# Source-map upload. Unlike the DSN above, SENTRY_AUTH_TOKEN IS a secret — it
+# is used only inside this builder stage and never reaches the final nginx
+# image, and the maps it uploads are deleted from dist/ before the serve stage
+# copies anything (see sourcemaps.filesToDeleteAfterUpload in vite.config.ts).
+# Leave it unset and the build behaves exactly as before, minus symbolication.
+# NB: this leaves the token in the builder layer's history — fine here because
+# only the final stage is pushed/served, but do not COPY the builder wholesale.
+ARG SENTRY_AUTH_TOKEN=""
+ARG SENTRY_URL=""
+ARG SENTRY_ORG=""
+ARG SENTRY_PROJECT=""
+ENV SENTRY_AUTH_TOKEN=${SENTRY_AUTH_TOKEN} \
+    SENTRY_URL=${SENTRY_URL} \
+    SENTRY_ORG=${SENTRY_ORG} \
+    SENTRY_PROJECT=${SENTRY_PROJECT}
+
 RUN pnpm build
 
 # Merge dist/ into the served root AND prune the previous build's chunks.

@@ -30,6 +30,17 @@ services:
         # seconds inside the image when unset; set it explicitly (e.g.
         # BUILD_NUMBER=$(date +%s)) to make a rebuild reproducible.
         BUILD_NUMBER: "${BUILD_NUMBER:-}"
+        # Self-hosted GlitchTip DSN, inlined into the bundle at build time.
+        # Export it (or put it in a .env next to this file) before building, or
+        # the deploy ships with error tracking off.
+        VITE_GLITCHTIP_DSN: "${VITE_GLITCHTIP_DSN:-}"
+        # Source-map upload to GlitchTip. Optional: unset = build as before,
+        # with minified stacks. The token is a secret — export it, don't commit
+        # it. url/org/project fall back to the defaults in vite.config.ts.
+        SENTRY_AUTH_TOKEN: "${SENTRY_AUTH_TOKEN:-}"
+        SENTRY_URL: "${SENTRY_URL:-}"
+        SENTRY_ORG: "${SENTRY_ORG:-}"
+        SENTRY_PROJECT: "${SENTRY_PROJECT:-}"
     restart: unless-stopped
     networks:
       - shared
