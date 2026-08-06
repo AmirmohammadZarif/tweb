@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {redact, redactValue} from '@lib/debug/crashReporter';
+import {redact, redactValue} from '@lib/debug/redact';
 
 // The crash reporter uploads the log ring buffer to the CRM. The CRM already
 // holds every ticket message, so conversation text is not newly exposed — but

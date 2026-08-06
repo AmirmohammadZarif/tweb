@@ -48,6 +48,23 @@ export type ServiceEvent = {
   port: (payload: void, source: MessageEventSource, event: MessageEvent) => void
 };
 
+/**
+ * An uncaught error inside the service worker, forwarded to a window client so
+ * it can be reported (see @lib/debug/errorTracking).
+ *
+ * The Error object itself is NOT structured-cloneable in a useful way across
+ * contexts (the stack survives, the prototype does not), so it is flattened to
+ * plain fields here.
+ */
+export type ServiceErrorPayload = {
+  kind: 'error' | 'unhandledrejection',
+  message: string,
+  stack?: string,
+  filename?: string,
+  lineno?: number,
+  colno?: number
+};
+
 export type SWToggleUsingPasscodePayload = {
   type: 'init';
   isUsingPasscode: boolean;
@@ -96,6 +113,9 @@ export default class ServiceMessagePort<Master extends boolean = false> extends 
   downloadRequestReceived: (payload: string) => void,
   serviceCryptoPort: (payload: undefined, source: MessageEventSource, event: MessageEvent) => void,
   clearCacheStoragesByNames: (payload: CacheStorageDbName[]) => void,
+  // Uncaught SW error, forwarded so a window client can report it. The SW has
+  // no `window`, so the Sentry browser SDK's global handlers can never see it.
+  swError: (payload: ServiceErrorPayload) => void,
 
   // to mtproto worker
   requestFilePart: (payload: ServiceRequestFilePartTaskPayload) => MaybePromise<MyUploadFile>,

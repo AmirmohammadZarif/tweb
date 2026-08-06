@@ -24,6 +24,7 @@ import IS_SHARED_WORKER_SUPPORTED from '@environment/sharedWorkerSupport';
 import toggleStorages from '@helpers/toggleStorages';
 import idleController from '@helpers/idleController';
 import ServiceMessagePort from '@lib/serviceWorker/serviceMessagePort';
+import {captureForeignError} from '@lib/debug/errorTracking';
 import deferredPromise, {CancellablePromise} from '@helpers/cancellablePromise';
 import {makeWorkerURL} from '@helpers/setWorkerProxy';
 import ServiceWorkerURL from '../../sw?worker&url';
@@ -825,6 +826,15 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
         clearCacheStoragesByNames: async(payload) => {
           await this.clearCacheStoragesByNames(payload);
+        },
+
+        // The SW has no `window`, so the Sentry browser SDK's global handlers
+        // can never see its crashes — it forwards them here instead (to ONE
+        // client, so N open tabs don't file N copies). Re-raised with a
+        // `source: sw` tag; see @lib/debug/errorTracking.
+        swError: (payload) => {
+          this.log.error('service worker error:', payload);
+          captureForeignError('sw', payload);
         }
       });
     }

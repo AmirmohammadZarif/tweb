@@ -4,7 +4,7 @@ import onStreamFetch, {toggleStreamInUse} from '@lib/serviceWorker/stream';
 import {closeAllNotifications, fillPushObject, onPing, onShownNotification, resetPushAccounts} from '@lib/serviceWorker/push';
 import CacheStorageController from '@lib/files/cacheStorage';
 import {IS_SAFARI} from '@environment/userAgent';
-import ServiceMessagePort from '@lib/serviceWorker/serviceMessagePort';
+import ServiceMessagePort, {type ServiceErrorPayload} from '@lib/serviceWorker/serviceMessagePort';
 import {getLogEntries, setLogBufferEnabled} from '@lib/debug/logsBuffer';
 import listenMessagePort from '@helpers/listenMessagePort';
 import {getWindowClients} from '@helpers/context';
@@ -360,13 +360,61 @@ ctx.addEventListener('activate', (event) => {
   event.waitUntil(ctx.clients.claim().then(() => log('claimed clients')));
 });
 
-// ctx.onerror = (error) => {
-//   log.error('error:', error);
-// };
+// Uncaught errors in this worker used to vanish entirely: these handlers were
+// commented out, so a SW crash reached neither the ring buffer nor any reporter,
+// and the SW has no `window` for the Sentry browser SDK to hook. That made the
+// fragile paths here (startupCheck deadlocks, stream/download interception)
+// invisible — the user just sees "it spins forever".
+//
+// Now: log it (so it lands in this context's ring buffer and in an export /
+// client-logs upload) and hand it to ONE window client to report.
+{
+  const MAX_FORWARDED = 5;
+  let forwarded = 0;
+  const seen = new Set<string>();
 
-// ctx.onunhandledrejection = (error) => {
-//   log.error('onunhandledrejection:', error);
-// };
+  const forward = (payload: ServiceErrorPayload) => {
+    try {
+      // Dedupe within this SW lifetime, and cap: a wedged fetch handler can
+      // throw on every single request.
+      const key = payload.kind + '|' + payload.message;
+      if(forwarded >= MAX_FORWARDED || seen.has(key)) return;
+      seen.add(key);
+      ++forwarded;
+
+      // Deliberately ONE client, not invokeVoidAll: every open tab is a window
+      // client, and broadcasting would file N copies of one SW error.
+      getWindowClients().then((windowClients) => {
+        const client = windowClients[0];
+        if(client) serviceMessagePort.invokeVoid('swError', payload, client);
+      }).catch(() => {});
+    } catch(err) {
+      // Never let the reporter throw from inside an error handler.
+    }
+  };
+
+  ctx.addEventListener('error', (event) => {
+    log.error('uncaught error:', event.message, event.error);
+    forward({
+      kind: 'error',
+      message: event.message || String(event.error),
+      stack: event.error?.stack,
+      filename: event.filename,
+      lineno: event.lineno,
+      colno: event.colno
+    });
+  });
+
+  ctx.addEventListener('unhandledrejection', (event) => {
+    const reason: any = event.reason;
+    log.error('unhandledrejection:', reason);
+    forward({
+      kind: 'unhandledrejection',
+      message: reason?.message || String(reason),
+      stack: reason?.stack
+    });
+  });
+}
 
 ctx.onoffline = ctx.ononline = onChangeState;
 

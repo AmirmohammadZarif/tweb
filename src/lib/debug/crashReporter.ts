@@ -21,6 +21,7 @@
 import rootScope from '@lib/rootScope';
 import App from '@config/app';
 import {MOUNT_CLASS_TO} from '@config/debug';
+import {redact, redactValue} from './redact';
 import type {CrmClientLogReason} from '@lib/crm/types';
 import type {LogEntry} from './logsBuffer';
 
@@ -39,41 +40,6 @@ let reportsSent = 0;
 let lastSentAt = 0;
 let installed = false;
 const seenFingerprints = new Set<string>();
-
-/**
- * Redact things that look like credentials before they leave the browser.
- *
- * This is deliberately NOT a general content scrubber: the reports go to the
- * CRM, which already stores every ticket message, so conversation text is not
- * newly exposed by this upload. What must never leave are the things the CRM
- * does NOT already hold — MTProto auth keys, bearer tokens, OTP codes — because
- * those would turn a debugging aid into a credential leak.
- */
-export function redact(value: string): string {
-  return value
-  // NB: the char class must include `|` and `.`. CRM tokens are Sanctum's
-  // `<id>|<random>` and a JWT is dot-separated — a `[\w-]` class stops at the
-  // separator, matches only the short id, fails the {16,} bound, and silently
-  // redacts nothing at all.
-  .replace(/(bearer\s+)[A-Za-z0-9|._~+/=-]{16,}/gi, '$1<redacted>')
-  .replace(/\b(auth_?key|access_?token|api_?hash|secret|password|otp|code)\b(\s*[:=]\s*)\S+/gi, '$1$2<redacted>')
-  // Long hex / base64 blobs: auth keys, session ids, file references.
-  .replace(/\b[0-9a-f]{32,}\b/gi, '<redacted:hex>')
-  .replace(/\b[A-Za-z0-9+/]{40,}={0,2}\b/g, '<redacted:b64>');
-}
-
-/** Walk an entry's args and redact every string, bounded in depth. */
-export function redactValue(value: any, depth = 0): any {
-  if(typeof value === 'string') return redact(value);
-  if(depth >= 4 || value === null || typeof value !== 'object') return value;
-  if(Array.isArray(value)) return value.map((v) => redactValue(v, depth + 1));
-
-  const out: Record<string, any> = {};
-  for(const key in value) {
-    out[key] = redactValue(value[key], depth + 1);
-  }
-  return out;
-}
 
 function fingerprintOf(message: string, stack: string) {
   // Only used for in-session dedupe; the server computes the real one. Numbers

@@ -20,10 +20,13 @@
  */
 
 import App from '@config/app';
-import {redact} from './crashReporter';
+import {redact} from './redact';
 import type {ErrorEvent, EventHint} from '@sentry/browser';
 
 let installed = false;
+// Kept so worker-forwarded errors can be captured later. Undefined until init
+// resolves, and forever when there is no DSN.
+let sentry: typeof import('@sentry/browser') | undefined;
 
 /**
  * Strip credentials from every free-text field of an outbound event.
@@ -74,7 +77,7 @@ export async function installErrorTracking() {
   try {
     // Dynamic import so the ~30KB SDK stays out of the boot path (and out of
     // the bundle entirely for builds with no DSN configured).
-    const Sentry = await import('@sentry/browser');
+    const Sentry = sentry = await import('@sentry/browser');
 
     Sentry.init({
       dsn,
@@ -107,5 +110,50 @@ export async function installErrorTracking() {
   } catch(err) {
     // A failed error-reporter must never break boot.
     console.error('[errorTracking] init failed:', err);
+  }
+}
+
+/**
+ * Report an uncaught error that happened in ANOTHER context (currently only the
+ * service worker — see ServiceErrorPayload / index.service.ts).
+ *
+ * Those contexts have no `window`, so the SDK's global handlers can never see
+ * them; they are forwarded over the message port and re-raised here. The
+ * `source` tag is what tells you, in GlitchTip, that a stack belongs to the SW
+ * and not to this thread — without it these are extremely confusing to triage.
+ *
+ * The reconstructed Error carries the ORIGINAL stack string, so it symbolicates
+ * against the same uploaded maps as any main-thread error.
+ */
+export function captureForeignError(source: 'sw', payload: {
+  kind: string,
+  message: string,
+  stack?: string,
+  filename?: string,
+  lineno?: number,
+  colno?: number
+}) {
+  if(!sentry) return;
+
+  try {
+    const error = new Error(payload.message);
+    error.name = source.toUpperCase() + ' ' + payload.kind;
+    if(payload.stack) error.stack = payload.stack;
+
+    sentry.withScope((scope) => {
+      scope.setTag('source', source);
+      scope.setTag('error_kind', payload.kind);
+      scope.setLevel('error');
+      if(payload.filename) {
+        scope.setContext('location', {
+          filename: payload.filename,
+          lineno: payload.lineno,
+          colno: payload.colno
+        });
+      }
+      sentry.captureException(error);
+    });
+  } catch{
+    // Reporting must never throw.
   }
 }
