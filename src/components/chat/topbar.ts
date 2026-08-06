@@ -88,6 +88,7 @@ export default class ChatTopbar {
   private avatar: ReturnType<typeof avatarNew>;
   private avatarMiddlewareHelper: MiddlewareHelper;
   private title: HTMLDivElement;
+  private crmTicketBadge: HTMLSpanElement;
   private subtitle: HTMLDivElement;
   private chatUtils: HTMLDivElement;
   private btnCall: HTMLButtonElement;
@@ -161,7 +162,10 @@ export default class ChatTopbar {
     this.title = document.createElement('div');
     this.title.classList.add('user-title');
 
-    top.append(this.title);
+    this.crmTicketBadge = document.createElement('span');
+    this.crmTicketBadge.classList.add('topbar-crm-ticket-badge', 'hide');
+
+    top.append(this.title, this.crmTicketBadge);
 
     const bottom = document.createElement('div');
     bottom.classList.add('bottom');
@@ -1009,6 +1013,18 @@ export default class ChatTopbar {
       }
     });
 
+    this.listenerSetter.add(rootScope)('crm_ticket_update', ({peerId, ticket}) => {
+      if(this.peerId !== peerId) return;
+      Promise.resolve(ticket?.status || rootScope.managers.appCrmManager.getTicketStatusCached(peerId))
+      .then((status) => this.setCrmTicketBadge(status));
+    });
+
+    this.listenerSetter.add(rootScope)('crm_open_tickets_update', () => {
+      if(!this.peerId?.isUser()) return;
+      Promise.resolve(rootScope.managers.appCrmManager.getTicketStatusCached(this.peerId))
+      .then((status) => this.setCrmTicketBadge(status));
+    });
+
     this.listenerSetter.add(rootScope)('chat_requests', ({chatId, recentRequesters, requestsPending}) => {
       if(this.peerId !== chatId.toPeerId(true)) {
         return;
@@ -1422,6 +1438,8 @@ export default class ChatTopbar {
       this.plates.translation.setPeerId(peerId);
       this.plates.sponsored.setPeerId(peerId);
       this.plates.crmTicket.setPeerId(peerId);
+      Promise.resolve(peerId.isUser() ? rootScope.managers.appCrmManager.getTicketStatusCached(peerId) : undefined)
+      .then((status) => this.setCrmTicketBadge(status));
 
       callbackify(setRequestsCallback.result, (callback) => {
         if(!middleware()) {
@@ -1449,6 +1467,21 @@ export default class ChatTopbar {
 
       this.container.classList.toggle('show-back-button', needArrowBack);
     };
+  }
+
+  private setCrmTicketBadge(status?: string) {
+    if(!this.crmTicketBadge) return;
+
+    if(!status || !this.peerId?.isUser()) {
+      this.crmTicketBadge.classList.add('hide');
+      this.crmTicketBadge.textContent = '';
+      delete this.crmTicketBadge.dataset.status;
+      return;
+    }
+
+    this.crmTicketBadge.textContent = status;
+    this.crmTicketBadge.dataset.status = status;
+    this.crmTicketBadge.classList.remove('hide');
   }
 
   public async setTitleManual(count?: number) {

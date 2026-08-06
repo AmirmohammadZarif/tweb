@@ -213,6 +213,7 @@ export type BroadcastEvents = {
   'crm_config_update': void,
   'crm_auth_required': void,
   'crm_ticket_update': {peerId: PeerId, ticket?: import('@lib/crm/types').CrmTicketRef},
+  'crm_open_tickets_update': {peerIds: PeerId[]},
   'crm_attributions_update': {peerId: PeerId, attributions: import('@lib/crm/types').CrmAttributionMap},
   'crm_attribution_push': {peerId: PeerId, messageId: number, attribution: import('@lib/crm/types').CrmMessageAttribution},
   // Sensitive-message reveal workflow. `state` is the REST backfill on chat open

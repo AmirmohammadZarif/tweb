@@ -13,6 +13,8 @@ import {
   CrmTask,
   CrmTaskQuery,
   CrmTaskStatus,
+  CrmTicketListItem,
+  CrmTicketListResult,
   CrmReverbConfig,
   CrmCustomer,
   CrmFaq,
@@ -34,6 +36,9 @@ export default class AppCrmManager extends AppManager {
   private storage: AppStorage<Record<string, CrmConfig>, ReturnType<typeof getDatabaseState>>;
   private config: CrmConfig;
   private loadPromise: Promise<void>;
+  private openTicketPeerIds: PeerId[] = [];
+  private ticketByPeerId = new Map<PeerId, CrmTicketRef>();
+  private openTicketsFetchedAt = 0;
 
   protected after() {
     this.name = 'CRM';
@@ -87,7 +92,7 @@ export default class AppCrmManager extends AppManager {
   private async request<T>(
     method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
     path: string,
-    options: {body?: object, query?: Record<string, string>, auth?: boolean} = {}
+    options: {body?: object, query?: Record<string, string | number>, auth?: boolean} = {}
   ): Promise<T> {
     await this.loadPromise;
 
@@ -98,7 +103,7 @@ export default class AppCrmManager extends AppManager {
     if(options.query) {
       const params = new URLSearchParams();
       for(const key in options.query) {
-        if(options.query[key] != null) params.set(key, options.query[key]);
+        if(options.query[key] != null) params.set(key, '' + options.query[key]);
       }
       const qs = params.toString();
       if(qs) url += '?' + qs;
@@ -283,10 +288,79 @@ export default class AppCrmManager extends AppManager {
   }
 
   // ── Ticket lifecycle (open/close) for the chat's customer ─────────────────
+  private rememberTicket(chatId: string, ticket?: CrmTicketRef) {
+    if(!chatId) return;
+    const peerId = (+chatId).toPeerId();
+    if(ticket) {
+      this.ticketByPeerId.set(peerId, ticket);
+    } else {
+      this.ticketByPeerId.delete(peerId);
+      this.openTicketPeerIds = this.openTicketPeerIds.filter((id) => id !== peerId);
+    }
+  }
+
+  private setOpenTicketList(tickets: CrmTicketListItem[]) {
+    const peerIds: PeerId[] = [];
+    for(const item of tickets) {
+      const chatId = item.customer?.telegram_chat_id;
+      if(!chatId) continue;
+      const peerId = (+chatId).toPeerId();
+      peerIds.push(peerId);
+      this.ticketByPeerId.set(peerId, {id: item.id, status: item.status, events: item.events});
+    }
+
+    for(const peerId of this.openTicketPeerIds) {
+      const cached = this.ticketByPeerId.get(peerId);
+      if(cached?.status === 'open' && !peerIds.includes(peerId)) {
+        this.ticketByPeerId.delete(peerId);
+      }
+    }
+
+    this.openTicketPeerIds = peerIds;
+    this.openTicketsFetchedAt = Date.now();
+    this.rootScope.dispatchEvent('crm_open_tickets_update', {peerIds});
+  }
+
+  public getTicketStatusCached(peerId: PeerId): CrmTicketStatus | undefined {
+    return this.ticketByPeerId.get(peerId)?.status;
+  }
+
+  public hasOpenTicketForPeer(peerId: PeerId): boolean {
+    return this.ticketByPeerId.get(peerId)?.status === 'open';
+  }
+
+  public async getOpenTicketPeerIds(force = false): Promise<PeerId[]> {
+    if(!(await this.isConnected())) return [];
+    if(!force && Date.now() - this.openTicketsFetchedAt < 30000) {
+      return this.openTicketPeerIds;
+    }
+
+    try {
+      const tickets: CrmTicketListItem[] = [];
+      let page = 1;
+      let lastPage = 1;
+      do {
+        const result = await this.request<CrmTicketListResult>('GET', CRM_ENDPOINTS.tickets, {
+          query: {status: 'open', page}
+        });
+        tickets.push(...(result?.data || []));
+        lastPage = result?.last_page || 1;
+        page++;
+      } while(page <= lastPage);
+
+      this.setOpenTicketList(tickets);
+      return this.openTicketPeerIds;
+    } catch(err) {
+      this.log.error('getOpenTicketPeerIds failed', err);
+      return this.openTicketPeerIds;
+    }
+  }
+
   public async getTicketByTelegram(chatId: string): Promise<CrmTicketLookupResult> {
     if(!(await this.isConnected()) || !chatId) return {failed: true};
     try {
       const result = await this.request<{ticket: CrmTicketRef | null}>('GET', `${CRM_ENDPOINTS.tickets}/by-telegram/${encodeURIComponent(chatId)}`);
+      this.rememberTicket(chatId, result?.ticket || undefined);
       if(!result?.ticket) return {noTicket: true};
       return {ticket: result.ticket};
     } catch(err) {
@@ -400,7 +474,9 @@ export default class AppCrmManager extends AppManager {
   }
 
   public async updateTicketStatus(ticketId: number, status: CrmTicketStatus) {
-    return this.request('PATCH', `${CRM_ENDPOINTS.tickets}/${ticketId}/status`, {body: {status}});
+    const result = await this.request('PATCH', `${CRM_ENDPOINTS.tickets}/${ticketId}/status`, {body: {status}});
+    this.getOpenTicketPeerIds(true);
+    return result;
   }
 
   // ── Internal agent notes (keyed by telegram chat id) ──────────────────────

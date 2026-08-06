@@ -239,6 +239,7 @@ const lang = {
   'Crm.Ticket.Loading': 'Loading ticket…',
   'Crm.Ticket.LoadFailed': 'Could not load the ticket',
   'Crm.Ticket.Retry': 'Retry',
+  'Crm.OpenTicketsFolder': 'Open Tickets',
   'Crm.SessionExpired': 'CRM session expired',
   'Crm.Login': 'Log In',
   'Crm.Sensitive.Hidden': 'Hidden',

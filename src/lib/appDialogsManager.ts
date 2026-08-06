@@ -39,7 +39,7 @@ import windowSize from '@helpers/windowSize';
 import isInDOM from '@helpers/dom/isInDOM';
 import {setSendingStatus} from '@components/sendingStatus';
 import {SortedElementBase} from '@helpers/sortedList';
-import {FOLDER_ID_ALL, FOLDER_ID_ARCHIVE, NULL_PEER_ID, REAL_FOLDERS} from '@appManagers/constants';
+import {FOLDER_ID_ALL, FOLDER_ID_ARCHIVE, FOLDER_ID_CRM_OPEN_TICKETS, NULL_PEER_ID, REAL_FOLDERS} from '@appManagers/constants';
 import groupCallActiveIcon from '@components/groupCallActiveIcon';
 import {ChatlistsChatlistUpdates, DialogFilter, Message, MessageMedia, MessageReplyHeader} from '@layer';
 import mediaSizes from '@helpers/mediaSizes';
@@ -134,6 +134,7 @@ export type DialogDom = {
   mentionsBadge?: HTMLElement,
   reactionsBadge?: HTMLElement,
   pollVotesBadge?: HTMLElement,
+  crmTicketBadge?: HTMLElement,
   lastMessageSpan: HTMLSpanElement,
   containerEl: HTMLElement,
   listEl: HTMLElement,
@@ -207,6 +208,8 @@ type DialogElementOptions = {
 export class DialogElement extends Row {
   public dom: DialogDom;
   public middlewareHelper: MiddlewareHelper;
+  private onCrmOpenTicketsUpdate?: () => void;
+  private onCrmTicketUpdate?: (payload: {peerId: PeerId}) => void;
 
   constructor({
     peerId,
@@ -400,9 +403,50 @@ export class DialogElement extends Row {
     if(isActive) {
       appDialogsManager.setDialogActive(li, true);
     }
+
+    if(peerId.isUser()) {
+      const refreshCrmTicketStatus = () => {
+        Promise.resolve(rootScope.managers.appCrmManager.getTicketStatusCached(peerId))
+        .then((status) => this.setCrmTicketStatus(status));
+      };
+      refreshCrmTicketStatus();
+      this.onCrmOpenTicketsUpdate = refreshCrmTicketStatus;
+      this.onCrmTicketUpdate = ({peerId: updatedPeerId}) => {
+        if(updatedPeerId === peerId) {
+          refreshCrmTicketStatus();
+        }
+      };
+      rootScope.addEventListener('crm_open_tickets_update', this.onCrmOpenTicketsUpdate);
+      rootScope.addEventListener('crm_ticket_update', this.onCrmTicketUpdate as any);
+    }
+  }
+
+  public setCrmTicketStatus(status?: string) {
+    if(!status) {
+      this.dom.crmTicketBadge?.remove();
+      this.dom.crmTicketBadge = undefined;
+      return;
+    }
+
+    if(!this.dom.crmTicketBadge) {
+      const badge = this.dom.crmTicketBadge = document.createElement('div');
+      badge.className = 'dialog-subtitle-badge badge badge-20 dialog-subtitle-badge-crm-ticket';
+      this.dom.subtitleEl.append(badge);
+    }
+
+    this.dom.crmTicketBadge.textContent = status;
+    this.dom.crmTicketBadge.dataset.status = status;
   }
 
   public destroy() {
+    if(this.onCrmOpenTicketsUpdate) {
+      rootScope.removeEventListener('crm_open_tickets_update', this.onCrmOpenTicketsUpdate);
+      this.onCrmOpenTicketsUpdate = undefined;
+    }
+    if(this.onCrmTicketUpdate) {
+      rootScope.removeEventListener('crm_ticket_update', this.onCrmTicketUpdate as any);
+      this.onCrmTicketUpdate = undefined;
+    }
     this.middlewareHelper?.destroy();
   }
 
@@ -1049,7 +1093,22 @@ export class AppDialogsManager {
     const {onClick: _onClick, hydrateFilters} = useFolders();
     const onClick = untrack(_onClick);
 
+    const crmOpenTicketsFilter = {
+      _: 'dialogFilter',
+      id: FOLDER_ID_CRM_OPEN_TICKETS,
+      localId: 1,
+      title: {_: 'textWithEntities', text: 'Open Tickets', entities: []},
+      pFlags: {},
+      include_peers: [],
+      exclude_peers: [],
+      pinned_peers: [],
+      includePeerIds: [],
+      excludePeerIds: [],
+      pinnedPeerIds: []
+    } as MyDialogFilter;
+
     const addFilters = async(filters: MyDialogFilter[]) => {
+      filters = [filters[0], crmOpenTicketsFilter, ...filters.slice(1)].filter(Boolean);
       for(const filter of filters) {
         this.addFilter(filter);
       }

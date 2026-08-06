@@ -3,7 +3,7 @@ import Tabs from '@components/tabs';
 import wrapFolderTitle from '@components/wrappers/folderTitle';
 import documentFragmentToNodes from '@helpers/dom/documentFragmentToNodes';
 import createMiddleware from '@helpers/solid/createMiddleware';
-import {FOLDER_ID_ALL} from '@lib/appManagers/constants';
+import {FOLDER_ID_ALL, FOLDER_ID_CRM_OPEN_TICKETS} from '@lib/appManagers/constants';
 import {i18n} from '@lib/langPack';
 import useFolders from '@stores/folders';
 import {For} from 'solid-js';
@@ -19,6 +19,10 @@ export default function FoldersTabs(props: {
     const title = () => {
       if(item.id === FOLDER_ID_ALL) {
         return i18n('FilterAllChatsShort');
+      }
+
+      if(item.id === FOLDER_ID_CRM_OPEN_TICKETS) {
+        return i18n('Crm.OpenTicketsFolder');
       }
 
       const fragment = wrapFolderTitle(

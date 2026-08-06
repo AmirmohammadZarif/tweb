@@ -269,6 +269,7 @@ ul.chatlist {
 
         .badge.unread,
         .mention,
+        .dialog-subtitle-badge-crm-ticket,
         .dialog-subtitle-badge-reaction,
         .dialog-subtitle-badge-pollvote {
           background-color: #fff !important;
@@ -651,6 +652,27 @@ ul.chatlist {
   &-subtitle-badge,
   &-group-call-icon {
     @include dialog-badge-transition();
+  }
+
+  &-subtitle-badge-crm-ticket {
+    width: auto;
+    min-width: 32px;
+    height: 18px;
+    padding: 0 .375rem;
+    border-radius: 9px;
+    font-size: .6875rem;
+    line-height: 18px;
+    text-transform: capitalize;
+    color: #fff;
+    background-color: var(--primary-color);
+
+    &[data-status="closed"] {
+      background-color: var(--secondary-text-color);
+    }
+
+    &[data-status="archived"] {
+      background-color: var(--danger-color);
+    }
   }
 
   &-avatar {

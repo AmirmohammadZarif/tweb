@@ -2,7 +2,7 @@ import {createEffect, createMemo, createRoot, createSignal, untrack} from 'solid
 import {createStore, reconcile} from 'solid-js/store';
 import indexOfAndSplice from '@helpers/array/indexOfAndSplice';
 import rootScope from '@lib/rootScope';
-import {FOLDER_ID_ALL, FOLDER_ID_ARCHIVE, REAL_FOLDERS} from '@appManagers/constants';
+import {FOLDER_ID_ALL, FOLDER_ID_ARCHIVE, FOLDER_ID_CRM_OPEN_TICKETS, REAL_FOLDERS} from '@appManagers/constants';
 import type {MyDialogFilter} from '@lib/storages/filters';
 import type {AppManagers} from '@lib/managers';
 
@@ -17,6 +17,11 @@ export type StoredFolder = {
 };
 
 async function getNotificationCountForFilter(filterId: number, managers: AppManagers) {
+  if(filterId === FOLDER_ID_CRM_OPEN_TICKETS) {
+    const peerIds = await managers.appCrmManager.getOpenTicketPeerIds();
+    return {count: peerIds.length, muted: false};
+  }
+
   const {
     unreadUnmutedCount,
     unreadCount,
@@ -86,6 +91,16 @@ const useFoldersStore = createRoot(() => {
   }
 
   async function makeFolderItemPayload(filter: MyDialogFilter): Promise<StoredFolder> {
+    if(filter.id === FOLDER_ID_CRM_OPEN_TICKETS) {
+      const notifications = await getNotificationCountForFilter(filter.id, rootScope.managers);
+      return {
+        id: filter.id,
+        notifications,
+        chatsCount: notifications.count,
+        filter
+      };
+    }
+
     const [notifications, folder] = await Promise.all([
       getNotificationCountForFilter(filter.id, rootScope.managers),
       rootScope.managers.dialogsStorage.getFolder(filter.id)
@@ -175,6 +190,10 @@ const useFoldersStore = createRoot(() => {
     rootScope.addEventListener('folder_unread', (filter) => {
       if(filter.id < 0) return;
       updateFolderNotifications(filter.id);
+    });
+
+    rootScope.addEventListener('crm_open_tickets_update', () => {
+      updateFolderNotifications(FOLDER_ID_CRM_OPEN_TICKETS);
     });
 
     rootScope.addEventListener('filter_update', (filter) => {

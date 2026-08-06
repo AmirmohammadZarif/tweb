@@ -233,6 +233,19 @@ export type CrmTicketRef = {
   events?: CrmTicketEvent[]
 };
 
+export type CrmTicketListItem = CrmTicketRef & {
+  customer?: CrmCustomer & {telegram_chat_id?: string | null},
+  updated_at?: string,
+  created_at?: string
+};
+
+export type CrmTicketListResult = {
+  data: CrmTicketListItem[],
+  current_page: number,
+  last_page: number,
+  total: number
+};
+
 /** Outcome of resolving a chat to its CRM ticket — separates "no ticket" from errors. */
 export type CrmTicketLookupResult = {
   ticket?: CrmTicketRef,

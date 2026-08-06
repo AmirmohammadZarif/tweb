@@ -1,5 +1,5 @@
 import {Dialog} from '@appManagers/appMessagesManager';
-import {FOLDER_ID_ALL, FOLDER_ID_ARCHIVE, REAL_FOLDERS} from '@appManagers/constants';
+import {FOLDER_ID_ALL, FOLDER_ID_ARCHIVE, FOLDER_ID_CRM_OPEN_TICKETS, REAL_FOLDERS} from '@appManagers/constants';
 import getDialogIndex from '@appManagers/utils/dialogs/getDialogIndex';
 import getDialogIndexKey from '@appManagers/utils/dialogs/getDialogIndexKey';
 import {isDialog, isForumTopic} from '@appManagers/utils/dialogs/isDialog';
@@ -176,6 +176,12 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
     this.listenerSetter.add(rootScope)('auto_delete_period_update', ({peerId, period}) => {
       this.getDialogElement(peerId)?.dom?.avatarEl?.setAutoDeletePeriod(period);
     });
+
+    this.listenerSetter.add(rootScope)('crm_ticket_update', async({peerId}) => {
+      if(this.filterId !== FOLDER_ID_CRM_OPEN_TICKETS) return;
+      const dialog = await this.managers.appMessagesManager.getDialogOnly(peerId);
+      if(dialog) this.updateDialog(dialog);
+    });
   }
 
   private get isActive() {
@@ -245,6 +251,10 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       return false;
     }
 
+    if(this.filterId === FOLDER_ID_CRM_OPEN_TICKETS) {
+      return dialog?.peerId?.isUser() && this.managers.appCrmManager.hasOpenTicketForPeer(dialog.peerId);
+    }
+
     // Blacklisted peers (777000 service chat — login codes) are CRM-superadmin-only.
     if(HIDDEN_DIALOG_PEER_IDS.has(dialog.peerId) && !useIsCrmSuperAdmin()()) {
       return false;
@@ -255,6 +265,31 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
     }
 
     return true;
+  }
+
+  protected async dialogsFetcher(offsetIndex: number, limit: number) {
+    if(this.filterId !== FOLDER_ID_CRM_OPEN_TICKETS) {
+      return super.dialogsFetcher(offsetIndex, limit);
+    }
+
+    const peerIds = await this.managers.appCrmManager.getOpenTicketPeerIds(!offsetIndex);
+    const dialogs = (await Promise.all(peerIds
+    .map((peerId) => this.managers.appMessagesManager.getDialogOnly(peerId))))
+    .filter(Boolean) as Dialog[];
+    dialogs.sort((a, b) => getDialogIndex(b, this.indexKey) - getDialogIndex(a, this.indexKey));
+
+    let offset = 0;
+    if(offsetIndex > 0) {
+      for(; offset < dialogs.length; ++offset) {
+        if(offsetIndex > getDialogIndex(dialogs[offset], this.indexKey)) break;
+      }
+    }
+
+    return {
+      dialogs: dialogs.slice(offset, offset + limit),
+      count: dialogs.length,
+      isEnd: offset + limit >= dialogs.length
+    };
   }
 
   protected async loadDialogsInner({offsetIndex, canFinish}: LoadDialogsInnerArgs) {
