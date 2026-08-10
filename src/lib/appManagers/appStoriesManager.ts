@@ -684,6 +684,12 @@ export default class AppStoriesManager extends AppManager {
   }
 
   public deleteStories(peerId: PeerId, ids: StoryItem['id'][]) {
+    // Fail-closed twin of the `hasRights(..., 'delete')` gate — plain agents must
+    // not be able to destroy stories even if a UI path forgets to check.
+    if(!this.appCrmManager.isSuperAdminCached()) {
+      return Promise.resolve(false);
+    }
+
     const cache = this.getPeerStoriesCache(peerId);
     const savedItems: MyStoryItem[] = [];
     for(const id of ids) {
@@ -1468,6 +1474,13 @@ export default class AppStoriesManager extends AppManager {
   }
 
   public hasRights(peerId: PeerId, storyId: number, right: 'send' | 'edit' | 'delete' | 'archive' | 'pin') {
+    // Deleting stories is CRM-superadmin-only, including one's own — this single
+    // gate covers the viewer menu, the profile context menu and the bulk-select
+    // toolbar (via cantPinDeleteStories).
+    if(right === 'delete' && !this.appCrmManager.isSuperAdminCached()) {
+      return false;
+    }
+
     if(peerId.isUser()) {
       return this.appPeersManager.peerId === peerId;
     }

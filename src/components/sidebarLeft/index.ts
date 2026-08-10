@@ -1041,11 +1041,15 @@ export class AppSidebarLeft extends SidebarSlider {
         closeTabsBefore(() => {
           this.createTab(AppNewChannelTab).open();
         });
-      }
+      },
+      // Creating channels is CRM-superadmin-only.
+      verify: () => useIsCrmSuperAdmin()()
     }, {
       icon: 'newgroup',
       text: singular ? 'Group' : 'NewGroup',
-      onClick: onNewGroupClick
+      onClick: onNewGroupClick,
+      // Creating groups is CRM-superadmin-only.
+      verify: () => useIsCrmSuperAdmin()()
     }, {
       icon: 'newprivate',
       text: singular ? 'PrivateChat' : 'NewPrivateChat',

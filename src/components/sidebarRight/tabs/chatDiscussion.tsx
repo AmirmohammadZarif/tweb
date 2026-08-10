@@ -20,6 +20,7 @@ import {handleChannelsTooMuch} from '@components/popups/channelsTooMuch';
 import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
 import {usePromiseCollector} from '@components/solidJsTabs/promiseCollector';
 import {useHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
+import useIsCrmSuperAdmin from '@stores/crmRole';
 import type {AppChatDiscussionTab} from '@components/solidJsTabs/tabs';
 
 const ChatDiscussion: Component = () => {
@@ -288,7 +289,8 @@ const ChatDiscussion: Component = () => {
       <div ref={stickerContainer} class="sticker-container" />
       <div class="caption">{captionEl()}</div>
       <Section caption={sectionCaption()} contentProps={{ref: (el) => sectionContent = el}}>
-        <Show when={isBroadcastSig() && !createGroupHidden()}>
+        {/* Creating a discussion group is group creation — CRM-superadmin-only. */}
+        <Show when={isBroadcastSig() && !createGroupHidden() && useIsCrmSuperAdmin()()}>
           <Button
             class="btn-primary btn-transparent primary"
             icon="newgroup"

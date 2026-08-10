@@ -18,6 +18,7 @@ import {unwrap} from 'solid-js/store';
 import {assign, Portal} from 'solid-js/web';
 import rootScope from '@lib/rootScope';
 import {Middleware} from '@helpers/middleware';
+import useIsCrmSuperAdmin from '@stores/crmRole';
 import wrapRichText, {WrapRichTextOptions} from '@lib/richTextProcessor/wrapRichText';
 import wrapMessageEntities from '@lib/richTextProcessor/wrapMessageEntities';
 import tsNow from '@helpers/tsNow';
@@ -2460,7 +2461,10 @@ const Stories = (props: {
             {getViews()}
           </div>
           <div class={styles.ViewerStoryFooterRight}>
-            <ButtonIconTsx icon="delete" onClick={onDeleteClick} />
+            {/* Deleting stories is CRM-superadmin-only. */}
+            <Show when={useIsCrmSuperAdmin()()}>
+              <ButtonIconTsx icon="delete" onClick={onDeleteClick} />
+            </Show>
           </div>
         </>
       ) : (!props.state.peerId.isUser() ? (

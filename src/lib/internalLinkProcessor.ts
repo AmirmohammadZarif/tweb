@@ -697,8 +697,12 @@ export class InternalLinkProcessor {
             if(!useIsCrmSuperAdmin()()) return;
             return showCreateContactPopup();
           case 'channel':
+            // Channel creation is CRM-superadmin-only.
+            if(!useIsCrmSuperAdmin()()) return;
             return appSidebarLeft.createTab(AppNewChannelTab).open();
           case 'group':
+            // Group creation is CRM-superadmin-only.
+            if(!useIsCrmSuperAdmin()()) return;
             return createNewGroupTab(appSidebarLeft);
           default:
             // The contacts list is CRM-superadmin-only.
