@@ -7,6 +7,7 @@ import ArchiveDialog, {createArchiveDialogState, DisposableArchiveDialogState} f
 import {AutonomousDialogListBase, BaseConstructorArgs, LoadDialogsInnerArgs} from '@components/autonomousDialogList/base';
 import {BADGE_TRANSITION_TIME} from '@components/autonomousDialogList/constants';
 import {HIDDEN_DIALOG_PEER_IDS} from '@config/app';
+import {hasCrmOpenTicket, setCrmOpenTicketPeerIds} from '@stores/crmOpenTickets';
 import useIsCrmSuperAdmin, {useIsCrmLoggedIn} from '@stores/crmRole';
 import groupCallActiveIcon from '@components/groupCallActiveIcon';
 import Scrollable from '@components/scrollable';
@@ -252,7 +253,8 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
     }
 
     if(this.filterId === FOLDER_ID_CRM_OPEN_TICKETS) {
-      return dialog?.peerId?.isUser() && this.managers.appCrmManager.hasOpenTicketForPeer(dialog.peerId);
+      // Must stay synchronous — see the note in @stores/crmOpenTickets.
+      return !!dialog?.peerId?.isUser() && hasCrmOpenTicket(dialog.peerId);
     }
 
     // Blacklisted peers (777000 service chat — login codes) are CRM-superadmin-only.
@@ -273,6 +275,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
     }
 
     const peerIds = await this.managers.appCrmManager.getOpenTicketPeerIds(!offsetIndex);
+    setCrmOpenTicketPeerIds(peerIds);
     const dialogs = (await Promise.all(peerIds
     .map((peerId) => this.managers.appMessagesManager.getDialogOnly(peerId))))
     .filter(Boolean) as Dialog[];

@@ -189,6 +189,13 @@ export function horizontalMenu(
         el = (tabs.querySelector(`[data-tab="${id}"]`) || tabs.children[id]) as HTMLElement;
       }
 
+      // The tabs row can be rendered reactively (folder tabs only exist once the
+      // folders store hydrates), while callers select a tab as soon as the row
+      // element itself is mounted — so `id` may have no element yet. Selecting a
+      // tab that isn't in the DOM throws on `target.classList`; skip instead, the
+      // caller re-selects once the tabs are in.
+      if(!el) return;
+
       _selectTarget(el, id, animate);
     }
   });
