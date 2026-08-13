@@ -465,6 +465,16 @@ export default class ChatTopbar {
       // already-loaded ticket signal — no extra round-trip on menu open.
       verify: () => this.plates?.crmTicket.getTicket()?.status === 'open'
     }, {
+      icon: 'readchats',
+      text: 'Crm.PeekMode.MarkRead',
+      onClick: () => {
+        this.chat.bubbles.markChatRead();
+      },
+      // Peek mode ("Manual read"): the chat was opened without sending a read
+      // receipt, so this is how the agent claims it. Only shown while there is
+      // actually something being held back.
+      verify: () => !!this.chat.bubbles?.hasHeldReads()
+    }, {
       icon: 'note',
       text: 'Crm.Note.MenuButton',
       onClick: () => {

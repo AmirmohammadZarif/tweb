@@ -267,6 +267,24 @@ export default function createChatCrmTicketPlate(
     });
   };
 
+  // Per-message FIRST VIEWER map: which agent displayed each customer message
+  // while it was still unread. Backfill on chat open; the `inbound.seen` push
+  // (on the attribution channel, subscribed above) keeps it live.
+  const loadFirstSeen = (peerId: PeerId) => {
+    if(!peerId?.isUser()) {
+      rootScope.dispatchEvent('crm_first_seen_update', {peerId, firstSeen: {}});
+      return;
+    }
+
+    managers.appCrmManager.isConnected().then((connected) => {
+      if(peerId !== currentPeerId || !connected) return;
+      managers.appCrmManager.getFirstSeenByTelegram('' + peerId.toUserId()).then((firstSeen) => {
+        if(peerId !== currentPeerId) return;
+        rootScope.dispatchEvent('crm_first_seen_update', {peerId, firstSeen});
+      });
+    });
+  };
+
   // Sensitive-message reveal state: which blurred messages THIS agent may see,
   // plus pending requests for superadmins. Backfill on chat open; the Reverb
   // push (subscribed alongside attributions) keeps it live.
@@ -352,6 +370,7 @@ export default function createChatCrmTicketPlate(
     load(peerId);
     scheduleFollowUpLoad(peerId);
     loadAttributions(peerId);
+    loadFirstSeen(peerId);
     loadSensitiveReveals(peerId);
     loadNotes(peerId);
   };
@@ -375,6 +394,7 @@ export default function createChatCrmTicketPlate(
   const refresh = debounce(() => {
     load(currentPeerId);
     loadAttributions(currentPeerId);
+    loadFirstSeen(currentPeerId);
     loadSensitiveReveals(currentPeerId);
     loadNotes(currentPeerId);
   }, 800, false, true);
@@ -408,6 +428,7 @@ export default function createChatCrmTicketPlate(
     load(currentPeerId);
     scheduleFollowUpLoad(currentPeerId);
     loadAttributions(currentPeerId);
+    loadFirstSeen(currentPeerId);
     loadSensitiveReveals(currentPeerId);
     loadNotes(currentPeerId);
   };

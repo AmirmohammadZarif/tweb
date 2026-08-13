@@ -1,5 +1,6 @@
 import {AppManager} from '@appManagers/manager';
 import {getDatabaseState} from '@config/databases/state';
+import ctx from '@environment/ctx';
 import AppStorage from '@lib/storage';
 import {
   CRM_API_PREFIX,
@@ -7,6 +8,9 @@ import {
   CRM_ENDPOINTS,
   CrmAttributionMap,
   CrmConfig,
+  CrmFirstSeenMap,
+  CrmFirstSeenSummary,
+  CrmFirstSeenSummaryEntry,
   CrmCreateTaskInput,
   CrmProject,
   CrmRealtimeConfig,
@@ -32,6 +36,24 @@ import {
   EMPTY_CRM_CONFIG
 } from '@lib/crm/types';
 
+/**
+ * Hard stop on the open-ticket pagination walk (40 tickets per page). The list is
+ * department-scoped, so a healthy department fits in a page or two; this only
+ * bites when the scoping fails open — better a truncated folder than dozens of
+ * sequential requests every time it refreshes.
+ */
+const MAX_OPEN_TICKET_PAGES = 10;
+
+/**
+ * Chat-list first-seen labels: how long a peer's cached entry is trusted before
+ * the next request re-fetches it, and how long requests are pooled so a scrolling
+ * chatlist produces one call instead of one per row. MAX_FIRST_SEEN_CHAT_IDS
+ * mirrors the CRM's own cap on the summary endpoint.
+ */
+const FIRST_SEEN_TTL = 60000;
+const FIRST_SEEN_BATCH_MS = 200;
+const MAX_FIRST_SEEN_CHAT_IDS = 300;
+
 export default class AppCrmManager extends AppManager {
   private storage: AppStorage<Record<string, CrmConfig>, ReturnType<typeof getDatabaseState>>;
   private config: CrmConfig;
@@ -39,6 +61,12 @@ export default class AppCrmManager extends AppManager {
   private openTicketPeerIds: PeerId[] = [];
   private ticketByPeerId = new Map<PeerId, CrmTicketRef>();
   private openTicketsFetchedAt = 0;
+  // Chat-list first-seen: the newest labeled message per peer, plus when we last
+  // asked for it and which peers are waiting for the next pooled request.
+  private firstSeenByPeerId = new Map<PeerId, CrmFirstSeenSummaryEntry>();
+  private firstSeenFetchedAt = new Map<PeerId, number>();
+  private pendingFirstSeenPeerIds = new Set<PeerId>();
+  private firstSeenBatchTimeout: number;
 
   protected after() {
     this.name = 'CRM';
@@ -300,18 +328,26 @@ export default class AppCrmManager extends AppManager {
   }
 
   private setOpenTicketList(tickets: CrmTicketListItem[]) {
+    // One entry per TICKET, so a customer with two open tickets appears twice —
+    // dedupe to peers or the folder badge overcounts and the list renders the
+    // same chat more than once.
+    const seen = new Set<PeerId>();
     const peerIds: PeerId[] = [];
     for(const item of tickets) {
       const chatId = item.customer?.telegram_chat_id;
       if(!chatId) continue;
       const peerId = (+chatId).toPeerId();
-      peerIds.push(peerId);
+      if(!seen.has(peerId)) {
+        seen.add(peerId);
+        peerIds.push(peerId);
+      }
+
       this.ticketByPeerId.set(peerId, {id: item.id, status: item.status, events: item.events});
     }
 
     for(const peerId of this.openTicketPeerIds) {
       const cached = this.ticketByPeerId.get(peerId);
-      if(cached?.status === 'open' && !peerIds.includes(peerId)) {
+      if(cached?.status === 'open' && !seen.has(peerId)) {
         this.ticketByPeerId.delete(peerId);
       }
     }
@@ -335,18 +371,38 @@ export default class AppCrmManager extends AppManager {
       return this.openTicketPeerIds;
     }
 
+    // Scope to the department owning THIS Telegram session. Without it a
+    // superadmin token gets every open ticket in the CRM (thousands, 40 per page),
+    // which is neither what the folder means nor something we should page through.
+    const sessionTelegramUserId = this.appPeersManager.peerId.toUserId();
+
     try {
       const tickets: CrmTicketListItem[] = [];
       let page = 1;
       let lastPage = 1;
       do {
         const result = await this.request<CrmTicketListResult>('GET', CRM_ENDPOINTS.tickets, {
-          query: {status: 'open', page}
+          query: {status: 'open', page, session_telegram_user_id: sessionTelegramUserId}
         });
+        if(page === 1 && result) {
+          if(!('department_id' in result)) {
+            // Pre-scoping CRM: it ignores the query param, so we get the whole
+            // backlog exactly as before. Harmless, but worth saying out loud.
+            this.log.warn('CRM does not support department scoping yet; open tickets are unscoped');
+          } else if(result.department_id === null) {
+            // Scoping resolved to nothing and the CRM fails closed, so the folder
+            // will be empty — indistinguishable from "no open tickets" without this.
+            this.log.warn(
+              'no CRM department is mapped to this Telegram session; the open-tickets folder will be empty',
+              {sessionTelegramUserId}
+            );
+          }
+        }
+
         tickets.push(...(result?.data || []));
         lastPage = result?.last_page || 1;
         page++;
-      } while(page <= lastPage);
+      } while(page <= lastPage && page <= MAX_OPEN_TICKET_PAGES);
 
       this.setOpenTicketList(tickets);
       return this.openTicketPeerIds;
@@ -412,6 +468,141 @@ export default class AppCrmManager extends AppManager {
       this.log.error('getAttributionsByTelegram failed', err);
       return {};
     }
+  }
+
+  // ── Inbound first-seen ("who picked this conversation up") ────────────────
+  // Reads are anonymous on a shared department account: the first agent to open
+  // the chat marks everything read for all of them. So each session reports the
+  // messages IT actually displayed as unread, and the CRM keeps the first report
+  // per message. See @lib/crm/types → CrmFirstSeen.
+
+  /**
+   * Report messages this session was the first to display as unread. The CRM
+   * ignores ids another agent already claimed, and answers with the resulting
+   * map for every id — so the caller labels bubbles with the truth rather than
+   * with its own guess. Empty on failure (bubbles stay unlabeled).
+   */
+  public async reportMessagesSeen(chatId: string, messageIds: number[]): Promise<CrmFirstSeenMap> {
+    if(!(await this.isConnected()) || !chatId || !messageIds?.length) return {};
+    try {
+      const result = await this.request<{data: CrmFirstSeenMap}>('POST', CRM_ENDPOINTS.markSeen(chatId), {
+        body: {message_ids: messageIds}
+      });
+      const map = result?.data || {};
+      this.rememberFirstSeen(chatId, map);
+      return map;
+    } catch(err) {
+      this.log.error('reportMessagesSeen failed', err);
+      return {};
+    }
+  }
+
+  /** Per-message first-viewer map for a chat — backfills history on chat open. */
+  public async getFirstSeenByTelegram(chatId: string): Promise<CrmFirstSeenMap> {
+    if(!(await this.isConnected()) || !chatId) return {};
+    try {
+      const result = await this.request<{data: CrmFirstSeenMap}>('GET', CRM_ENDPOINTS.firstSeen(chatId));
+      const map = result?.data || {};
+      this.rememberFirstSeen(chatId, map);
+      return map;
+    } catch(err) {
+      this.log.error('getFirstSeenByTelegram failed', err);
+      return {};
+    }
+  }
+
+  /**
+   * The chat-list label for a peer, or undefined when nobody has been recorded
+   * yet. Synchronous by design: dialog rows render from cache and refresh off
+   * `crm_first_seen_summary_update` — see requestFirstSeenForPeers.
+   */
+  public getFirstSeenCached(peerId: PeerId): CrmFirstSeenSummaryEntry | undefined {
+    return this.firstSeenByPeerId.get(peerId);
+  }
+
+  /**
+   * Ask for the chat-list labels of these peers. Called per dialog row, so it
+   * pools requests over FIRST_SEEN_BATCH_MS and skips peers refreshed within
+   * FIRST_SEEN_TTL — a scrolling chatlist costs one request per batch, not one
+   * per row. Fire-and-forget: the result lands as `crm_first_seen_summary_update`.
+   */
+  public async requestFirstSeenForPeers(peerIds: PeerId[], force = false): Promise<void> {
+    if(!(await this.isConnected()) || !peerIds?.length) return;
+
+    const now = Date.now();
+    for(const peerId of peerIds) {
+      if(!peerId?.isUser()) continue;
+      const fetchedAt = this.firstSeenFetchedAt.get(peerId);
+      if(!force && fetchedAt && now - fetchedAt < FIRST_SEEN_TTL) continue;
+      this.pendingFirstSeenPeerIds.add(peerId);
+    }
+
+    if(!this.pendingFirstSeenPeerIds.size || this.firstSeenBatchTimeout) return;
+    this.firstSeenBatchTimeout = ctx.setTimeout(() => {
+      this.firstSeenBatchTimeout = undefined;
+      this.flushFirstSeenBatch();
+    }, FIRST_SEEN_BATCH_MS);
+  }
+
+  private async flushFirstSeenBatch() {
+    const peerIds = Array.from(this.pendingFirstSeenPeerIds).slice(0, MAX_FIRST_SEEN_CHAT_IDS);
+    if(!peerIds.length) return;
+    peerIds.forEach((peerId) => this.pendingFirstSeenPeerIds.delete(peerId));
+
+    // Mark them fetched up front: a failed request must not make every dialog row
+    // retry on its next render, and the TTL will let them through again anyway.
+    const now = Date.now();
+    peerIds.forEach((peerId) => this.firstSeenFetchedAt.set(peerId, now));
+
+    try {
+      const result = await this.request<{data: CrmFirstSeenSummary}>('GET', CRM_ENDPOINTS.firstSeenSummary, {
+        query: {chat_ids: peerIds.map((peerId) => peerId.toUserId()).join(',')}
+      });
+
+      const summary = result?.data || {};
+      for(const peerId of peerIds) {
+        const entry = summary['' + peerId.toUserId()];
+        if(entry) this.firstSeenByPeerId.set(peerId, entry);
+        else this.firstSeenByPeerId.delete(peerId);
+      }
+
+      this.rootScope.dispatchEvent('crm_first_seen_summary_update', {peerIds});
+    } catch(err) {
+      this.log.error('first-seen summary failed', err);
+    }
+
+    // More peers queued up while this request was in flight (long chatlist).
+    if(this.pendingFirstSeenPeerIds.size && !this.firstSeenBatchTimeout) {
+      this.firstSeenBatchTimeout = ctx.setTimeout(() => {
+        this.firstSeenBatchTimeout = undefined;
+        this.flushFirstSeenBatch();
+      }, FIRST_SEEN_BATCH_MS);
+    }
+  }
+
+  /**
+   * Fold a per-message map into the chat-list cache: the row shows the NEWEST
+   * labeled message, so an open chat updating its bubbles keeps its list row in
+   * step without a second request.
+   */
+  private rememberFirstSeen(chatId: string, map: CrmFirstSeenMap) {
+    const messageIds = Object.keys(map);
+    if(!chatId || !messageIds.length) return;
+
+    let latest = 0;
+    for(const messageId of messageIds) {
+      const id = +messageId;
+      if(id > latest) latest = id;
+    }
+    if(!latest) return;
+
+    const peerId = (+chatId).toPeerId();
+    const current = this.firstSeenByPeerId.get(peerId);
+    if(current && current.message_id > latest) return;
+
+    this.firstSeenByPeerId.set(peerId, {...map['' + latest], message_id: latest});
+    this.firstSeenFetchedAt.set(peerId, Date.now());
+    this.rootScope.dispatchEvent('crm_first_seen_summary_update', {peerIds: [peerId]});
   }
 
   // ── Sensitive-message reveal workflow ─────────────────────────────────────

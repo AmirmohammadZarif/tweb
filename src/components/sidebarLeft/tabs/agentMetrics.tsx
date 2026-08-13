@@ -20,6 +20,8 @@ import classNames from '@helpers/string/classNames';
 import appImManager from '@lib/appImManager';
 import InputField from '@components/inputField';
 import agentIdentity from '@lib/agentIdentity';
+import agentReadMode from '@lib/agentReadMode';
+import CheckboxFieldTsx from '@components/checkboxFieldTsx';
 import {toast, toastNew} from '@components/toast';
 
 
@@ -154,6 +156,33 @@ const AgentIdentitySection = () => {
   return (
     <Section name="AgentMetrics.IdentitySection" caption="AgentMetrics.IdentityCaption">
       {nameField.container}
+    </Section>
+  );
+};
+
+
+// Peek mode: open chats without sending a read receipt, and claim them
+// explicitly. Per browser (like the agent name), so each agent picks their own
+// working style — see @lib/agentReadMode.
+const ManualReadSection = () => {
+  const [enabled, setEnabled] = createSignal(agentReadMode.isEnabled());
+
+  const onUpdate = () => setEnabled(agentReadMode.isEnabled());
+  rootScope.addEventListener('agent_read_mode_update', onUpdate);
+  onCleanup(() => rootScope.removeEventListener('agent_read_mode_update', onUpdate));
+
+  return (
+    <Section name="Crm.PeekMode.Title" caption="Crm.PeekMode.Caption">
+      <Row>
+        <Row.CheckboxFieldToggle>
+          <CheckboxFieldTsx
+            checked={enabled()}
+            toggle
+            onChange={(checked) => agentReadMode.setEnabled(checked)}
+          />
+        </Row.CheckboxFieldToggle>
+        <Row.Title>{i18n('Crm.PeekMode.Title')}</Row.Title>
+      </Row>
     </Section>
   );
 };
@@ -306,6 +335,7 @@ export default function AgentMetrics() {
   return (
     <>
       <AgentIdentitySection />
+      <ManualReadSection />
       <CrmSection />
 
       <Section name="AgentMetrics.TodayOverview">

@@ -135,6 +135,7 @@ export type DialogDom = {
   reactionsBadge?: HTMLElement,
   pollVotesBadge?: HTMLElement,
   crmTicketBadge?: HTMLElement,
+  crmSeenTag?: HTMLElement,
   lastMessageSpan: HTMLSpanElement,
   containerEl: HTMLElement,
   listEl: HTMLElement,
@@ -210,6 +211,8 @@ export class DialogElement extends Row {
   public middlewareHelper: MiddlewareHelper;
   private onCrmOpenTicketsUpdate?: () => void;
   private onCrmTicketUpdate?: (payload: {peerId: PeerId}) => void;
+  private onCrmFirstSeenSummaryUpdate?: (payload: {peerIds: PeerId[]}) => void;
+  private onCrmFirstSeenPush?: (payload: {peerId: PeerId}) => void;
 
   constructor({
     peerId,
@@ -418,7 +421,52 @@ export class DialogElement extends Row {
       };
       rootScope.addEventListener('crm_open_tickets_update', this.onCrmOpenTicketsUpdate);
       rootScope.addEventListener('crm_ticket_update', this.onCrmTicketUpdate as any);
+
+      // Who picked this conversation up: the agent who saw its newest customer
+      // message first. The request is pooled manager-side (one call per batch of
+      // rows, TTL'd), so a scrolling chatlist doesn't fan out into a request per row.
+      const refreshCrmFirstSeen = () => {
+        Promise.resolve(rootScope.managers.appCrmManager.getFirstSeenCached(peerId))
+        .then((entry) => this.setCrmFirstSeen(entry));
+      };
+      rootScope.managers.appCrmManager.requestFirstSeenForPeers([peerId]);
+      refreshCrmFirstSeen();
+
+      this.onCrmFirstSeenSummaryUpdate = ({peerIds}) => {
+        if(peerIds?.includes(peerId)) refreshCrmFirstSeen();
+      };
+      // A colleague read a message in this chat right now — their session reported
+      // it, so re-pull this row's entry instead of waiting out the cache TTL.
+      this.onCrmFirstSeenPush = ({peerId: pushedPeerId}) => {
+        if(pushedPeerId === peerId) {
+          rootScope.managers.appCrmManager.requestFirstSeenForPeers([peerId], true);
+        }
+      };
+      rootScope.addEventListener('crm_first_seen_summary_update', this.onCrmFirstSeenSummaryUpdate);
+      rootScope.addEventListener('crm_first_seen_push', this.onCrmFirstSeenPush as any);
     }
+  }
+
+  /** Chatlist label: "👁 <agent>" for the newest customer message with a viewer. */
+  public setCrmFirstSeen(entry?: {name?: string}) {
+    if(!entry?.name) {
+      this.dom.crmSeenTag?.remove();
+      this.dom.crmSeenTag = undefined;
+      return;
+    }
+
+    if(!this.dom.crmSeenTag) {
+      // Deliberately NOT a `dialog-subtitle-badge`: that class starts at scale(0)
+      // and is revealed by the badge-toggle machinery (toggleBadgeByKey), which
+      // this label doesn't go through.
+      const tag = this.dom.crmSeenTag = document.createElement('div');
+      tag.className = 'dialog-subtitle-seen-tag';
+      tag.append(Icon('eye1', 'dialog-subtitle-seen-tag-icon'), document.createElement('span'));
+      this.dom.subtitleEl.append(tag);
+    }
+
+    this.dom.crmSeenTag.lastElementChild.textContent = entry.name;
+    this.dom.crmSeenTag.title = i18n('Crm.SeenFirstBy', [entry.name]).textContent;
   }
 
   public setCrmTicketStatus(status?: string) {
@@ -446,6 +494,14 @@ export class DialogElement extends Row {
     if(this.onCrmTicketUpdate) {
       rootScope.removeEventListener('crm_ticket_update', this.onCrmTicketUpdate as any);
       this.onCrmTicketUpdate = undefined;
+    }
+    if(this.onCrmFirstSeenSummaryUpdate) {
+      rootScope.removeEventListener('crm_first_seen_summary_update', this.onCrmFirstSeenSummaryUpdate);
+      this.onCrmFirstSeenSummaryUpdate = undefined;
+    }
+    if(this.onCrmFirstSeenPush) {
+      rootScope.removeEventListener('crm_first_seen_push', this.onCrmFirstSeenPush as any);
+      this.onCrmFirstSeenPush = undefined;
     }
     this.middlewareHelper?.destroy();
   }

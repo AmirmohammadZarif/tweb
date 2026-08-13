@@ -209,6 +209,8 @@ export type BroadcastEvents = {
   'support_metrics_update': void,
   'quick_replies_update': void,
   'agent_identity_update': void,
+  // Manual-read ("peek") mode toggled — see @lib/agentReadMode.
+  'agent_read_mode_update': void,
   'agent_message_tagged': {fullMid: string},
   'crm_config_update': void,
   'crm_auth_required': void,
@@ -224,6 +226,13 @@ export type BroadcastEvents = {
   'crm_sensitive_reveal_push': {peerId: PeerId, messageId: number, userId: number | null},
   // A regular agent requested a reveal — only superadmin sessions act on this.
   'crm_sensitive_request_push': {peerId: PeerId, messageId: number, requestedBy: number, name: string, reason?: string},
+  // Inbound first-seen: which agent displayed each customer message while it was
+  // still unread. `update` is the REST backfill on chat open, `push` a live map
+  // over Reverb, `summary_update` the per-peer newest entry the chatlist labels
+  // rows with (read back via appCrmManager.getFirstSeenCached).
+  'crm_first_seen_update': {peerId: PeerId, firstSeen: import('@lib/crm/types').CrmFirstSeenMap},
+  'crm_first_seen_push': {peerId: PeerId, seen: import('@lib/crm/types').CrmFirstSeenMap},
+  'crm_first_seen_summary_update': {peerIds: PeerId[]},
   // Internal agent notes for a chat. `update` is the full list (REST backfill on
   // chat open + after a local add); `push` is a single live note over Reverb.
   'crm_notes_update': {peerId: PeerId, notes: import('@lib/crm/types').CrmNote[]},

@@ -6,6 +6,7 @@ import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import {logger} from '@lib/logger';
 import rootScope from '@lib/rootScope';
 import agentIdentity from '@lib/agentIdentity';
+import agentReadMode from '@lib/agentReadMode';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
 import BubbleGroups from '@components/chat/bubbleGroups';
 import showDatePickerPopup from '@components/popups/datePicker';
@@ -558,6 +559,14 @@ export default class ChatBubbles {
   // so outbound bubbles are labeled with which agent replied — for EVERY session,
   // not just the one that sent them (all agents share one Telegram account).
   private crmAttributions: import('@lib/crm/types').CrmAttributionMap = {};
+  // The inbound mirror ({<server message id>: {admin_id, name, at}}): which agent
+  // displayed each customer message while it was still unread. Reads are anonymous
+  // on the shared account — the first session to show a message reports it, and
+  // every session labels the bubble from this map. See reportSeenToCrm.
+  private crmFirstSeen: import('@lib/crm/types').CrmFirstSeenMap = {};
+  // Peek mode: set once the agent claims THIS chat, after which reads flow
+  // normally again for the rest of the visit. Reset on peer change (cleanup).
+  private manualReadReleased = false;
   // Sensitive-message reveal state for the open chat. `crmSensitiveApproved` are
   // server message ids THIS agent may see in the clear; anything detected as
   // sensitive and not in the set stays blurred. Superadmins never blur.
@@ -1164,6 +1173,29 @@ export default class ChatBubbles {
     this.listenerSetter.add(rootScope)('crm_attribution_push', ({peerId, messageId, attribution}) => {
       if(peerId !== this.peerId) return;
       this.crmAttributions['' + messageId] = attribution;
+      this.retagAgentBubbles();
+    });
+
+    // Replying IS claiming the chat: once the customer has our answer, holding
+    // their message unread helps nobody. The agent's own first reply releases
+    // peek mode for this chat (no-op when the mode is off).
+    this.listenerSetter.add(rootScope)('message_sent', ({message}) => {
+      if(message?.peerId !== this.peerId) return;
+      this.markChatRead();
+    });
+
+    // First-viewer backfill for the open chat (replaces the whole map, like the
+    // attribution backfill), plus the live push for messages read right now — by
+    // this session or by a colleague sharing the account.
+    this.listenerSetter.add(rootScope)('crm_first_seen_update', ({peerId, firstSeen}) => {
+      if(peerId !== this.peerId) return;
+      this.crmFirstSeen = firstSeen || {};
+      this.retagAgentBubbles();
+    });
+
+    this.listenerSetter.add(rootScope)('crm_first_seen_push', ({peerId, seen}) => {
+      if(peerId !== this.peerId || !seen) return;
+      Object.assign(this.crmFirstSeen, seen);
       this.retagAgentBubbles();
     });
 
@@ -3005,8 +3037,49 @@ export default class ChatBubbles {
     this.readUnreaded(type);
   }
 
+  // Peek mode: hold every read for this chat until the agent claims it. Scoped to
+  // 1:1 customer chats (the whole point is the customer's read receipt and the
+  // team's unread state) and released for good once the chat IS claimed, so the
+  // rest of the visit reads normally. See @lib/agentReadMode.
+  private isReadHeld() {
+    return agentReadMode.isEnabled() &&
+      !this.manualReadReleased &&
+      !!this.chat.peerId?.isUser() &&
+      this.chat.type === ChatType.Chat;
+  }
+
+  /** Is there anything the agent is currently holding back from being read? */
+  public hasHeldReads() {
+    return this.isReadHeld() &&
+      !!(this.unreaded.size || this.unreadedSeen.size || this.unreadedContent.size || this.unreadedContentSeen.size);
+  }
+
+  /**
+   * Claim the chat: read everything held back, which sends the read receipt, drops
+   * the team's unread state and records this agent as the first viewer. Called
+   * from the topbar action, "/read", and on the agent's own first reply.
+   * Returns false when there was nothing held.
+   */
+  public markChatRead() {
+    if(!this.hasHeldReads()) return false;
+
+    this.manualReadReleased = true;
+
+    // The agent claims the CHAT, not just what they scrolled past — treat every
+    // still-observed unread message as seen rather than only the viewport set.
+    this.unreaded.forEach((mid, target) => this.onUnreadedInViewport('history', target, mid));
+    this.unreadedContent.forEach((mid, target) => this.onUnreadedInViewport('content', target, mid));
+
+    // onUnreadedInViewport already kicks readUnreaded, but not when both maps were
+    // empty and only the seen sets had entries (messages seen while held).
+    this.readUnreaded('history');
+    this.readUnreaded('content');
+    return true;
+  }
+
   private readUnreaded(type: 'history' | 'content') {
     if(this.chat.isPreview) return;
+    if(this.isReadHeld()) return;
     const readPromiseKey = type === 'history' ? 'readPromise' : 'readContentPromise';
     if(this[readPromiseKey]) return;
 
@@ -3040,6 +3113,11 @@ export default class ChatBubbles {
         if(DEBUG) {
           this.log('will readHistory by maxId:', maxId);
         }
+
+        // Everything in the seen set was still unread in THIS session and actually
+        // entered the viewport — the only moment we can honestly say this agent is
+        // the one who picked these messages up. Report before the set is cleared.
+        this.reportSeenToCrm(peerId, Array.from(this.unreadedSeen));
 
         callback = () => this.managers.appMessagesManager.readHistory({peerId, maxId, threadId, monoforumThreadId});
       } else {
@@ -5183,6 +5261,8 @@ export default class ChatBubbles {
     this.crmDividers.length = 0;
     this.crmTicket = undefined;
     this.crmAttributions = {};
+    this.crmFirstSeen = {};
+    this.manualReadReleased = false;
     this.crmSensitiveApproved.clear();
     this.crmNoteMarkedBubbles.length = 0;
     this.crmNoteDividers.length = 0;
@@ -5996,6 +6076,9 @@ export default class ChatBubbles {
 
   public onScrolledAllDown() {
     if(this.chat.isPreview) return;
+    // Scrolling to the bottom force-reads the whole history — the single biggest
+    // leak if peek mode didn't cover it.
+    if(this.isReadHeld()) return;
     if(this.chat.type === ChatType.Chat || this.chat.type === ChatType.Discussion) {
       const {peerId, threadId, monoforumThreadId} = this.chat;
       const historyMaxId = this.chat.getHistoryMaxId();
@@ -6438,9 +6521,22 @@ export default class ChatBubbles {
 
     content.querySelector(':scope > .agent-tag')?.remove();
 
-    if(!isOut) return;
-
     const serverMid = getServerMessageId(mid);
+
+    // Incoming: label with the agent who SAW it first, not who wrote it — the
+    // customer wrote it, and on a shared account "who picked this up" is the only
+    // thing a colleague can't otherwise tell. See reportSeenToCrm.
+    if(!isOut) {
+      const seen = serverMid ? this.crmFirstSeen['' + serverMid] : undefined;
+      if(!seen?.name) return;
+
+      const tag = document.createElement('div');
+      tag.classList.add('agent-tag', 'agent-tag-seen');
+      tag.append(Icon('eye1', 'agent-tag-icon'), i18n('Crm.SeenFirstBy', [seen.name]));
+      content.prepend(tag);
+      return;
+    }
+
     const attributed = serverMid ? this.crmAttributions['' + serverMid] : undefined;
     const name = attributed?.name ||
       (agentIdentity.wasSentByThisSession(peerId, mid) ? agentIdentity.getName() : '');
@@ -6452,8 +6548,32 @@ export default class ChatBubbles {
     content.prepend(tag);
   }
 
-  // Re-tag every rendered outbound bubble — used when the attribution map arrives
-  // or refreshes (so another agent's reply gets labeled on this session too).
+  // Tell the CRM this agent displayed these customer messages while they were
+  // still unread, so it can record the FIRST viewer of each one. Agents share one
+  // department Telegram account: as soon as anyone reads a chat it is read for
+  // everybody, so this client-side signal is the only place the individual viewer
+  // exists. The CRM keeps the earliest report per message and answers with the
+  // resulting map (which may credit a colleague who got there first) — we merge
+  // that, never our own assumption. Fire-and-forget, off the read path.
+  private reportSeenToCrm(peerId: PeerId, mids: number[]) {
+    if(!peerId?.isUser() || !mids?.length || !useIsCrmLoggedIn()()) return;
+
+    const messageIds = mids
+    .map((mid) => getServerMessageId(mid))
+    .filter((messageId) => !!messageId && !this.crmFirstSeen['' + messageId]);
+    if(!messageIds.length) return;
+
+    this.managers.appCrmManager.reportMessagesSeen('' + peerId.toUserId(), messageIds)
+    .then((firstSeen) => {
+      if(this.peerId !== peerId || !firstSeen) return;
+      Object.assign(this.crmFirstSeen, firstSeen);
+      this.retagAgentBubbles();
+    });
+  }
+
+  // Re-tag every rendered bubble — used when the attribution or first-seen map
+  // arrives or refreshes (so a colleague's reply, or the fact that they saw the
+  // customer's message first, gets labeled on this session too).
   private retagAgentBubbles() {
     for(const fullMid in this.bubbles) {
       const bubble = this.bubbles[fullMid];

@@ -4321,6 +4321,17 @@ export default class ChatInput {
         return;
       }
 
+      // Support-fork: "/read" claims a chat opened in peek mode (manual read) —
+      // sends the read receipt, drops the team's unread state and records this
+      // agent as its first viewer. Keyboard-only counterpart of the topbar action.
+      if(trimmed.toLowerCase() === '/read') {
+        this.clearInput();
+        if(!chat.bubbles?.markChatRead()) {
+          toastNew({langPackKey: 'Crm.PeekMode.NothingToRead'});
+        }
+        return;
+      }
+
       // Support-fork: "/task <title>" captures a CRM task without leaving the
       // conversation, assigned to the agent who typed it. Like /close and /note
       // above, the raw command must never reach the customer.

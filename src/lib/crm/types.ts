@@ -50,6 +50,11 @@ export const CRM_ENDPOINTS = {
   agents: '/agents',
   customersSearch: '/customers/search',
   tickets: '/tickets',
+  // Inbound mirror of the attribution endpoints: which agent SAW each customer
+  // message first. See CrmFirstSeen.
+  markSeen: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/seen`,
+  firstSeen: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/first-seen`,
+  firstSeenSummary: '/tickets/first-seen/summary',
   // Internal agent-only notes for a chat (keyed by the customer's telegram chat
   // id, like attributions). See CrmNote.
   notes: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/notes`,
@@ -243,7 +248,14 @@ export type CrmTicketListResult = {
   data: CrmTicketListItem[],
   current_page: number,
   last_page: number,
-  total: number
+  total: number,
+  /**
+   * Echo of the department resolved from `session_telegram_user_id`. `null` while
+   * the session isn't mapped to a department (the CRM then returns nothing rather
+   * than every open ticket) — the signal that distinguishes "no tickets" from
+   * "this Telegram session has no department".
+   */
+  department_id?: number | null
 };
 
 /** Outcome of resolving a chat to its CRM ticket — separates "no ticket" from errors. */
@@ -266,6 +278,39 @@ export type CrmMessageAttribution = {
 };
 
 export type CrmAttributionMap = Record<string, CrmMessageAttribution>;
+
+// ── Inbound first-seen ("who picked this conversation up") ───────────────────
+// The mirror image of attributions. Agents read the customer over ONE shared
+// department Telegram account, so the moment anybody opens the chat every
+// message is read for everybody — Telegram's read state can't name the human who
+// got there first. Each session reports the messages it actually displayed as
+// unread; the CRM keeps the FIRST report per message and hands the resulting map
+// back to every session (REST backfill on chat open + `inbound.seen` push).
+
+// GET /tickets/by-telegram/{chatId}/first-seen -> {data: CrmFirstSeenMap}
+// POST /tickets/by-telegram/{chatId}/seen {message_ids} -> {data: CrmFirstSeenMap}
+export type CrmFirstSeen = {
+  admin_id: number,
+  name: string,
+  at?: string // ISO8601
+};
+
+export type CrmFirstSeenMap = Record<string, CrmFirstSeen>;
+
+// GET /tickets/first-seen/summary?chat_ids= -> {data: Record<chatId, CrmFirstSeenSummaryEntry>}
+// One entry per chat — the newest customer message that has a first viewer — which
+// is what the chat LIST labels each row with (the full per-message map would be
+// orders of magnitude too much data for a list of hundreds of rows).
+export type CrmFirstSeenSummaryEntry = CrmFirstSeen & {
+  message_id: number
+};
+
+export type CrmFirstSeenSummary = Record<string, CrmFirstSeenSummaryEntry>;
+
+// Realtime first-viewer push. Rides the per-peer ATTRIBUTION channel (same
+// audience, same lifetime) rather than a channel of its own, and carries a whole
+// map: a session reports every message of a read burst in one call.
+export const CRM_INBOUND_SEEN_EVENT = 'inbound.seen';
 
 // ── Internal agent notes ─────────────────────────────────────────────────────
 // Agents share one department Telegram account, so an internal note is how they

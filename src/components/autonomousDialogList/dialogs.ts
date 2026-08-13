@@ -218,7 +218,14 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
     const scrollable = new Scrollable(null, 'CL', 500);
     scrollable.container.dataset.filterId = '' + filterId;
 
-    const indexKey = getDialogIndexKey(filter.localId);
+    // `localId` doubles as the dialog INDEX selector, and the CRM folder borrows
+    // localId 1 purely to sit next to "All" in the tab strip — but index_1 is the
+    // ARCHIVE index, which is undefined on every non-archived dialog. Sorting by
+    // it yields NaN comparisons (scrambled order) and breaks the virtual list's
+    // positioning. Its chats are ordinary folder-0 chats, so order them by index_0.
+    const indexKey = getDialogIndexKey(
+      filterId === FOLDER_ID_CRM_OPEN_TICKETS ? FOLDER_ID_ALL : filter.localId
+    );
     const sortedDialogList = new SortedDialogList({
       appDialogsManager: this.appDialogsManager,
       managers: rootScope.managers,
@@ -276,8 +283,24 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
 
     const peerIds = await this.managers.appCrmManager.getOpenTicketPeerIds(!offsetIndex);
     setCrmOpenTicketPeerIds(peerIds);
-    const dialogs = (await Promise.all(peerIds
-    .map((peerId) => this.managers.appMessagesManager.getDialogOnly(peerId))))
+    // This folder is peer-driven rather than index-driven, so its chats are
+    // whatever the CRM says — NOT necessarily anything the paged dialog list has
+    // reached yet. `getDialogOnly` is cache-only, so relying on it alone leaves
+    // the folder empty until the user happens to scroll far enough in All.
+    // Fall back to reloadConversation, which batches the misses into a single
+    // messages.getPeerDialogs round-trip.
+    //
+    // Only for peers we can actually address: the CRM hands us a bare Telegram
+    // user id, and MTProto needs an access_hash to build an InputPeer. Asking for
+    // an unknown user throws while the batch is being assembled, which rejects
+    // EVERY promise in that batch — so one stranger would blank out the whole
+    // folder. Unknown peers are simply not reachable from this account.
+    const dialogs = (await Promise.all(peerIds.map(async(peerId) => {
+      const dialog = await this.managers.appMessagesManager.getDialogOnly(peerId);
+      if(dialog) return dialog;
+      if(!await this.managers.appUsersManager.hasUser(peerId.toUserId())) return undefined;
+      return this.managers.appMessagesManager.reloadConversation(peerId).catch(() => undefined as Dialog);
+    })))
     .filter(Boolean) as Dialog[];
     dialogs.sort((a, b) => getDialogIndex(b, this.indexKey) - getDialogIndex(a, this.indexKey));
 

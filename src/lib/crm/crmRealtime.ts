@@ -7,6 +7,8 @@ import {
   CRM_SENSITIVE_APPROVED_EVENT,
   CRM_NOTES_CHANNEL,
   CRM_NOTE_ADDED_EVENT,
+  CRM_INBOUND_SEEN_EVENT,
+  CrmFirstSeenMap,
   CrmNote
 } from '@lib/crm/types';
 
@@ -23,6 +25,7 @@ import {
 // is the fallback if the socket is down; this only adds liveness.
 
 type AttributionPush = {message_id: number, admin_id: number, name: string};
+type InboundSeenPush = {seen: CrmFirstSeenMap};
 type SensitiveRequestPush = {message_id: number, requested_by: number, name: string, reason?: string};
 type SensitiveApprovedPush = {message_id: number, user_id: number | null};
 type NotePush = {ticket_id: number, note: CrmNote};
@@ -99,6 +102,14 @@ class CrmRealtime {
         messageId: data.message_id,
         attribution: {admin_id: data.admin_id, name: data.name}
       });
+    });
+
+    // Inbound first-seen shares the attribution channel: same audience, same
+    // lifetime, and one fewer subscription per peer. Carries a whole map — a
+    // session reports every message of one read burst in a single call.
+    this.channel.bind(CRM_INBOUND_SEEN_EVENT, (data: InboundSeenPush) => {
+      if(this.currentPeerId !== peerId || !data?.seen) return;
+      rootScope.dispatchEvent('crm_first_seen_push', {peerId, seen: data.seen});
     });
 
     // Sensitive-message reveal workflow rides a sibling per-peer channel.

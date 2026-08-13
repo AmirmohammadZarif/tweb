@@ -276,6 +276,12 @@ ul.chatlist {
           color: var(--primary-color);
         }
 
+        // The first-seen tag is plain text, not a filled badge — on the selected
+        // row it just needs to follow the row's white text.
+        .dialog-subtitle-seen-tag {
+          color: rgba(255, 255, 255, .8);
+        }
+
         // .badge.avatar-badge {
         //   border-color: var(--background);
         // }
@@ -673,6 +679,36 @@ ul.chatlist {
     &[data-status="archived"] {
       background-color: var(--danger-color);
     }
+  }
+
+  // "Who picked this conversation up": the agent who saw the newest customer
+  // message first. Deliberately quiet — it is scanning metadata sitting next to
+  // the unread/ticket badges, not a state the agent has to act on.
+  &-subtitle-seen-tag {
+    display: flex;
+    align-items: center;
+    // Holds its width and lets the (long, truncatable) last-message text give way:
+    // a half-rendered agent name says nothing, a half-rendered message still does.
+    flex: 0 0 auto;
+    gap: .125rem;
+    margin-inline-start: .25rem;
+    max-width: 7.5rem;
+    height: 18px;
+    font-size: .6875rem;
+    line-height: 18px;
+    color: var(--secondary-text-color);
+    white-space: nowrap;
+    overflow: hidden;
+
+    > span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+  }
+
+  &-subtitle-seen-tag-icon {
+    font-size: .875rem;
+    flex: 0 0 auto;
   }
 
   &-avatar {

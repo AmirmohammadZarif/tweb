@@ -2021,6 +2021,22 @@
     color: var(--message-out-primary-color);
   }
 
+  // Incoming variant: which agent saw the customer's message first. Muted rather
+  // than peer-colored — it is metadata about US, not about who wrote the message.
+  .bubble-content > .agent-tag-seen {
+    display: flex;
+    align-items: center;
+    gap: .1875rem;
+    font-weight: var(--font-weight-normal);
+    color: var(--secondary-text-color);
+    opacity: .9;
+
+    .agent-tag-icon {
+      font-size: 1rem;
+      flex: 0 0 auto;
+    }
+  }
+
   // Sensitive-content chip: replaces a redacted span (card / SHABA / phone / …)
   // inline. The real text is never in the DOM — clicking asks a CRM-superadmin to
   // approve the reveal, after which the bubble re-renders with the real value.

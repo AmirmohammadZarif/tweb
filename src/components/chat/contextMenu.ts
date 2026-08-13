@@ -751,6 +751,19 @@ export default class ChatContextMenu {
       },
       createSubmenu: this.createPollAnswerSubmenu
     }) as ChatContextMenuButton, {
+      icon: 'readchats',
+      text: 'Crm.PeekMode.MarkRead',
+      onClick: () => {
+        this.chat.bubbles.markChatRead();
+      },
+      // Peek mode ("Manual read"): the chat was opened without sending a read
+      // receipt, and right-clicking the customer's message is the closest place
+      // to claim it. Same action as the topbar item / "/read" — it claims the
+      // CHAT, not this one message, which is the unit peek mode works in.
+      // Only offered while there is something actually held back.
+      verify: () => !!this.chat.bubbles?.hasHeldReads(),
+      separatorDown: true
+    }, {
       icon: 'send2',
       text: 'MessageScheduleSend',
       onClick: this.onSendScheduledClick,
