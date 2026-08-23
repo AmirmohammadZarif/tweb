@@ -4339,7 +4339,7 @@ export default class ChatInput {
       if(taskMatch) {
         this.clearInput();
         // A bare "/task" opens My Tasks; with a title it captures one directly.
-        createCrmTaskFromText(taskMatch[1] || '');
+        createCrmTaskFromText(taskMatch[1] || '', {peerId: this.chat.peerId});
         return;
       }
     }

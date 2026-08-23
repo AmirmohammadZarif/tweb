@@ -67,6 +67,7 @@ export const CRM_ENDPOINTS = {
   // Project management — the agent's own tasks, so they can capture work and log
   // time without leaving the chat client.
   projects: '/projects',
+  projectMembers: (id: number) => `/projects/${id}/members`,
   tasks: '/tasks',
   taskStatus: (id: number) => `/tasks/${id}/status`,
   taskTime: (id: number) => `/tasks/${id}/time`,
@@ -92,6 +93,32 @@ export type CrmProject = {
   status: string
 };
 
+// GET /projects/{id}/members -> {data: CrmProjectMember[]}
+// `id` is the CRM USER id, which is what assignee_user_ids wants — deliberately
+// not the Admin id that GET /agents returns, since the two are different numbers
+// for the same person.
+export type CrmProjectMember = {
+  id: number,
+  name: string,
+  is_me: boolean
+};
+
+// Where a task was captured from. Present only on tasks created out of a
+// customer conversation; see CrmCreateTaskInput.
+export type CrmTaskCustomer = {
+  id: number,
+  name: string,
+  // Numeric in JSON (it is an integer column), unlike source.peer_chat_id which
+  // is the string the client sent. Both accept .toPeerId().
+  telegram_chat_id?: string | number
+};
+
+export type CrmTaskSource = {
+  ticket_id?: number,
+  peer_chat_id?: string,
+  message_id?: number
+};
+
 // GET /tasks -> {data: CrmTask[]}
 export type CrmTask = {
   id: number,
@@ -104,6 +131,13 @@ export type CrmTask = {
   project: {id: number, name?: string, code?: string},
   due_at?: string, // ISO8601
   is_overdue: boolean,
+  // False for a task the agent created but put on someone else — see
+  // CrmTaskQuery.includeCreated.
+  is_assigned_to_me?: boolean,
+  // Set when an agent turned a customer's message into this task.
+  customer?: CrmTaskCustomer,
+  source?: CrmTaskSource,
+  assignees?: {id: number, name: string}[],
   my_estimate_minutes: number,
   my_spent_minutes: number,
   my_progress: number
@@ -118,13 +152,26 @@ export type CrmCreateTaskInput = {
   status?: CrmTaskStatus,
   priority?: CrmTaskPriority,
   due_at?: string,
-  estimated_minutes?: number
+  estimated_minutes?: number,
+  // CRM user ids (see CrmProjectMember). The server rejects anyone without
+  // access to the project rather than filing the task where they cannot see it.
+  assignee_user_ids?: number[],
+  // Provenance for tasks captured from a chat. The CRM resolves the customer
+  // from customer_id, else from source_peer_chat_id (the telegram chat id), and
+  // attaches the customer's current ticket by itself.
+  customer_id?: number,
+  source_peer_chat_id?: string,
+  source_message_id?: number
 };
 
 export type CrmTaskQuery = {
   projectId?: number,
   includeDone?: boolean,
-  status?: CrmTaskStatus[]
+  status?: CrmTaskStatus[],
+  // Also return tasks this agent created for someone else. Off by default so
+  // the list stays "my work"; on, it is the only way to see a task after
+  // handing it to a colleague.
+  includeCreated?: boolean
 };
 
 // ── Sensitive-message reveal workflow ────────────────────────────────────────

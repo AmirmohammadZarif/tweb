@@ -13,6 +13,7 @@ import {
   CrmFirstSeenSummaryEntry,
   CrmCreateTaskInput,
   CrmProject,
+  CrmProjectMember,
   CrmRealtimeConfig,
   CrmTask,
   CrmTaskQuery,
@@ -709,12 +710,30 @@ export default class AppCrmManager extends AppManager {
     }
   }
 
+  /**
+   * Who can be assigned a task in this project. Returns CRM USER ids, which is
+   * what createTask wants — the agents endpoint returns Admin ids and those are
+   * a different number for the same person.
+   */
+  public async getProjectMembers(projectId: number): Promise<CrmProjectMember[]> {
+    if(!(await this.isConnected()) || !projectId) return [];
+    try {
+      return this.unwrap(await this.request<{data: CrmProjectMember[]}>(
+        'GET', CRM_ENDPOINTS.projectMembers(projectId)
+      ));
+    } catch(err) {
+      this.log.error('getProjectMembers failed', err);
+      return [];
+    }
+  }
+
   public async getMyTasks(query: CrmTaskQuery = {}): Promise<CrmTask[]> {
     if(!(await this.isConnected())) return [];
 
     const params: Record<string, string> = {};
     if(query.projectId) params.project_id = '' + query.projectId;
     if(query.includeDone) params.include_done = '1';
+    if(query.includeCreated) params.include_created = '1';
     if(query.status?.length) params.status = query.status.join(',');
 
     try {

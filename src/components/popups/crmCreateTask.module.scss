@@ -1,0 +1,60 @@
+.popup {
+  --popup-min-width: 24rem;
+  --popup-max-width: 24rem;
+}
+
+.container {
+  padding: 1rem;
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: .75rem;
+  padding-bottom: .5rem;
+}
+
+.customer {
+  display: flex;
+  align-items: center;
+  gap: .375rem;
+  font-size: .875rem;
+  color: var(--secondary-text-color);
+}
+
+.label {
+  font-size: .875rem;
+  font-weight: var(--font-weight-bold);
+  color: var(--secondary-text-color);
+}
+
+.select,
+.textarea {
+  width: 100%;
+  padding: .5rem .75rem;
+  border: 1px solid var(--input-search-background-color);
+  border-radius: .625rem;
+  background-color: transparent;
+  color: var(--primary-text-color);
+  font-family: inherit;
+  font-size: 1rem;
+}
+
+.textarea {
+  resize: vertical;
+  min-height: 3.5rem;
+}
+
+// The picker must not push the buttons off screen on a project with many
+// members — it scrolls instead of the popup growing without bound.
+.members {
+  max-height: 13rem;
+  margin: 0 -1rem;
+}
+
+.empty {
+  padding: .5rem 0;
+  font-size: .875rem;
+  color: var(--secondary-text-color);
+  text-align: center;
+}

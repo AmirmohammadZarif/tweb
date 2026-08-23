@@ -9,6 +9,9 @@ import InputField from '@components/inputField';
 import {toast, toastNew} from '@components/toast';
 import {CrmTask, CrmTaskStatus} from '@lib/crm/types';
 import classNames from '@helpers/string/classNames';
+import appImManager from '@lib/appImManager';
+import showCrmCreateTaskPopup from '@components/popups/crmCreateTask';
+import I18n from '@lib/langPack';
 
 // Prefer the CRM's own error text (e.g. "You do not have access to this
 // project."); fall back to a generic localized message. Mirrors agentMetrics.
@@ -41,6 +44,9 @@ export default function ProjectTasks() {
   const managers = rootScope.managers;
 
   const [includeDone, setIncludeDone] = createSignal(false);
+  // A task handed to a colleague leaves "assigned to me" entirely, so without
+  // this the agent who created it can no longer see it anywhere in the client.
+  const [includeCreated, setIncludeCreated] = createSignal(false);
   const [expandedId, setExpandedId] = createSignal<number>();
   const [busy, setBusy] = createSignal(false);
   const [newProjectId, setNewProjectId] = createSignal<number>();
@@ -52,8 +58,8 @@ export default function ProjectTasks() {
   // flipping it back off then left the stale "with completed" result on screen.
   // An object is always truthy and still changes identity on every toggle.
   const [tasks, {refetch}] = createResource(
-    () => ({includeDone: includeDone()}),
-    (query: {includeDone: boolean}) => managers.appCrmManager.getMyTasks(query)
+    () => ({includeDone: includeDone(), includeCreated: includeCreated()}),
+    (query: {includeDone: boolean, includeCreated: boolean}) => managers.appCrmManager.getMyTasks(query)
   );
 
   const titleField = new InputField({
@@ -87,6 +93,23 @@ export default function ProjectTasks() {
     }
   };
 
+  // The inline form above is the fast path: one field, straight onto my own
+  // list. Handing work to someone else needs a project-scoped assignee picker,
+  // which is the composer the chat entry points already use — so reuse it
+  // rather than growing a second one here.
+  const createForSomeoneElse = () => {
+    showCrmCreateTaskPopup({
+      text: titleField.value.trim(),
+      onCreated: () => {
+        titleField.setValueSilently('');
+        // A task created for someone else is invisible in the default list;
+        // switching the toggle on is what makes the result of the action show up.
+        setIncludeCreated(true);
+        refetch();
+      }
+    });
+  };
+
   const logTime = async(task: CrmTask, minutes: number) => {
     setBusy(true);
     try {
@@ -116,10 +139,37 @@ export default function ProjectTasks() {
     setExpandedId(expandedId() === task.id ? undefined : task.id);
   };
 
+  // Tasks captured from a conversation carry the customer and the exact message.
+  // Jumping straight back to it is the whole point of storing the coordinate —
+  // otherwise the agent has to search the chat list for a name.
+  const openSource = (task: CrmTask) => {
+    const chatId = task.source?.peer_chat_id || task.customer?.telegram_chat_id;
+    if(!chatId) return;
+
+    appImManager.setInnerPeer({
+      peerId: chatId.toPeerId(false),
+      // For user peers the client mid IS the server id (generateMessageId only
+      // offsets channels), so the stored id can be jumped to as-is.
+      lastMsgId: task.source?.message_id
+    });
+  };
+
   const subtitleFor = (task: CrmTask) => {
     const parts: string[] = [];
     if(task.project?.name) parts.push(task.project.name);
+    if(task.customer?.name) parts.push(task.customer.name);
     parts.push(task.status_label);
+
+    if(task.is_assigned_to_me === false) {
+      // Not my work — say whose it is, otherwise it reads as a task I owe.
+      const names = (task.assignees || []).map((assignee) => assignee.name).join(', ');
+      parts.push(names || I18n.format('Tasks.Delegated', true));
+    } else {
+      // Who else is on it — a task shared with someone reads very differently
+      // from one that is only yours.
+      const others = (task.assignees || []).length - 1;
+      if(others > 0) parts.push('+' + others);
+    }
     if(task.my_spent_minutes > 0 || task.my_estimate_minutes > 0) {
       parts.push(`${formatMinutes(task.my_spent_minutes)} / ${formatMinutes(task.my_estimate_minutes)}`);
     }
@@ -152,6 +202,15 @@ export default function ProjectTasks() {
             >
               {i18n('Tasks.Add')}
             </Button>
+
+            <Button
+              class="btn-primary btn-transparent primary"
+              icon="adduser"
+              onClick={createForSomeoneElse}
+              disabled={busy()}
+            >
+              {i18n('Tasks.ForSomeoneElse')}
+            </Button>
           </div>
         </Show>
       </Section>
@@ -161,6 +220,13 @@ export default function ProjectTasks() {
           <Row.Title>{i18n('Tasks.ShowDone')}</Row.Title>
           <Row.RightContent>
             <span class={styles.badge}>{includeDone() ? '✓' : '—'}</span>
+          </Row.RightContent>
+        </Row>
+
+        <Row clickable={() => setIncludeCreated(!includeCreated())}>
+          <Row.Title>{i18n('Tasks.ShowDelegated')}</Row.Title>
+          <Row.RightContent>
+            <span class={styles.badge}>{includeCreated() ? '✓' : '—'}</span>
           </Row.RightContent>
         </Row>
 
@@ -208,6 +274,15 @@ export default function ProjectTasks() {
                         </Button>
                       )}
                     </For>
+
+                    <Show when={task.source?.peer_chat_id || task.customer?.telegram_chat_id}>
+                      <Button
+                        class="btn-primary btn-transparent primary"
+                        onClick={() => openSource(task)}
+                      >
+                        {i18n('Tasks.OpenChat')}
+                      </Button>
+                    </Show>
 
                     <Button
                       class="btn-primary btn-transparent primary"

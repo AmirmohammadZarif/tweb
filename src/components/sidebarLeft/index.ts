@@ -14,6 +14,7 @@ import {AppNewChannelTab} from '@components/solidJsTabs/tabs';
 import {AppContactsTab} from '@components/solidJsTabs/tabs';
 import {AppArchivedTab} from '@components/solidJsTabs/tabs';
 import createNewGroupTab from '@components/sidebarLeft/tabs/createNewGroupTab';
+import openStoryComposer from '@components/popups/storyComposer';
 import I18n, {i18n} from '@lib/langPack';
 import ButtonMenu, {ButtonMenuItemOptions, ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import {IS_APPLE, IS_MOBILE_SAFARI} from '@environment/userAgent';
@@ -1056,6 +1057,16 @@ export class AppSidebarLeft extends SidebarSlider {
       onClick: onContactsClick,
       // Opens the contacts list, which is CRM-superadmin-only.
       verify: () => useIsCrmSuperAdmin()()
+    }, {
+      icon: 'stories',
+      text: 'Stories.Composer.NewStory',
+      onClick: () => {
+        closeTabsBefore(() => {
+          openStoryComposer(rootScope.myId);
+        });
+      },
+      // Posting is open to every agent — only deleting is superadmin-only.
+      verify: () => !TEST_NO_STORIES
     }, {
       // The compose button is the one control an agent already reaches for to
       // start something new, so "a task" belongs alongside channel/group/chat.

@@ -900,7 +900,12 @@ export default class ChatContextMenu {
       text: 'Tasks.CreateFromMessage',
       onClick: () => {
         const selection = getAppWindow().getSelection()?.toString()?.trim();
-        createCrmTaskFromText(selection || (this.message as Message.message).message);
+        createCrmTaskFromText(selection || (this.message as Message.message).message, {
+          // Provenance: the task keeps the customer and the exact message it was
+          // captured from, so it can be traced back to the conversation.
+          peerId: this.message.peerId,
+          mid: this.message.mid
+        });
       },
       verify: () => !!(this.message as Message.message).message &&
         this.managers.appCrmManager.isConnected()

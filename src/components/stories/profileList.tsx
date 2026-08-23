@@ -25,6 +25,7 @@ import {attachContextMenuListener} from '@helpers/dom/attachContextMenuListener'
 import contextMenuController from '@helpers/contextMenuController';
 import positionMenu from '@helpers/positionMenu';
 import rootScope from '@lib/rootScope';
+import openStoryComposer from '@components/popups/storyComposer';
 import ListenerSetter from '@helpers/listenerSetter';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
 import cancelClickOrNextIfNotClick from '@helpers/dom/cancelClickOrNextIfNotClick';
@@ -798,6 +799,19 @@ export function profileStoriesButtonMenu(props: {
   canEdit?: () => boolean | Promise<boolean>,
 }): ButtonMenuItemOptionsVerifiable[] {
   return [{
+    icon: 'stories',
+    text: 'Stories.Composer.AddStory',
+    onClick: () => {
+      openStoryComposer(props.peerId);
+    },
+    // Deliberately not behind `props.verify()` (the stories-tab check) or
+    // `canEdit`: a channel's stories tab only exists once it already has a
+    // story, so gating on it would leave admins no way to post the first one.
+    verify: () => Promise.resolve(rootScope.managers.appStoriesManager.canSendStory(props.peerId)).then((canSend) => (
+      !props.isArchive &&
+      canSend
+    ))
+  }, {
     icon: 'archive',
     text: 'MyStories.ShowArchive',
     onClick: () => {

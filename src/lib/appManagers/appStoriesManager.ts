@@ -10,7 +10,8 @@ import deepEqual from '@helpers/object/deepEqual';
 import safeReplaceObject from '@helpers/object/safeReplaceObject';
 import pause from '@helpers/schedulers/pause';
 import tsNow from '@helpers/tsNow';
-import {Reaction, ReportReason, StoriesAllStories, StoriesStories, StoryItem, Update, PeerStories, User, Chat, StoryView, MediaArea, StoryAlbum, StoriesStealthMode} from '@layer';
+import {randomLong} from '@helpers/random';
+import {Reaction, ReportReason, StoriesAllStories, StoriesStories, StoryItem, Update, Updates, PeerStories, User, Chat, StoryView, MediaArea, StoryAlbum, StoriesStealthMode, InputMedia, InputPrivacyRule} from '@layer';
 import {SERVICE_PEER_ID, TEST_NO_STORIES} from '@appManagers/constants';
 import {ReferenceContext} from '@lib/storages/references';
 import {AppManager} from '@appManagers/manager';
@@ -54,6 +55,26 @@ type StoriesPeerCache = {
 };
 
 type ExpiringItem = {peerId: PeerId, id: number, timestamp: number};
+
+export type SendStoryPrivacy = 'everyone' | 'contacts' | 'close';
+export type SendStoryOptions = {
+  peerId: PeerId,
+  file: Blob,
+  /** Pass the name the composer subscribed to `download_progress` with */
+  fileName?: string,
+  isVideo?: boolean,
+  mimeType?: string,
+  width?: number,
+  height?: number,
+  duration?: number,
+  hasSound?: boolean,
+  caption?: string,
+  privacy?: SendStoryPrivacy,
+  /** Seconds before the story expires. Server default is 24h when omitted */
+  period?: number,
+  /** Keep it on the profile after it expires */
+  pinned?: boolean
+};
 
 const TEST_SKIPPED = false;
 const TEST_READ = false;
@@ -681,6 +702,79 @@ export default class AppStoriesManager extends AppManager {
       peerId,
       segments: await this.getPeerStoriesSegments(peerId)
     })));
+  }
+
+  /**
+   * Posting is intentionally NOT gated on the CRM role — every agent may add a
+   * story. Only deleting is superadmin-only (see `deleteStories`).
+   */
+  public canSendStory(peerId: PeerId) {
+    if(peerId.isUser()) {
+      return peerId === this.appPeersManager.peerId;
+    }
+
+    return this.appChatsManager.hasRights(peerId.toChatId(), 'post_stories');
+  }
+
+  private getStoryInputPrivacyRules(privacy: SendStoryPrivacy): InputPrivacyRule[] {
+    switch(privacy) {
+      case 'contacts':
+        return [{_: 'inputPrivacyValueAllowContacts'}];
+      case 'close':
+        return [{_: 'inputPrivacyValueAllowCloseFriends'}];
+      default:
+        // Channel stories are always public — the server ignores the rules for them.
+        return [{_: 'inputPrivacyValueAllowAll'}];
+    }
+  }
+
+  /**
+   * Uploads the media and posts it as a story. The upload reports its progress
+   * through the global `download_progress` event under `options.fileName`, so
+   * the composer can subscribe before awaiting this.
+   */
+  public async sendStory(options: SendStoryOptions) {
+    const {peerId, file} = options;
+    if(!this.canSendStory(peerId)) {
+      throw makeError('CHAT_ADMIN_REQUIRED');
+    }
+
+    const inputFile = await this.apiFileManager.upload({file, fileName: options.fileName});
+
+    const media: InputMedia = options.isVideo ? {
+      _: 'inputMediaUploadedDocument',
+      file: inputFile,
+      mime_type: options.mimeType || file.type || 'video/mp4',
+      attributes: [{
+        _: 'documentAttributeVideo',
+        duration: options.duration || 0,
+        w: options.width || 0,
+        h: options.height || 0,
+        pFlags: {supports_streaming: true}
+      }],
+      pFlags: options.hasSound === false ? {nosound_video: true} : {}
+    } : {
+      _: 'inputMediaUploadedPhoto',
+      file: inputFile,
+      pFlags: {}
+    };
+
+    const updates = await this.apiManager.invokeApi('stories.sendStory', {
+      peer: this.appPeersManager.getInputPeerById(peerId),
+      media,
+      caption: options.caption || undefined,
+      privacy_rules: this.getStoryInputPrivacyRules(options.privacy),
+      random_id: randomLong(),
+      period: options.period,
+      pinned: options.pinned || undefined
+    });
+
+    this.apiUpdatesManager.processUpdateMessage(updates);
+
+    // The story itself arrives within the updates — hand its id back so the
+    // caller can jump straight to it.
+    const update = (updates as Updates.updates).updates?.find((update) => update._ === 'updateStory') as Update.updateStory;
+    return update?.story?.id;
   }
 
   public deleteStories(peerId: PeerId, ids: StoryItem['id'][]) {

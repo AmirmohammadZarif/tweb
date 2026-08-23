@@ -1,37 +1,19 @@
 import rootScope from '@lib/rootScope';
-import {toast, toastNew} from '@components/toast';
-import PopupPeer from '@components/popups/peer';
-import type {CrmProject} from '@lib/crm/types';
+import {toastNew} from '@components/toast';
 import appSidebarLeft from '@components/sidebarLeft';
 import appImManager from '@lib/appImManager';
 import mediaSizes from '@helpers/mediaSizes';
 import {AppProjectTasksTab} from '@components/solidJsTabs/tabs';
+import showCrmCreateTaskPopup, {CrmTaskSourceProps} from '@components/popups/crmCreateTask';
 
 /**
  * Capture a CRM task from inside a conversation — the "/task <title>" command in
  * the message input, and the "create task" entry in a message's context menu.
  *
- * The task is assigned to the agent who triggered it (the CRM does that when no
- * assignees are sent), because the point is "log the thing I just agreed to do"
- * without leaving the chat.
+ * The composer popup does the rest: which project, who it goes to (the agent who
+ * triggered it by default, but any project member can be picked), and the
+ * customer the message came from, which the CRM resolves from the chat id.
  */
-
-// Prefer the CRM's own message (e.g. "You do not have access to this project.")
-// over a generic string, matching agentMetrics/projectTasks.
-const showCrmError = (err: any) => {
-  const message = typeof err?.message === 'string' && !err.message.startsWith('CRM_') ? err.message : '';
-  if(message) toast(message);
-  else toastNew({langPackKey: 'Tasks.CreateFailed'});
-};
-
-const create = async(projectId: number, title: string) => {
-  try {
-    await rootScope.managers.appCrmManager.createTask({project_id: projectId, title});
-    toastNew({langPackKey: 'Tasks.Created'});
-  } catch(err) {
-    showCrmError(err);
-  }
-};
 
 /**
  * Open the My Tasks panel.
@@ -49,7 +31,7 @@ export function openCrmTasksTab() {
   appSidebarLeft.createTab(AppProjectTasksTab).open();
 }
 
-export default async function createCrmTaskFromText(rawTitle: string) {
+export default async function createCrmTaskFromText(rawTitle: string, source: CrmTaskSourceProps = {}) {
   const title = rawTitle.trim();
   if(!title) {
     openCrmTasksTab();
@@ -61,30 +43,5 @@ export default async function createCrmTaskFromText(rawTitle: string) {
     return;
   }
 
-  const projects: CrmProject[] = await rootScope.managers.appCrmManager.getProjects();
-
-  if(!projects.length) {
-    toastNew({langPackKey: 'Tasks.NoProjects'});
-    return;
-  }
-
-  // One project — no point asking.
-  if(projects.length === 1) {
-    create(projects[0].id, title);
-    return;
-  }
-
-  // Several — ask rather than silently guessing which project the work belongs
-  // to, since picking wrong files the task where nobody will look for it.
-  new PopupPeer('popup-crm-pick-project', {
-    titleLangKey: 'Tasks.PickProject',
-    descriptionLangKey: 'Tasks.PickProjectFor',
-    descriptionLangArgs: [title],
-    // PopupButton.text is a DOM node, not a string — project names are dynamic
-    // so they cannot go through langKey.
-    buttons: projects.slice(0, 8).map((project) => ({
-      text: document.createTextNode(project.name),
-      callback: () => create(project.id, title)
-    }))
-  }).show();
+  showCrmCreateTaskPopup({...source, text: title});
 }
