@@ -5,6 +5,7 @@ import Scrollable from '@components/scrollable2';
 import I18n, {i18n} from '@lib/langPack';
 import rootScope from '@lib/rootScope';
 import {CrmNote} from '@lib/crm/types';
+import {useIsCrmReadOnly} from '@stores/crmRole';
 import type {ChatCrmTicketPlate} from '@components/chat/crmTicket';
 
 // Internal-notes panel: agents leave context for each other on the customer's
@@ -82,24 +83,28 @@ export default class PopupCrmNotes extends PopupElement {
             </For>
           </Scrollable>
         </Show>
-        <div class="popup-crm-notes-compose">
-          <textarea
-            class="popup-crm-notes-textarea"
-            rows={3}
-            placeholder={I18n.format('Crm.Note.Placeholder', true)}
-            value={text()}
-            disabled={busy()}
-            onInput={(e) => setText(e.currentTarget.value)}
-            onKeyDown={onKeyDown}
-          />
-          <Button
-            class="btn-primary btn-color-primary"
-            disabled={busy() || !text().trim()}
-            onClick={submit}
-          >
-            {i18n('Crm.Note.Add')}
-          </Button>
-        </div>
+        {/* Read-only trainees still READ their colleagues' notes — that is most of
+            the value during onboarding — they just have no way to add one. */}
+        <Show when={!useIsCrmReadOnly()()}>
+          <div class="popup-crm-notes-compose">
+            <textarea
+              class="popup-crm-notes-textarea"
+              rows={3}
+              placeholder={I18n.format('Crm.Note.Placeholder', true)}
+              value={text()}
+              disabled={busy()}
+              onInput={(e) => setText(e.currentTarget.value)}
+              onKeyDown={onKeyDown}
+            />
+            <Button
+              class="btn-primary btn-color-primary"
+              disabled={busy() || !text().trim()}
+              onClick={submit}
+            >
+              {i18n('Crm.Note.Add')}
+            </Button>
+          </div>
+        </Show>
       </div>
     );
   }

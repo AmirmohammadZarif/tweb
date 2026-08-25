@@ -62,7 +62,7 @@ import {createEffect, createRoot, on, untrack} from 'solid-js';
 import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
 import {AppAdminRecentActionsTab} from '@components/solidJsTabs/tabs';
 import {setAppSettings} from '@stores/appSettings';
-import useIsCrmSuperAdmin from '@stores/crmRole';
+import useIsCrmSuperAdmin, {useIsCrmReadOnly} from '@stores/crmRole';
 import {wrapAsyncClickHandler} from '@helpers/wrapAsyncClickHandler';
 import liteMode from '@helpers/liteMode';
 import createSubmenuTrigger from '@components/createSubmenuTrigger';
@@ -463,7 +463,7 @@ export default class ChatTopbar {
       // Reliable fallback for closing the ticket when the floating CRM plate is
       // crowded out by other plates (pinned message / translate). Reads the plate's
       // already-loaded ticket signal — no extra round-trip on menu open.
-      verify: () => this.plates?.crmTicket.getTicket()?.status === 'open'
+      verify: () => !useIsCrmReadOnly()() && this.plates?.crmTicket.getTicket()?.status === 'open'
     }, {
       icon: 'readchats',
       text: 'Crm.PeekMode.MarkRead',

@@ -1032,6 +1032,29 @@
 			color: var(--primary-color);
 		}
 	}
+
+	// Support-fork: the AI draft-a-reply button. Tinted rather than neutral so it
+	// reads as an assistant action instead of another formatting control, and it
+	// spins while the model is thinking — the round-trip is a second or two, which
+	// is long enough that an un-animated button looks broken.
+	.toggle-ai-draft {
+		color: var(--primary-color);
+
+		&.is-loading {
+			pointer-events: none;
+			opacity: .6;
+
+			.tgico {
+				display: inline-block;
+				animation: toggle-ai-draft-spin 1s linear infinite;
+			}
+		}
+	}
+}
+
+@keyframes toggle-ai-draft-spin {
+	from { transform: rotate(0deg); }
+	to { transform: rotate(360deg); }
 }
 
 .input-message-container {

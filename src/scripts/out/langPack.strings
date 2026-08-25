@@ -238,6 +238,9 @@
 "Crm.Ticket.Retry" = "Retry";
 "Crm.OpenTicketsFolder" = "Open Tickets";
 "Crm.SeenFirstBy" = "Seen first by %1$s";
+"Crm.ReadOnly.Title" = "Read-only access";
+"Crm.ReadOnly.Subtitle" = "You can follow conversations, but not reply or change anything";
+"Crm.ReadOnly.Blocked" = "Your account has read-only access";
 "Crm.PeekMode.Title" = "Manual read";
 "Crm.PeekMode.Caption" = "Open chats without marking them read. The customer sees no read receipt and the chat stays unread for your team until you claim it — with \"Mark as read\" in the chat menu, by typing /read, or simply by replying. Applies to 1-to-1 customer chats in this browser only.";
 "Crm.PeekMode.MarkRead" = "Mark as read";
@@ -266,6 +269,13 @@
 "Crm.Note.Empty" = "Type the note text after /note";
 "Crm.Note.NoTicket" = "No ticket to attach the note to";
 "Crm.Note.AddFailed" = "Failed to add the note, please try again";
+"Crm.AiDraft.Tooltip" = "Draft a reply with AI";
+"Crm.AiDraft.NoPipeline" = "No AI assistant is set up for this department";
+"Crm.AiDraft.NoMessage" = "Nothing from the customer to answer yet";
+"Crm.AiDraft.FilteredOut" = "The assistant left this one for you to answer";
+"Crm.AiDraft.Empty" = "The assistant had nothing to suggest here";
+"Crm.AiDraft.Failed" = "Could not draft a reply, please try again";
+"Crm.AiDraft.RateLimited" = "Too many drafts in a row — wait a moment";
 "KeyboardShortcuts.Caption" = "Shortcuts shown for your platform.";
 "KeyboardShortcuts.Section.Formatting" = "Text Formatting";
 "KeyboardShortcuts.Section.Formatting.Caption" = "Select text in the chat input to apply formatting.";

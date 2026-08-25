@@ -11,7 +11,11 @@ export type CrmUser = {
   avatar_url?: string,
   // Role flag from GET /auth/me (verify-otp doesn't return it — see
   // AppCrmManager.refreshMe). Gates admin-only UI; absent/false = regular agent.
-  is_super_admin?: boolean
+  is_super_admin?: boolean,
+  // Onboarding trainee: may READ the department's conversations and nothing else.
+  // Every write affordance is off and no read receipt is ever sent — see
+  // @stores/crmRole and AppCrmManager.isReadOnlyCached.
+  is_read_only?: boolean
 };
 
 export type CrmConfig = {
@@ -72,9 +76,47 @@ export const CRM_ENDPOINTS = {
   taskStatus: (id: number) => `/tasks/${id}/status`,
   taskTime: (id: number) => `/tasks/${id}/time`,
   taskEstimate: (id: number) => `/tasks/${id}/estimate`,
+  // On-demand AI reply draft for a chat's ticket. See CrmAiDraft.
+  aiDraft: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/ai-draft`,
   // Crash reports — tweb ships as static files, so without this a JS crash in an
   // agent's browser leaves no trace on our side. See @lib/debug/crashReporter.
   clientLogs: '/client-logs'
+};
+
+// ── AI draft assistant ───────────────────────────────────────────────────────
+// The composer's AI-star button asks the CRM to draft a reply for the chat's
+// current ticket. The CRM runs its configured assist pipeline (grounded in the
+// FAQ base, this customer's earlier threads, and similar threads from other
+// customers) and hands the text straight back — it sends nothing to the customer
+// and writes nothing to the ticket. The agent edits it in the composer and sends
+// it themselves.
+
+// Why there is no draft, when there is no draft. The endpoint answers 200 for all
+// of these: a filter stage deciding a human should take this one is the system
+// working, not an error, and the agent needs to be told which case they hit.
+export type CrmAiDraftReason =
+  | 'no_pipeline'   // no assist/reply pipeline is enabled for this department
+  | 'no_message'    // nothing from the customer to answer yet
+  | 'filtered_out'  // a filter stage decided this one needs a human
+  | 'empty'         // the pipeline ran but produced no text
+  | 'failed';       // the model call itself failed
+
+// POST /tickets/by-telegram/{chatId}/ai-draft -> {data: CrmAiDraft}
+export type CrmAiDraft = {
+  ok: boolean,
+  text: string | null,
+  reason: CrmAiDraftReason | null,
+  // Audit id of the recorded run (ai_pipeline_runs), for tracing a bad draft
+  // back to the pipeline and prompt that produced it.
+  run_id: number | null,
+  total_tokens: number,
+  // What the draft was grounded in. Not rendered anywhere today — kept because
+  // "why did it say that" is the first question about any bad draft.
+  grounded_on: {
+    faqs?: boolean,
+    customer_threads?: number,
+    similar_threads?: number
+  }
 };
 
 // ── Project tasks ────────────────────────────────────────────────────────────
@@ -359,6 +401,21 @@ export type CrmFirstSeenSummary = Record<string, CrmFirstSeenSummaryEntry>;
 // map: a session reports every message of a read burst in one call.
 export const CRM_INBOUND_SEEN_EVENT = 'inbound.seen';
 
+// ── Department scoping ───────────────────────────────────────────────────────
+// A Telegram chat id does NOT name a conversation on its own: one customer can be
+// talking to several departments at the same time, each over its own department
+// Telegram account, and those are separate tickets with separate agents, notes and
+// viewers. So every chat-keyed CRM call carries the id of the Telegram account
+// THIS session is signed in as, and the CRM scopes tickets/notes/labels to that
+// department. Without it, a Financial agent's name shows up on a Monetization chat
+// they cannot even open.
+export const CRM_SESSION_PARAM = 'session_telegram_user_id';
+
+// Realtime channels are scoped the same way — the session id is part of the
+// channel name, so a push only ever reaches the department it belongs to.
+export const CRM_ATTRIBUTION_CHANNEL = (sessionId: string, chatId: string) =>
+  'private-attribution.peer.' + sessionId + '.' + chatId;
+
 // ── Internal agent notes ─────────────────────────────────────────────────────
 // Agents share one department Telegram account, so an internal note is how they
 // hand context to a colleague from inside the conversation. Notes are agent-only
@@ -383,7 +440,8 @@ export type CrmNotesResult = {
 // Reverb (Pusher protocol) channel + event for live note hand-off, mirroring the
 // attribution channel. The backend broadcasts on the private per-peer channel;
 // the client turns each push into a `crm_note_push` rootScope event.
-export const CRM_NOTES_CHANNEL = (chatId: string) => 'private-notes.peer.' + chatId;
+export const CRM_NOTES_CHANNEL = (sessionId: string, chatId: string) =>
+  'private-notes.peer.' + sessionId + '.' + chatId;
 export const CRM_NOTE_ADDED_EVENT = 'note.added';
 
 // ── Client crash reports ─────────────────────────────────────────────────────

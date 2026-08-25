@@ -505,6 +505,12 @@ export class AppReactionsManager extends AppManager {
     sendAsPeerId,
     count
   }: SendReactionOptions): Promise<MessageReactions> {
+    // Read-only onboarding role: a reaction is visible to the customer like any
+    // other write. See AppMessagesManager.assertNotReadOnly.
+    if(this.appCrmManager.isReadOnlyCached()) {
+      throw new Error('READ_ONLY_AGENT');
+    }
+
     if(reaction._ === 'availableReaction') {
       reaction = {
         _: 'reactionEmoji',

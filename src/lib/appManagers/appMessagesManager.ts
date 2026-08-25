@@ -894,6 +894,26 @@ export class AppMessagesManager extends AppManager {
     return obj.deferred;
   }
 
+  /**
+   * Onboarding trainees (the CRM's read-only role) may read their department's
+   * conversations and change nothing.
+   *
+   * The gate lives HERE, in the manager, and not only in the UI: every path that
+   * writes to Telegram — composer, context menu, drag-and-drop, keyboard
+   * shortcut, forward dialog — funnels through these few methods, so a button
+   * someone forgets to hide still cannot send. It also cannot live in the CRM:
+   * tweb talks to Telegram directly over the shared department account, and that
+   * traffic never passes through the CRM at all.
+   *
+   * Throws rather than no-oping, so a caller awaiting the send learns it failed
+   * instead of believing the message went out.
+   */
+  private assertNotReadOnly() {
+    if(this.appCrmManager.isReadOnlyCached()) {
+      throw new Error('READ_ONLY_AGENT');
+    }
+  }
+
   public editMessage(
     message: MyMessage,
     text: string,
@@ -904,6 +924,8 @@ export class AppMessagesManager extends AppManager {
       entities: MessageEntity[]
     }> & Partial<Pick<Parameters<AppMessagesManager['sendText']>[0], 'webPage' | 'webPageOptions' | 'noWebPage' | 'invertMedia'>> = {}
   ): Promise<void> {
+    this.assertNotReadOnly();
+
     /* if(!this.canEditMessage(messageId)) {
       return Promise.reject({type: 'MESSAGE_EDIT_FORBIDDEN'});
     } */
@@ -1301,6 +1323,8 @@ export class AppMessagesManager extends AppManager {
       }>
     }>
   ): Promise<void> {
+    this.assertNotReadOnly();
+
     let {peerId, text} = options;
     if(!text.trim() && !options.suggestedPost?.changeMid) {
       return;
@@ -1519,6 +1543,8 @@ export class AppMessagesManager extends AppManager {
   }
 
   public async sendFile(options: SendFileArgs) {
+    this.assertNotReadOnly();
+
     if(options.stars && options.isAnimated) {
       // * paid media can only contain photos and plain videos, the server rejects
       // * animated documents with EXTENDED_MEDIA_TYPE_INVALID — send the GIF as a silent video
@@ -2416,6 +2442,8 @@ export class AppMessagesManager extends AppManager {
       webDocument?: WebDocument
     }>
   ) {
+    this.assertNotReadOnly();
+
     let {peerId, inputMedia} = options;
     peerId = this.appPeersManager.getPeerMigratedTo(peerId) || peerId;
 
@@ -3960,6 +3988,8 @@ export class AppMessagesManager extends AppManager {
   }
 
   public async forwardMessages(options: MessageForwardParams) {
+    this.assertNotReadOnly();
+
     await this.checkSendOptions(options);
 
     const {peerId, fromPeerId, mids} = options;
@@ -5792,6 +5822,9 @@ export class AppMessagesManager extends AppManager {
   }
 
   public async canEditMessage(message: Message.message | Message.messageService, kind: 'text' | 'poll' = 'text') {
+    // Read-only onboarding role — hides Edit / Stop Poll everywhere at once.
+    if(this.appCrmManager.isReadOnlyCached()) return false;
+
     if(!message || !this.canMessageBeEdited(message, kind)) {
       return false;
     }
@@ -5827,6 +5860,10 @@ export class AppMessagesManager extends AppManager {
   }
 
   public canDeleteMessage(message: MyMessage) {
+    // Read-only onboarding role: deleting is a write, and on a shared department
+    // account the message being deleted is usually a colleague's.
+    if(this.appCrmManager.isReadOnlyCached()) return false;
+
     return message && (
       message.peerId.isUser() ||
       message.pFlags.out ||
@@ -6334,6 +6371,8 @@ export class AppMessagesManager extends AppManager {
   }
 
   public deleteMessages(peerId: PeerId, mids: number[], revoke?: boolean) {
+    this.assertNotReadOnly();
+
     const channelId = this.appPeersManager.isChannel(peerId) ? peerId.toChatId() : undefined;
     const splitted = this.appMessagesIdsManager.splitMessageIdsByChannels(mids, channelId);
     const promises = splitted.map(([channelId, {mids}]) => {

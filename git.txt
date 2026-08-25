@@ -1,0 +1,1000 @@
+commit a6b77256b80b14a40dbfb4c99704306b78a70f10
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Sun Aug 23 11:37:44 2026 +0330
+
+    feat: message to tasks
+
+commit e8df1b2b4337b7b373f145089ac5d57812d2a3aa
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Thu Aug 13 14:15:54 2026 +0330
+
+    feat: ghost mode
+
+commit 151aa7ca66b3c752556056c8f3f01e97750eed81
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Mon Aug 10 16:17:03 2026 +0330
+
+    fix: the crm open tickets rendering
+
+commit a8a59ed3a6889a529336d2277749dee9f3b5c6d0
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Mon Aug 10 16:03:56 2026 +0330
+
+    feat: guard access to additional features
+
+commit d27459eb8ff0273349841a00e85014a999afd38f
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Thu Aug 6 21:44:23 2026 +0330
+
+    feat: separate open tickets
+
+commit 7197bd560785a891d5330d1aa21c8069a8c381f1
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Thu Aug 6 16:25:54 2026 +0330
+
+    feat: crash reporter
+
+commit ea38aec0c54237c5e0e1b05b379dd7c17bfa80e6
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Thu Aug 6 01:47:20 2026 +0330
+
+    nginx
+
+commit 077d091d8813544e68bd33d4879961bc69ecd520
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Thu Aug 6 01:04:37 2026 +0330
+
+    fix: raise node heap for production build
+
+commit 1189666d2ea736e7e9283ed2be0fad3504f66a5c
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Thu Aug 6 00:41:43 2026 +0330
+
+    feat: sentry
+
+commit 67f45d5a3982feab461b117e00c4f8e12be1eeba
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Mon Aug 3 15:20:55 2026 +0330
+
+    feat: project management and tasks
+
+commit 1e03b24658a46cd7b0d525e5502974c33816983b
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Sun Aug 2 18:17:21 2026 +0330
+
+    new changes
+
+commit f57c3f152481e826a9db68d6617115a04a2002b5
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Sun Aug 2 14:40:00 2026 +0330
+
+    new
+
+commit 84fffd320658f361125a97aa4b8f7907a64e5dfe
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Thu Jul 30 17:35:10 2026 +0330
+
+    fix: restore build pruning + version stamping, and stop the watchdog nuking media caches
+    
+    The Docker production image replaced upstream's `node build` with
+    `pnpm build && cp -r dist/. public/`, which dropped two steps from
+    build.js's onCompiled():
+    
+    - clearOldFiles(): public/ is a tracked build-output dir, so merging
+      dist/ on top without pruning left every historical content-hashed
+      chunk in the deployed root forever. The live server is at 801 files /
+      112.7 MB with two service workers present (sw-Dbyk1tv-.js and an
+      orphaned sw-DrEqFzwm.js).
+    - change-version: VITE_BUILD stayed frozen at 660, and App.build is
+      exactly what singleInstance.ts and loadState.ts compare against the
+      stored k_build to decide "a new version shipped, reload". Open tabs
+      were never told a deploy happened.
+    
+    Extract copyFiles/clearOldFiles into collect-dist.js so `node build` and
+    the Docker build share one implementation, and add set_build.js to stamp
+    a monotonic build number (BUILD_NUMBER arg, defaults to unix seconds).
+    
+    Also:
+    
+    - bootWatchdog: automatic recovery deleted every CacheStorage, including
+      cachedFiles and the stream-chunk stores. Wiping the user's downloaded
+      media cannot fix a boot hang and makes the retry heavier, so attempt 0
+      now drops only cachedAssets; the manual "Reset app data" button keeps
+      the big hammer. Timeout 30s -> 60s, plus a heartbeat between the
+      bootstrapIm chunk fetch and the mount so a slow cold start on mobile
+      is not misread as a hang.
+    - nginx: drop the dead `location = /sw.js` (the SW is emitted
+      content-hashed as sw-<hash>.js, nothing is served at /sw.js), and 404
+      the service worker's own routes instead of letting the SPA fallback
+      answer them with 200 + an HTML body.
+    - dcConfigurator: pluto/venus/... .web.telegram.org are Telegram's own
+      MTProto-over-HTTPS endpoints; the rebrand find/replace had pointed
+      them at web.andropay.xyz, and .env's VITE_MTPROTO_AUTO makes HTTPS the
+      transport tried first.
+    - Remove the two "Telegram version A" paths that the rebrand left
+      pointing at our own origin: the sidebar menu item (which just reloaded
+      the app) and the search-engine A/B redirect (a wasted extra reload).
+      MAIN_DOMAINS and api_id 2496 are deliberately left as-is.
+    
+    Co-Authored-By: Claude <noreply@anthropic.com>
+
+commit c1cdc667a87b9cc227b5799c24a2788040d5a081
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Mon Jul 27 15:50:34 2026 +0330
+
+    feat: limits
+
+commit ae81674d1dc32aaf9fd52d4f10b2e4276affc52e
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Mon Jul 27 13:52:31 2026 +0330
+
+    fix: iOS blank screen after first login (rAF paused while backgrounded)
+    
+    On iOS Safari, requestAnimationFrame is paused (and can be dropped) while the
+    tab is backgrounded. During first login the user switches to the Telegram app
+    to scan the QR, backgrounding Safari; boot then leans on rAF for the
+    #main-columns fade-in and doubleRaf-gated startup, so the callbacks never fire
+    and the app is left blank over the chat background even after returning.
+    
+    Race rAF against a short timeout fallback in fastRaf/fastRafConventional (via a
+    new scheduleFrame helper) and in index.ts's fadeInWhenFontsReady. When the tab
+    is visible rAF wins and behaviour is unchanged; when it's paused/dropped the
+    timeout still runs the frame so boot completes and the UI un-hides.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 64a2838b581a601dc37ebadc5a15c3de4f407987
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Sun Jul 26 17:20:18 2026 +0330
+
+    feat: sensitive data
+
+commit 4b61e4b9f309afd1fad4aea6081b75ca79b9e9ef
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Sat Jul 25 01:54:39 2026 +0330
+
+    removals
+
+commit 59e83ad80a3c0baaaa26e07a46f33128670c8836
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Fri Jul 24 20:40:33 2026 +0330
+
+    nginx: disable gzip behind tweb-auth proxy (fixes ERR_HTTP2_PROTOCOL_ERROR)
+    
+    gzip made tweb.production respond chunked (no Content-Length); the tweb-auth
+    Python proxy can't forward a chunked body, so NPM couldn't re-frame it for
+    HTTP/2 and every browser request failed with ERR_HTTP2_PROTOCOL_ERROR. NPM
+    still gzips at the edge. Matches the running container (hot-patched live).
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 7828904d2c1152302a7a3abe920aca7f2bf05b81
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Fri Jul 24 20:08:20 2026 +0330
+
+    Revert SW registration experiment (fixes white page after a day)
+    
+    Reverts the service-worker changes from ad6e07631 + ec7d38685 that shipped
+    the Static Routing API (addRoutes), navigationPreload, and the "leave the
+    page uncontrolled instead of unregister+reload" behavior. After the SW is
+    killed on idle (overnight / PWA cold start), an uncontrolled tab could never
+    re-establish its message port, so the SW's startupCheck invoke('hello')
+    hung forever with no timeout and boot wedged on a blank page (PWA + Chrome).
+    
+    Restores the prior unregister+reload recovery so a page that cannot become
+    controlled reboots cleanly instead of deadlocking. Stale-HTML recovery is
+    now covered by the nginx no-cache header on index.html + bootWatchdog.
+    
+    Also drops the redundant `expires -1` in nginx.conf (it emitted a duplicate
+    Cache-Control alongside the explicit add_header).
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 1cd0a929da50295aedd46074a48f14bbb752401e
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Fri Jul 24 19:20:29 2026 +0330
+
+    fix stale cache
+
+commit ec7d38685de131fb7f7916aff101d5e727ce3631
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Fri Jul 24 17:37:16 2026 +0330
+
+    Update index.service.ts
+
+commit ad6e07631892402a02395843b17e98761d40bdae
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Fri Jul 24 16:12:23 2026 +0330
+
+    fix: service worker registration fix
+
+commit c0935acd045048febc152a0120746a2f3f1caa9e
+Merge: 54512da1d 31406a826
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Fri Jul 24 00:14:04 2026 +0330
+
+    Merge branch 'master' of https://github.com/AmirmohammadZarif/tweb
+
+commit 31406a8261ba1d6bed366888e325ee4df9ebc53a
+Author: Amirmohammad Zarif <developerboys@gmail.com>
+Date:   Tue Jul 14 15:30:42 2026 +0000
+
+    dockerfile changes
+
+commit 54512da1d1d85e012167cc8a2dda233207e05f23
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Tue Jul 14 16:16:56 2026 +0330
+
+    boot fixes and bubble and close option fix
+
+commit a435ec8a46ccb4e1451bfe68c8b581cc7b879df7
+Merge: fb83fb30e 260076884
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Mon Jul 13 14:54:15 2026 +0330
+
+    Merge pull request #1 from AmirmohammadZarif/chore/merge-upstream
+    
+    Merge upstream/master into fork
+
+commit 26007688402c2b720ec5627d74c0bf836f5b1d10
+Merge: fb83fb30e e22ba9352
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Mon Jul 13 14:36:18 2026 +0330
+
+    Merge remote-tracking branch 'upstream/master' into chore/merge-upstream
+    
+    Co-authored-by: Cursor <cursoragent@cursor.com>
+    
+    # Conflicts:
+    #       package.json
+    #       src/components/chat/bubbles.ts
+    #       src/components/popups/starGiftInfo.tsx
+    #       src/lib/appManagers/createManagers.ts
+    #       src/lib/appManagers/manager.ts
+    #       src/lib/logger.ts
+
+commit fb83fb30eb17a127f9eeccc0a32bc41b1647536e
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Mon Jul 13 14:24:51 2026 +0330
+
+    Fix text selection in links and add CRM ticket close errors
+    
+    Prevent accidental link opening during text selection in web previews by:
+    - Checking if text is selected before opening links in chat bubbles
+    - Disabling draggable on web page anchors to prioritize text selection
+    
+    Add proper error handling and user feedback for CRM ticket closure:
+    - Show toast notifications on close failure (with distinct messages for 403 vs other errors)
+    - Re-fetch ticket state on error to reflect server's actual state
+    - Add corresponding language strings for error messages
+
+commit aff75326f3975631504ad26c19b0b7c79d0a24d9
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Mon Jul 13 00:17:15 2026 +0330
+
+    fix: hide toggle
+
+commit d7e58859011330188f0dd4a930d35fab90344e1c
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Mon Jul 13 00:08:27 2026 +0330
+
+    fix: prevent browser save
+
+commit ef65eebbc1e96669c6922c0552083f69330b607f
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Sun Jul 12 23:57:54 2026 +0330
+
+    fix: password fixes
+
+commit c37537d7cdaf6ea59b47091f36731942530b09d4
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Sun Jul 12 23:40:57 2026 +0330
+
+    fix: password save
+
+commit fcfe449c64ef4b787bb4e9e8ce4f68b956b0a1cb
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Mon Jul 6 22:01:05 2026 +0000
+
+    feat: hide all conversations until the agent logs in to the CRM
+    
+    Agents without a live CRM session (no token, or expired via 401) now see
+    an empty chatlist with a "Connect to the CRM" placeholder that opens the
+    existing OTP login popup. Gated in three layers, all failing closed:
+    
+    - worker: dialogsStorage.getDialogs early-returns empty+isEnd via the new
+      AppCrmManager.isLoggedInCached() (accurate from the first call, since
+      createManagers awaits every after() before serving)
+    - UI: AutonomousDialogList.testDialogForFilter drops every dialog when the
+      new useIsCrmLoggedIn() signal is false
+    - notifications: previews are skipped entirely without a session
+    
+    appDialogsManager rebuilds all folder lists (and the placeholder) whenever
+    the session signal flips, so the list appears right after OTP login and
+    vanishes on token expiry — no reload needed. This also heals the boot race
+    between the async session lookup and the first render.
+    
+    Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+commit 0cd81bff4559c8e6a737ee3d09b9c352090a40cd
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Mon Jul 6 19:58:40 2026 +0000
+
+    feat: show the hidden 777000 service chat to CRM superadmins
+    
+    The 777000 "Telegram" chat (where the shared support account's login
+    codes arrive) was hidden from everyone; gate the filters on the CRM
+    role instead so superadmins can see it. Worker-side dialog filtering
+    uses the new synchronous AppCrmManager.isSuperAdminCached(); the UI
+    filter and notification previews use the main-thread role signal.
+    All checks default to false until the CRM config loads, failing closed.
+    
+    Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+commit 036e997425a52c28387ff149e9df8e575a72d717
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Mon Jul 6 19:51:49 2026 +0000
+
+    feat: hide customer user identifiers from non-superadmin agents
+    
+    Extend the CRM superadmin gating to user identity beyond phone numbers:
+    - profile Username row (and its QR-code button) hidden for non-bot users
+    - @username subtitles in global search results and the blocked-users list
+    - dialog-list anchor hrefs no longer embed the numeric user id
+    
+    Bots and channels keep their usernames; gates read the default-false
+    useIsCrmSuperAdmin() signal so everything fails closed.
+    
+    Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+commit 0fa9bbd658d1918a3525efdd6ffbb818882b7509
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Mon Jul 6 19:28:37 2026 +0000
+
+    fix: annotate SW controller catch fallback to satisfy noImplicitAny
+    
+    With strictNullChecks disabled, a bare `() => undefined` catch callback
+    infers an `any` return type and fails the production build with TS7011.
+    
+    Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+commit 012cf7d0299d2fefed35cf04f6ac987ec99584cd
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Mon Jul 6 18:34:07 2026 +0000
+
+    feat: gate sensitive features behind CRM superadmin role
+    
+    Hide active sessions, user phone numbers, the contacts section and
+    contact add/edit from every agent except those whose CRM session says
+    is_super_admin. The flag comes from GET /auth/me (refreshed on app
+    start and after OTP login via AppCrmManager.refreshMe), is persisted
+    in CrmConfig.user, and is exposed to the UI as the default-false
+    useIsCrmSuperAdmin() signal in @stores/crmRole.
+    
+    Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+commit a75306894078748e5cc939f070a706ef2f2f80dc
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Mon Jul 6 01:37:39 2026 +0330
+
+    fix: service worker registration
+
+commit 266eb5dd2b926bf3b944437dd6defe6a360d6da5
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Sun Jul 5 01:44:51 2026 +0330
+
+    feat: user agent tagging
+
+commit e22ba93520baf7b24eb15ed6806b6b4736c00e02
+Author: jnordlund <jnordlund@gmail.com>
+Date:   Fri Jul 3 18:09:51 2026 +0200
+
+    Add support for MTProto rich messages (#669)
+    
+    Render incoming message.rich_message payloads through the Instant View block
+    renderer, with reply/search summary text and a messages.getRichMessage fetch for
+    "read more" parts. Math (pageBlockMath / inline textMath) renders via the Temml
+    path; the TL schema comes from the official Layer 227.
+    
+    Also fixes a threaded-worker port-attachment race that could stick the app on
+    dialog load.
+    
+    Fixes #664
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 859205ff4c0088b5786bc7cb4a850fc5bffecd5c
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Fri Jul 3 19:50:38 2026 +0400
+
+    Layer 227
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit a8cda1207fe45519cfc83222e64ca0bac6b0a4f7
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Fri Jul 3 19:27:54 2026 +0400
+
+    Build
+
+commit 33179d0f19d61cb877d93be0658f81d19e085faf
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Fri Jul 3 19:26:47 2026 +0400
+
+    Route code-block click handling through the codeBlockClick helper
+    
+    Replace the inline code-header / monospace-text click detection and
+    wrap-toggle logic in ChatBubbles with getCodeBlockClickTarget and
+    toggleCodeBlockWrap from @helpers/dom/codeBlockClick. Also sort the
+    pngjs / @types/pngjs devDependencies alphabetically.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit a3cad62f213e87cebc641ef46a51bc8141c60143
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Fri Jul 3 19:07:57 2026 +0400
+
+    Add guest bots (bot_guestchat)
+    
+    Sender: a guest bot's @username typed at the start of a message sends a plain
+    message instead of triggering an inline query, and guest bots are suggested in
+    the @ autocomplete (except in channels and monoforums).
+    
+    Display: an incoming message carrying guestchat_via_from renders the guest
+    bot's avatar (forced even in a 1-on-1) and a "<Bot> for <Visitor>" name, with
+    consecutive messages grouped by visitor. A one-time hint explains that the bot
+    can't read the chat — only the message where it was mentioned.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 531283918b63dafd63d601bea51c171da5d08dd6
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Fri Jul 3 18:10:19 2026 +0400
+
+    Add trackpad swipe-to-reply for message bubbles
+    
+    A two-finger horizontal trackpad swipe now replies to a message on desktop,
+    alongside the existing touch swipe. Wheel events (deltaX) drive the same reply
+    visuals through a shared createReplySwipeController; the gesture axis-locks per
+    burst so vertical scroll and inner horizontal scrollers (code blocks, wide
+    tables) keep working, and the commit point is found by detecting the momentum
+    decay (with a wheel-idle-debounce fallback) so the reply fires near release
+    without waiting out the full trackpad inertia.
+    
+    Also fix two visual regressions in the reply gesture: fade the side reply icon
+    out on release instead of dropping it in a single frame, and keep the group
+    avatar's bottom animating during the slide-back so replying to the last message
+    no longer makes the avatar jump vertically.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 257c29d7e09d523b638dbbb4710f550eefe6e422
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Fri Jul 3 17:02:12 2026 +0400
+
+    Render Markdown documents in Instant View
+    
+    Open .md / text/markdown attachments as a native Instant View page instead
+    of downloading them. A client-side CommonMark-ish parser builds a Telegram
+    Page from the markdown, rendered by the existing IV UI.
+    
+    Parser (src/lib/richTextProcessor/):
+    - parseMarkdownToPage: headings H1-H6 (+ slug anchors), unordered/ordered/
+      nested lists, GFM tables with alignment, task lists, blockquotes, fenced
+      and indented code, $$...$$ math blocks, <details> collapsibles, footnotes
+      (sequential numbering + clickable reference<->definition links),
+      reference/inline links, HTML comment stripping, thematic breaks.
+    - inlineMarkdownToRichText: bold/italic/underline/strike/code/spoiler,
+      <sub>/<sup>/<mark>, <b>/<i>/<u>/<s> -> real formatting, <url>/<email>
+      autolinks, reference links, backslash escapes, inline $x$ math.
+    
+    Instant View (src/components/):
+    - markdownInstantView + wrappers/document.ts: open .md attachments as IV.
+    - instantView.tsx: highlighted code blocks (reusing wrapRichText's
+      messageEntityPre markup) with working copy/wrap buttons, square task
+      checkboxes (StaticCheckbox), app-standard quote styling, Temml-rendered
+      math (inline + block), in-page anchor & footnote scrolling.
+    - instantViewMath: lazy Temml (LaTeX -> MathML) loader with plain-text
+      fallback, loaded as a Vite-minified async chunk on first formula.
+    - browser.tsx: hide open/copy-link menu actions for the URL-less md page.
+    
+    Extract src/helpers/dom/codeBlockClick.ts for the shared code-block
+    copy/wrap detection; the Instant View onClick delegator reuses it.
+    
+    Adds the temml dependency. Covered by src/tests/parseMarkdownToPage.test.ts.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit a42b5b455499ca57d638c3c9deac8772dec2e339
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Fri Jul 3 15:49:29 2026 +0400
+
+    Add Stories and Reactions sections to notification settings
+    
+    Settings → Notifications gains two iOS-style sections:
+    
+    - Stories: a 3-state "New Stories" control (all / important-only / off) mapped
+      to the nullable stories_muted flag on inputNotifyUsers, plus "Show Sender's
+      Name" (stories_hide_sender). The global toggle is inherited by the per-peer
+      story-notification guard and by server web-push, so it actually silences new
+      story notifications on WebK (bugs.telegram.org/c/63273).
+    - Reactions: per-category (messages / stories) off / My Contacts / Everyone
+      pickers plus "Show Sender's Name", backed by new appNotificationsManager
+      get/setReactionsNotifySettings wrappers over account.*ReactionsNotifySettings.
+    
+    The stories write also publishes its change locally right away so the sibling
+    Private Chats section, which shares inputNotifyUsers and rewrites the whole
+    object on tab-close, cannot clobber the story flags.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 5dae11d365150dd88565e8dfa14992c3b243d369
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Fri Jul 3 15:19:09 2026 +0400
+
+    Route OffscreenCanvas stickers and spoilers through per-tab workers
+    
+    OffscreenCanvas presentation (transferControlToOffscreen) is incompatible
+    with a SharedWorker: a tab-owned canvas's frame sink is bound to the owning
+    renderer process, so a cross-process present is rejected ("Invalid client ID")
+    and kills the tab with RESULT_CODE_KILLED_BAD_MESSAGE whenever two same-origin
+    tabs land in different processes. Gate both offscreen paths behind a shared
+    IS_SHARED_WORKER_OFFSCREEN_CANVAS_SUPPORTED flag.
+    
+    - Spoiler renderer runs as a per-tab dedicated Worker instead of a SharedWorker.
+    - rlottie 'canvas' stickers keep decoding in the shared rlottie worker but
+      present via the per-tab emoji compositor: the worker ships ImageBitmaps and
+      the compositor holds/tints/blits the transferred canvases (attach/detach/
+      resize/config/present sticker ops, keyed by item reqId). Re-key
+      lottieLoader.players on the offscreen->legacy fallback via a new reqIdChanged
+      event, and extract paintFrameTinted shared by both workers.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 8dbad50b85e9d54f6cb769f94cc7523a4e5b4652
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Fri Jul 3 13:49:41 2026 +0330
+
+    fix: audio quality fix
+
+commit 3c6ca054a226913e54a28b500358b02a5c70d66b
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Thu Jul 2 17:45:47 2026 +0400
+
+    Fix code-block markdown paste and send handling
+    
+    - parseMarkdown: only treat the first line of a ``` block as a language tag when it's a single identifier token, so a leading { (e.g. pretty-printed JSON with the opening fence on the same line) is kept as code instead of being swallowed.
+    - parseMarkdown: a lone ``` run (all-backtick content, not a real fence) was pushed twice — once in the all-backtick branch and again in the !pushedEntity fallback — duplicating it and drifting every entity after it on send. Emit it verbatim once.
+    - inputField paste handler: don't discard perfectly good rich HTML when text/plain is a markdown rendering of the same content (backticks/asterisks make it longer). Also accept the rich value when its non-whitespace chars are an in-order subsequence of the plain text.
+    - Add parseMarkdownCode.test.ts covering language detection and the lone-``` duplication.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit ef724dfec97579d38d4512246fcf39b2583b2d8f
+Author: Amirmohammad Zarif Shahsavan Nejad <Developerboys@gmail.com>
+Date:   Thu Jul 2 01:33:39 2026 +0330
+
+    feat: closing by /
+
+commit 6e3d57a54519055944ffd7ccdd38c1ac0226978b
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Wed Jul 1 21:04:35 2026 +0400
+
+    Add view-in-stealth-mode option to profile stories context menu
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 3acb5a478e478a23f75d93a503680db1d3455eb4
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Wed Jul 1 14:43:48 2026 +0400
+
+    Add run-build skill to list and serve past build snapshots
+    
+    Lists the git "Build" commits (compiled app in public/) as a paginated,
+    date-sorted table, then serves any chosen snapshot locally by extracting
+    that commit's public/ tree via git archive — mirroring server.js and
+    leaving the working tree untouched.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 99de4a88b830447105f01631172e2425d9501e12
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Tue Jun 30 20:54:01 2026 +0400
+
+    Fix rich-text paste/serialization of newlines around blockquotes
+    
+    Three related fixes in the contenteditable rich-text path:
+    
+    - getRichValueWithCaret paste reconciliation: the re-insertion pass used a
+      drifting offset threshold (`offset > plainTextLength - lineIndex + 1`) that
+      was only correct for one line index, shifting/losing entities on multi-line
+      formatted pastes (e.g. a second line in bold). Use the splice index directly
+      and adjust entity length, not just offset, in both removal and insertion.
+    
+    - Paste handler: strip messageEntityLinebreak before insertRichTextAsHTML.
+      wrapDraftText renders line breaks from the text itself; passing explicit
+      linebreak entities made wrapRichText slice the one before a blockquote,
+      dropping a \n on e.g. `text\n\nquote`. Stripping them aligns paste with the
+      edit/draft path (verified: no extra blank line, model preserves both \n).
+    
+    - getRichElementValue: a multiline blockquote built from block children
+      (<br>/<div>, what Enter produces) lost its last character outside the quote,
+      because the entity length is only grown by text nodes while block-generated
+      \n bypass it. Track the last real-content offset and re-span the blockquote
+      up to it, excluding trailing block line breaks.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit a5c732796ed9012459ef60b638d633fbe0deca0a
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Tue Jun 30 20:01:39 2026 +0400
+
+    Fix video streaming edge cases in service worker
+    
+    - Fall back to the worker on any cache read error (incl. a bare cache
+      timeout that rejects with undefined) instead of throwing TypeError on
+      error.type and killing the range request
+    - Preload the file's last chunk at start (moov/bounds) instead of chunk 0
+    - Treat PRELOAD_SIZE as a read-ahead window from the current position
+      rather than an absolute end offset (read-ahead was dead past 20MB)
+    - Align the preload window start to the chunk grid so preloaded offsets
+      stay valid MTProto offsets
+    - Gate the second range part on overflow > 0 (a byte count was used as a
+      boolean, so a negative value forced a wasteful extra chunk fetch)
+    - Clamp limit to a server-valid minimum (4KB) to avoid LIMIT_INVALID on
+      tiny ranges; make SMALLEST_CHUNK_LIMIT a valid 4KB and use it
+    - Don't resurrect a destroyed stream from toggleStreamInUse(false); clamp
+      inUse at 0 to stop zombie streams leaking in the map
+    - Re-arm the idle debounce instead of destroying a stream still bound to
+      a live <video>
+    - Swallow rejections from best-effort cache writes and fire-and-forget
+      preloads to avoid unhandled rejections
+    - Use Math.clz32 in alignLimit to drop the Math.log FP rounding; remove
+      the unused Response-Time header
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 0aaab7222527c697a53fd4655a867c6591554687
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Tue Jun 30 19:13:47 2026 +0400
+
+    Build
+
+commit c6fb69c05c2e9f6a1c061052495c2a5845ac18b6
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Tue Jun 30 17:27:28 2026 +0400
+
+    Align reply-quote poll icon inline instead of flexing the subtitle
+    
+    The poll-option checkmark in the reply/pinned container now carries the
+    standard inline-icon classes (inline-icon inline-icon-left) so it aligns
+    with the quote text through the normal inline flow, dropping the bespoke
+    .with-icon flex wrapper on the subtitle.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 96fb8c0cba80068e329ef3b0f2144106fd2a15e8
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Tue Jun 30 17:18:43 2026 +0400
+
+    Fix intermittent SRP 2FA password rejection (unpadded A)
+    
+    The client public value A = g^a mod p was serialized with its minimal
+    big-endian length instead of being zero-padded to 256 bytes. The server
+    normalizes A to 256 bytes before hashing u and M1, so whenever g^a mod p
+    had a leading zero byte (~1/256 of attempts) our M1 mismatched the
+    server's and a correct password was rejected at random; a retry (fresh
+    account.getPassword -> new a) usually succeeded. Pad A to 256 bytes
+    everywhere, exactly like tdlib's A_bn.to_binary(256).
+    
+    While matching tdlib's PasswordManager::get_input_check_password:
+    - generate the ephemeral secret a from a fresh local CSPRNG instead of
+      the server-provided state.secure_random (which leaked the secret
+      exponent and was constant across the now-removed retry loop);
+    - add the validations that were commented-out stubs: verifyDhPrimeAndGenerator
+      (= check_config) for both the check and new-password paths, and the
+      srp_B range/length check (0 < B < p, 248 <= len <= 256).
+    
+    Rewrite src/tests/srp.test.ts into a real suite: KDF vs an independent
+    Node-crypto reference, a client/server SRP round-trip x25, a forced
+    leading-zero-A regression (mutation-confirmed it fails on the unpadded
+    code), the isNew verifier path, and validation throws. Drop the stale
+    A/M1/srp_B fixtures and the dead src/mock/srp_original.ts.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 1296446c468453a5696d744ab473cdac44039a06
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Tue Jun 30 17:15:11 2026 +0400
+
+    Fix sponsored topbar plate not reserving chat padding-top
+    
+    The sponsored/ad plate is the only floating plate with height: 'auto', so setFloating measures its offsetHeight. The measurement ran inside the count loop, before the wrapper's `hide` (display: none) class was toggled off — and a display:none ancestor zeroes descendants' offsetHeight. So exactly when the ad plate is the one flipping the visible-plate count 0 -> 1, it was measured at 0 and never reserved its padding-top, leaving it overlapping the chat. Compute the visible set and un-hide the wrapper before measuring.
+    
+    Also clarify in updatePinnedFloatingHeight that a mid-scroll position is left anchored on purpose (matches iOS/Android: the plate slides over the content rather than shoving it down); behavior unchanged.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit bbd3782f39baeb1ff8b228d259bb2dc191c34007
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Tue Jun 30 16:24:48 2026 +0400
+
+    Render topic profile avatar in the profile-avatars header
+    
+    Forum and bot-forum topic profiles used a separate inline 'simple avatar'
+    (.profile-avatar.avatar-120 inside the MainSection, gated by has-simple-avatar).
+    Route them through the same PeerProfileAvatars header as regular chats with no
+    photo instead: PeerProfileAvatars.setPeer now takes a threadId, skips the photo
+    carousel/list-loader, and renders the topic icon as a single centered avatar-120
+    (no profile-avatars-avatar-fake duplicate, no scaled-down full photo).
+    
+    - peerProfileAvatars: topic branch in setPeer; processItem renders avatar-120
+      with a 120px custom-emoji size for topics.
+    - peerProfile: always use the carousel path, passing the topic id; drop the
+      needSimpleAvatar concept and the in-section avatar.
+    - _profile.scss: .is-topic centers the fixed-size icon and keeps it unscaled
+      when the header collapses; removed the dead .has-simple-avatar rule.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 512d07d775589ab314e081cea40138f19c7eb59a
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Tue Jun 30 16:19:50 2026 +0400
+
+    Fix stories hold-to-pause not resuming on release
+    
+    SwipeHandler bound its global mouseup/touchend listeners to
+    this.element.ownerDocument at construction time. For a Solid JSX
+    element (cloned from a <template>), ownerDocument is the inert
+    about:blank template-contents document until the node is inserted
+    into the live DOM. The stories viewer constructs the SwipeHandler
+    before its <Portal> mounts the element, so the release listeners
+    were bound to a document that never receives real events: mousedown
+    (bound to the element directly) still paused on press, but mouseup
+    never reached reset()/onReset()/play(), so the story stayed paused.
+    
+    Bind the gesture-end listener lazily in handleStart instead, when the
+    element is live and ownerDocument resolves to the real (main or
+    Document-PiP) document. Keeps the PiP fix from 9d58fe155 intact and
+    mirrors the lazy pattern already used in attachGrabListeners.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 07f728873dff12b38d40c8a06e481b2992348d9e
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Tue Jun 30 01:24:04 2026 +0400
+
+    Notify when another user posts a story
+    
+    Add a local notification when a peer you follow posts a new story, mirroring the message-notification pipeline: the worker dispatches a notificationBuild task carrying a story payload (discriminated union) and the main thread builds and shows it. Respects the existing per-peer/global stories_muted setting, skips own/out/already-read stories, and covers the uncached-peer path so a peer's very first story still notifies.
+    
+    Story notifications play no sound and don't bump the tab-title counter (noIncrement). Clicking opens the peer's stories at the first unread (matching Android and the avatar tap): in-page directly, on the service-worker/background-push path via a custom.story_id marker, and cross-account via a new 'story' hash param.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit e95fe523b3ee4737185f162e13a335f266a8d360
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Tue Jun 30 01:12:34 2026 +0400
+
+    Keep personal account in paid-reaction send-as list
+    
+    channels.getSendAs(for_paid_reactions=true) omits the personal account;
+    the client injects it as the default peer. But this.sendAsPeers — the
+    canonical pool every click handler rebuilds the menu from — was sliced
+    before that injection, so the personal account was missing from it. The
+    menu rendered correctly on first open (built from the local list), but
+    the first selection regenerated it from this.sendAsPeers and dropped the
+    personal account permanently. Save this.sendAsPeers after folding in the
+    current/default peer.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit f9eb2dea635fa865f7eeb7da8e46424e230ac331
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Tue Jun 30 00:58:14 2026 +0400
+
+    Fix forum topic open, invite-tab, and cross-account propagation bugs
+    
+    - Opening a just-created topic in a cold (not-yet-warm) forum dropped the
+      threadId and showed the forum root: Chat.setPeer set isForum only in the
+      async onChangePeer, so a chat_update mid-transition compared against a stale
+      isForum and reset the peer. Set isForum synchronously in setPeer.
+    
+    - Joining a forum via an invite link didn't open the topics tab. Route both
+      PopupJoinChatInvite.openChat and internalLinkProcessor's already-joined
+      (chatInviteAlready/Peek) path through appImManager.open() instead of
+      setInnerPeer(), so forums go through op() and open the sidebar topics tab.
+    
+    - A topic created on another account never appeared in an open/cached topic
+      list, and stayed hidden even after reopening or receiving messages, until a
+      full reload. Replication-lag race: the topic-create arrives before the topic
+      is queryable by id, messages.getForumTopicsByID returns forumTopicDeleted,
+      and getForumTopicById blacklisted it permanently in deletedTopics. Build the
+      topic locally from the messageActionTopicCreate action (it carries title,
+      icon and id) instead of fetching it, and only blacklist a topic when the
+      server explicitly returns forumTopicDeleted (not on errors/omissions).
+    
+    - Guard canManageTopic and the generic-animations sticker preload against null.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit fcdcb048724d4ba12841d01f97abed905984897d
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Mon Jun 29 23:34:16 2026 +0400
+
+    Refresh chat-folder membership on unread-mark toggle and message deletion
+    
+    Chat-folder membership is driven by a cached index (dialog[index_N] /
+    folder.dialogs) that is written only by dialogsStorage.processDialogForFilters
+    — separate from the folder unread counters. Two update handlers mutated a
+    dialog's unread state without re-processing filters, so a dialog could go stale
+    in an exclude_read ("Unread") folder: it showed in the list with no badge (the
+    badge reads the live unread_count, already 0) and only vanished when opened
+    (open -> readHistory -> processDialogForFilters).
+    
+    - onUpdateDialogUnreadMark: marking a read chat unread didn't add it to an
+      exclude_read folder, and clearing the mark (e.g. from another client) left it
+      stranded there.
+    - onUpdateDeleteMessages: deleting a channel's unread posts drops unread_count
+      to 0 but left the channel stuck in the folder.
+    
+    Both fixed by calling processDialogForFilters after releaseUnreadCount, matching
+    the readHistory ordering (release -> processDialogForFilters -> dispatch). No
+    counter double-count: the unread*PeerIds sets are idempotent and the additive
+    unreadMessagesCount nets to zero (release covers folders that matched before the
+    change; the membership-change modify uses the post-mutate count).
+    
+    Adds synthetic regression tests:
+    - unreadMarkFilterStale.test.ts: mark/clear maintains the index, counters net-zero.
+    - channelMuteFilter.test.ts: muting alone is correct in isolation; deleting a
+      channel's unread posts must drop it from exclude_read.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 5d5c3ef0f03664fb001db313c440f52f038f9a48
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Mon Jun 29 21:24:35 2026 +0400
+
+    Read mention/reaction when jumping to an already-visible message
+    
+    The unread mention/reaction corner button only scrolled to the target via
+    setMessageId; the actual read is driven solely by the intersection observer,
+    which fires only on an intersection CHANGE. When the target is already on
+    screen — typical for reactions, which sit on our own recent messages — the
+    programmatic scroll is a no-op, so no callback ever fires: the reaction stays
+    unread and the badge never clears.
+    
+    Fix it by re-arming the observer for the focused bubble after it is rendered
+    and scrolled into view, forcing a fresh intersection entry. It still reads
+    only if the bubble is actually intersecting, so "read == seen" holds.
+    
+    - SuperIntersectionObserver.reobserve(target): re-deliver an entry for an
+      already-observed target (handles bubbles with multiple callbacks, e.g. a
+      mention that also carries the history observer); no-op while frozen.
+    - ChatBubbles.reobserveUnreadContent(peerId, mid): guarded re-arm, only acts
+      on a bubble still pending unread content (idempotent with the natural flow).
+    - ChatInput: await the inner render/scroll promise before re-arming; poll
+      votes keep their own read flow in goToNextMention.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 6cb2df2df3d49d478eb16c686a807858208570ae
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Mon Jun 29 20:13:41 2026 +0400
+
+    Don't append live messages to the pinned-messages view
+    
+    The history_append/history_multiappend handlers guarded against the
+    Scheduled/Static/Logs chat types but not Pinned. The pinned view shares the
+    chat's messagesStorageKey and, once fully loaded, has loadedAll.bottom === true,
+    so a regular incoming message fell through every guard and got rendered as a
+    bubble in the pinned list. Exclude Pinned from both append handlers, matching
+    the existing pattern; history_delete is left intact so deleted/unpinned messages
+    still disappear from the view.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 330ca4126d92818c069088215173c00b7e8023d9
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Mon Jun 29 19:50:30 2026 +0400
+
+    Show profile Edit button for any admin, not only change_info
+    
+    The Edit (pencil) button in group/channel info was gated solely on the
+    change_info right, so an admin who could manage members/permissions/admins
+    but lacked change_info couldn't reach the edit screen — even though that
+    screen already gates each section on its own rights and merely locks the
+    name field when change_info is missing.
+    
+    Mirror tdesktop's EditPeerInfoBox::Available: show the button to any admin
+    (channel: just_admin || change_info, excluding monoforums; basic group:
+    change_info || change_permissions).
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 64efd76798758e5a67b9622330f07599d0a99982
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Mon Jun 29 19:27:20 2026 +0400
+
+    Wrap long bot verification text in peer profile
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit e8c9dca17b76528783e5ee0c8877f19c6e0ac121
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Mon Jun 29 19:27:16 2026 +0400
+
+    Skip post-send handling when no message was actually sent
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit 388a8b48db2e374eb4241fc7280cc3ef11252418
+Merge: 29ce0b6a1 f382c9939
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Mon Jun 29 19:08:27 2026 +0400
+
+    Merge branch 'master' of https://github.com/morethanwords/tweb
+
+commit 29ce0b6a17f5e294f38fb4d00dc22dc5a17a5329
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Mon Jun 29 19:07:02 2026 +0400
+
+    Pause video avatars when not visible (incl. right sidebar closed)
+    
+    Video avatars kept animating while off-screen and, notably, while sitting in
+    the right sidebar after it was slid closed — the column is hidden with a
+    transform but stays mounted, so an IntersectionObserver never reports it as
+    hidden.
+    
+    - avatarNew: register avatar <video>s with animationIntersector instead of an
+      ad-hoc IntersectionObserver (pauses on off-screen / blur / idle / lite-mode,
+      resumes when visible, survives Document-PiP). Covers both the chat-list /
+      topbar overlay and the profile-carousel / service-bubble path, which had no
+      visibility gating at all.
+    - animationIntersector: add toggleVideosUnder(element, paused) to pause+lock
+      (or resume) every registered video inside a container.
+    - sidebarRight: pause/resume the column's avatar videos on hide()/show(), since
+      the transform-based hide is invisible to the observer.
+    - peerProfileAvatars: self-suspend the tab-progress rAF loop when the active
+      video isn't advancing (restart on a captured 'play' / carousel nav), and free
+      the carousel's registered videos on cleanup so a video locked while the
+      sidebar was closed can't leak when the profile is torn down.
+    - createLoopingMutedVideo: set autoplay only after the start-frame seek so the
+      clip isn't briefly flashed from frame 0.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit f382c9939ef3af881950a11834cd9a5f5320e91b
+Merge: 385391233 428156938
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Mon Jun 29 18:59:32 2026 +0400
+
+    Merge pull request #678 from H7GhosT/feature/ai-editor
+    
+    Ai Editor improvements
+
+commit 428156938b47aa05d2c9de1ac04bef64df21048c
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Mon Jun 29 18:59:01 2026 +0400
+
+    AI editor: don't leak composer's pending silent/schedule/effect into sends
+    
+    getMessageSendingParams() carries the chat input's live silent/scheduleDate/
+    scheduleRepeatPeriod/effect (e.g. restored from a draft). The AI editor manages
+    these via its own send menu, so override them outright instead of merging —
+    otherwise a message sent from the editor inherits state the editor never showed.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+commit d23227488212bd377ae49408994a7e9e1d4b79ef
+Author: Eduard Kuzmenko <thanwords24@gmail.com>
+Date:   Mon Jun 29 18:47:36 2026 +0400
+
+    Fix voice waveform dropped for non-standard (62-byte) waveforms
+    
+    decodeWaveform read each 5-bit sample via DataView.getUint16, which
+    over-reads one byte past the needed one. For a 62-byte / 99-sample
+    waveform the last sample's read landed out of bounds, threw a
+    RangeError, and the catch returned an empty array — so the whole
+    waveform silently failed to render (flat line). Standard 63-byte
+    waveforms have a spare trailing byte and happened to work.

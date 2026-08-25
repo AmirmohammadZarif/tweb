@@ -2,6 +2,7 @@ import Pusher, {Channel} from 'pusher-js';
 import rootScope from '@lib/rootScope';
 import type {CrmRealtimeConfig} from '@lib/crm/types';
 import {
+  CRM_ATTRIBUTION_CHANNEL,
   CRM_SENSITIVE_CHANNEL,
   CRM_SENSITIVE_REQUESTED_EVENT,
   CRM_SENSITIVE_APPROVED_EVENT,
@@ -31,7 +32,13 @@ type SensitiveApprovedPush = {message_id: number, user_id: number | null};
 type NotePush = {ticket_id: number, note: CrmNote};
 
 const ATTRIBUTION_EVENT = 'outbound.attributed';
-const channelNameFor = (chatId: string) => 'private-attribution.peer.' + chatId;
+
+// The Telegram account THIS session is signed in as — for a support agent that is
+// their department's shared account. Every realtime channel is scoped by it,
+// because a chat id alone doesn't name a conversation: the same customer may be
+// talking to two departments at once, and neither may see the other's labels or
+// notes. See CRM_SESSION_PARAM.
+const sessionId = () => '' + rootScope.myId.toUserId();
 
 class CrmRealtime {
   private pusher: Pusher;
@@ -89,7 +96,8 @@ class CrmRealtime {
     const pusher = await this.ensurePusher();
     if(this.currentPeerId !== peerId || !pusher) return; // superseded or not connected
 
-    const name = channelNameFor(chatId);
+    const session = sessionId();
+    const name = CRM_ATTRIBUTION_CHANNEL(session, chatId);
     if(name === this.channelName) return;
     this.unsubscribeChannel();
     this.channelName = name;
@@ -136,7 +144,7 @@ class CrmRealtime {
 
     // Internal agent notes ride another sibling per-peer channel — a colleague's
     // note appears live in the timeline + notes panel.
-    this.notesChannelName = CRM_NOTES_CHANNEL(chatId);
+    this.notesChannelName = CRM_NOTES_CHANNEL(session, chatId);
     this.notesChannel = pusher.subscribe(this.notesChannelName);
     this.notesChannel.bind(CRM_NOTE_ADDED_EVENT, (data: NotePush) => {
       if(this.currentPeerId !== peerId || !data?.note?.id) return;

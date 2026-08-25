@@ -22,6 +22,7 @@ import Button, {replaceButtonIcon} from '@components/button';
 import showScheduleSendingPopup from '@components/popups/scheduleSendingPopup';
 import SendMenu from '@components/chat/sendContextMenu';
 import rootScope from '@lib/rootScope';
+import {useIsCrmReadOnly} from '@stores/crmRole';
 import PopupPinMessage from '@components/popups/unpinMessage';
 import tsNow from '@helpers/tsNow';
 import appNavigationController, {NavigationItem} from '@components/appNavigationController';
@@ -68,6 +69,8 @@ import toggleDisability from '@helpers/dom/toggleDisability';
 import callbackify from '@helpers/callbackify';
 import ChatBotCommands from '@components/chat/botCommands';
 import createCrmTaskFromText from '@lib/crm/createTask';
+import {CrmAiDraftReason} from '@lib/crm/types';
+import {hasCrmOpenTicket} from '@stores/crmOpenTickets';
 import copy from '@helpers/object/copy';
 import documentFragmentToHTML from '@helpers/dom/documentFragmentToHTML';
 import PopupElement from '@components/popups';
@@ -206,6 +209,17 @@ type WatchDownloadProgressArgs<T> = {
   cancel: () => void;
 };
 
+// Support-fork: why the assistant produced no draft → what the agent is told.
+// Every one of these arrives as a 200 (see CrmAiDraftReason) because they are
+// outcomes, not transport failures.
+const AI_DRAFT_REASON_KEYS: Record<CrmAiDraftReason, LangPackKey> = {
+  no_pipeline: 'Crm.AiDraft.NoPipeline',
+  no_message: 'Crm.AiDraft.NoMessage',
+  filtered_out: 'Crm.AiDraft.FilteredOut',
+  empty: 'Crm.AiDraft.Empty',
+  failed: 'Crm.AiDraft.Failed'
+};
+
 export default class ChatInput {
   readonly Class = ChatInput;
   // private static AUTO_COMPLETE_REG_EXP = /(\s|^)((?::|.)(?!.*[:@]).*|(?:[@\/]\S*))$/;
@@ -245,6 +259,11 @@ export default class ChatInput {
 
   private btnAutoDeletePeriod: HTMLElement;
   private btnSendGift: HTMLButtonElement;
+  // Support-fork: the composer's AI-star button and the in-flight draft it
+  // is waiting on. The promise doubles as the "busy" flag — a second click
+  // while one is running must not buy a second paid model call.
+  private btnAiDraft: HTMLButtonElement;
+  private aiDraftPromise: Promise<void>;
 
   private sendMenu: SendMenu;
 
@@ -364,6 +383,7 @@ export default class ChatInput {
   private onlyPremiumBtn: HTMLButtonElement;
   private onlyPremiumBtnText: I18n.IntlElement;
   private frozenBtn: HTMLButtonElement;
+  private readOnlyBtn: HTMLButtonElement;
   private joinBtn: HTMLButtonElement;
   private channelMuteBtn: HTMLButtonElement;
   private directControlBtn: HTMLButtonElement;
@@ -1029,6 +1049,16 @@ export default class ChatInput {
       PopupElement.createPopup(PopupSendGift, {peerId: this.chat.peerId});
     }, {listenerSetter: this.listenerSetter});
 
+    // * Support-fork: draft a reply with the CRM's AI assistant. Deliberately NOT
+    // * a `float` button like the gift/scheduled ones — those appear only while the
+    // * input is empty, and this one has to stay reachable after the agent has
+    // * started typing (that is exactly when they want the draft to compare against).
+    this.btnAiDraft = this.createButtonIcon('ai_star1 toggle-ai-draft hide', {noRipple: true});
+    this.btnAiDraft.title = I18n.format('Crm.AiDraft.Tooltip', true);
+    attachClickEvent(this.btnAiDraft, () => {
+      this.requestAiDraft();
+    }, {listenerSetter: this.listenerSetter});
+
     this.inputMessageContainer = document.createElement('div');
     this.inputMessageContainer.classList.add('input-message-container');
     this.inputState.set({inputMessageContainerInited: true});
@@ -1297,6 +1327,7 @@ export default class ChatInput {
       this.btnSuggestPost,
       this.btnAutoDeletePeriod,
       this.btnSendGift,
+      this.btnAiDraft,
       this.btnToggleEmoticons,
       this.fileInput
     ].filter(Boolean));
@@ -1483,6 +1514,19 @@ export default class ChatInput {
     this.channelMuteBtn.classList.add('hide');
     this.onlyPremiumBtnText = new I18n.IntlElement({key: 'Chat.Input.PremiumRequiredButton', args: [0, document.createElement('a')]});
     this.onlyPremiumBtn = makeControlButton(this.onlyPremiumBtnText.element);
+    // Read-only onboarding role: the composer is gone (canSend is false), so say
+    // WHY — an empty footer reads like a bug. Not clickable: there is nothing the
+    // trainee can do about it from here.
+    const readOnlyText = document.createElement('span');
+    readOnlyText.classList.add('chat-input-frozen-text');
+    const readOnlyText1 = i18n('Crm.ReadOnly.Title');
+    const readOnlyText2 = i18n('Crm.ReadOnly.Subtitle');
+    readOnlyText2.classList.add('secondary', 'chat-input-frozen-text-subtitle');
+    readOnlyText.append(readOnlyText1, readOnlyText2);
+    this.readOnlyBtn = makeControlButton(readOnlyText);
+    this.readOnlyBtn.classList.add('chat-input-read-only-plate');
+    this.readOnlyBtn.disabled = true;
+
     const frozenText = document.createElement('span');
     frozenText.classList.add('chat-input-frozen-text');
     const frozenText1 = i18n('Chat.Input.FrozenButton1');
@@ -1559,6 +1603,7 @@ export default class ChatInput {
         this.channelMuteBtn,
         this.onlyPremiumBtn,
         this.frozenBtn,
+        this.readOnlyBtn,
         this.pinnedControlBtn,
         this.openChatBtn
       ].filter(Boolean)
@@ -1573,6 +1618,23 @@ export default class ChatInput {
   private setChatListeners() {
     this.listenerSetter.add(rootScope)('global_privacy_update', () => {
       this.updateGiftButtonVisibility();
+    });
+
+    // * Support-fork: the CRM ticket for a chat lands AFTER the chat opens (the
+    // * topbar plate fetches it), so the peer-change pass below usually runs before
+    // * we know whether this peer has a ticket at all. These events are what
+    // * actually reveals the button on a cold chat open.
+    this.listenerSetter.add(rootScope)('crm_ticket_update', ({peerId}) => {
+      if(this.chat?.peerId === peerId) this.updateAiDraftButtonVisibility();
+    });
+
+    this.listenerSetter.add(rootScope)('crm_open_tickets_update', () => {
+      this.updateAiDraftButtonVisibility();
+    });
+
+    // * A dropped CRM session leaves a button that can only 401.
+    this.listenerSetter.add(rootScope)('crm_auth_required', () => {
+      this.updateAiDraftButtonVisibility();
     });
 
     this.listenerSetter.add(rootScope)('peer_full_update', (peerId) => {
@@ -1925,7 +1987,8 @@ export default class ChatInput {
       this.getJoinButtonType() ||
       await this.isChannelControlNeeded() ||
       this.isRepliesChat() ||
-      (this.frozenBtn && this.chat.appConfig.freeze_since_date && !(await this.chat.canSend()))
+      (this.frozenBtn && this.chat.appConfig.freeze_since_date && !(await this.chat.canSend())) ||
+      (this.readOnlyBtn && useIsCrmReadOnly()())
     ) {
       return this.controlContainer;
     }
@@ -2461,6 +2524,12 @@ export default class ChatInput {
       sendMenu?.setPeerParams({peerId, isPaid: !!this.chat.starsAmount});
 
       let haveSomethingInControl = false;
+      if(this.chat && this.readOnlyBtn) {
+        const good = useIsCrmReadOnly()();
+        haveSomethingInControl ||= good;
+        this.readOnlyBtn.classList.toggle('hide', !good);
+      }
+
       if(this.chat && this.frozenBtn) {
         const good = !haveSomethingInControl && appConfig.freeze_since_date && !canSend;
         haveSomethingInControl ||= good;
@@ -2576,6 +2645,8 @@ export default class ChatInput {
           });
         }
       }
+
+      this.updateAiDraftButtonVisibility();
 
       haveSomethingInControl ||= this.chat.isBotforum && this.chat.canManageBotforumTopics;
 
@@ -2696,6 +2767,88 @@ export default class ChatInput {
     ]);
     if(this.chat?.peerId !== peerId) return;
     this.btnSendGift.classList.toggle('hide', isBot || !this.shouldShowGiftButton(userFull, globalPrivacy));
+  }
+
+  /**
+   * Support-fork: show the AI-draft button only where it can actually work — a
+   * 1-to-1 customer chat with an open CRM ticket, on a session that is signed in
+   * to the CRM.
+   *
+   * Reads the `crmOpenTickets` store rather than asking the manager, and that is
+   * load-bearing: every `managers.*` call is an async worker proxy, so a manager
+   * check here would return a Promise (always truthy) and would also put a
+   * round-trip on the chat-open path, which this file forbids. The store is the
+   * UI-thread mirror kept fresh by the crm_* events wired up in the constructor.
+   */
+  private updateAiDraftButtonVisibility() {
+    if(!this.btnAiDraft || !this.chat) return;
+
+    const peerId = this.chat.peerId;
+    const good = !!peerId &&
+      peerId.isUser() &&
+      this.chat.type === ChatType.Chat &&
+      hasCrmOpenTicket(peerId);
+
+    this.btnAiDraft.classList.toggle('hide', !good);
+  }
+
+  /**
+   * Ask the CRM to draft a reply and drop it into the composer for the agent to
+   * edit and send.
+   *
+   * The text is inserted, never sent: this button produces something the agent
+   * reviews, and the CRM side writes nothing to the ticket either. `isHelper` is
+   * false so the draft is inserted at the caret without eating a typed token —
+   * an agent who half-wrote a reply keeps what they wrote.
+   */
+  private requestAiDraft() {
+    // Already drafting. A second paid model call because someone double-clicked
+    // is exactly what the throttle on the endpoint exists to prevent, and losing
+    // the race here would insert two drafts into one composer.
+    if(this.aiDraftPromise || !this.chat) return;
+
+    const peerId = this.chat.peerId;
+    // Same conversion every other CRM call in the fork uses (see crmTicket.tsx):
+    // the CRM keys these endpoints by the customer's Telegram chat id.
+    const chatId = '' + peerId.toUserId();
+    const middleware = this.getMiddleware(() => this.chat?.peerId === peerId);
+
+    this.btnAiDraft.classList.add('is-loading');
+    const undoDisability = toggleDisability([this.btnAiDraft], true);
+
+    const finish = () => {
+      this.aiDraftPromise = undefined;
+      if(!this.btnAiDraft) return;
+      this.btnAiDraft.classList.remove('is-loading');
+      undoDisability();
+    };
+
+    this.aiDraftPromise = this.managers.appCrmManager.generateAiDraft(chatId).then((draft) => {
+      finish();
+
+      // The agent switched chats while the model was thinking — dropping the
+      // draft into whatever chat they landed on would be worse than losing it.
+      if(!middleware()) return;
+
+      if(!draft) {
+        toastNew({langPackKey: 'Crm.AiDraft.Failed'});
+        return;
+      }
+
+      if(!draft.ok || !draft.text) {
+        toastNew({langPackKey: AI_DRAFT_REASON_KEYS[draft.reason] || 'Crm.AiDraft.Failed'});
+        return;
+      }
+
+      this.insertAtCaret(draft.text, undefined, false);
+    }, (err: ApiError & {status?: number}) => {
+      finish();
+      if(!middleware()) return;
+
+      toastNew({
+        langPackKey: err?.status === 429 ? 'Crm.AiDraft.RateLimited' : 'Crm.AiDraft.Failed'
+      });
+    });
   }
 
   private updateBotCommands(userFull: UserFull.userFull, skipAnimation?: boolean) {
@@ -4294,6 +4447,15 @@ export default class ChatInput {
     if(!editMsgId && chat.peerId?.isUser()) {
       const {value} = getRichValueWithCaret(this.messageInputField.input, true, false);
       const trimmed = value.trim();
+
+      // Read-only onboarding role: the composer is hidden, but the slash commands
+      // below are shortcuts to CRM writes — refuse them here too rather than let
+      // the request come back 403.
+      if(useIsCrmReadOnly()()) {
+        this.clearInput();
+        toastNew({langPackKey: 'Crm.ReadOnly.Blocked'});
+        return;
+      }
       if(trimmed.toLowerCase() === '/close') {
         const crmTicket = chat.topbar?.plates?.crmTicket;
         if(crmTicket?.getTicket()?.status === 'open') {

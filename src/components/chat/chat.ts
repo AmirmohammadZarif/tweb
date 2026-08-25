@@ -5,6 +5,7 @@ import {AppImManager, APP_TABS, ChatSetPeerOptions} from '@lib/appImManager';
 import EventListenerBase from '@helpers/eventListenerBase';
 import {logger, LogTypes} from '@lib/logger';
 import rootScope from '@lib/rootScope';
+import {useIsCrmReadOnly} from '@stores/crmRole';
 import appSidebarRight from '@components/sidebarRight';
 import ChatBubbles, {FullMid, splitFullMid} from '@components/chat/bubbles';
 import ChatContextMenu from '@components/chat/contextMenu';
@@ -1316,6 +1317,11 @@ export default class Chat extends EventListenerBase<{
   }
 
   public canSend(action?: ChatRights) {
+    // Read-only onboarding role: nothing may be sent, anywhere. Gating here turns
+    // off the composer and every affordance that asks first (attach menu, polls,
+    // stickers, reply, schedule...) in one place; the managers refuse the write
+    // itself as well, so a path that doesn't ask still can't send.
+    if(useIsCrmReadOnly()()) return Promise.resolve(false);
     if(isVerificationBot(this.peerId)) return Promise.resolve(false);
     if(this.type === ChatType.Saved && this.threadId !== this.peerId) {
       return Promise.resolve(false);
@@ -1455,6 +1461,11 @@ export default class Chat extends EventListenerBase<{
   }
 
   public async sendReaction(options: SendReactionOptions) {
+    // Read-only onboarding role: a reaction reaches the customer like any other
+    // write. Bail before the optimistic local update, so nothing flashes on
+    // screen as if it worked.
+    if(useIsCrmReadOnly()()) return;
+
     const isPaidReaction = options.reaction._ === 'reactionPaid';
     const count = options.count ?? 1;
     if(isPaidReaction) {

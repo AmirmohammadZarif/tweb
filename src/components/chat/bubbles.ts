@@ -51,7 +51,7 @@ import assumeType from '@helpers/assumeType';
 import debounce, {DebounceReturnType} from '@helpers/schedulers/debounce';
 import windowSize from '@helpers/windowSize';
 import {formatPhoneNumber} from '@helpers/formatPhoneNumber';
-import useIsCrmSuperAdmin, {useCrmUserId, useIsCrmLoggedIn} from '@stores/crmRole';
+import useIsCrmSuperAdmin, {useCrmUserId, useIsCrmLoggedIn, useIsCrmReadOnly} from '@stores/crmRole';
 import {detectSensitiveRanges} from '@lib/crm/sensitiveContent';
 import {triggerSensitiveReveal} from '@lib/crm/triggerReveal';
 import AppMediaViewer from '@components/appMediaViewer';
@@ -3042,15 +3042,23 @@ export default class ChatBubbles {
   // team's unread state) and released for good once the chat IS claimed, so the
   // rest of the visit reads normally. See @lib/agentReadMode.
   private isReadHeld() {
-    return agentReadMode.isEnabled() &&
+    // A read-only trainee holds reads ALWAYS and can never release them: on a
+    // shared department account a read receipt is itself an outgoing action —
+    // it tells the customer someone is there and clears the team's unread.
+    return (agentReadMode.isEnabled() || useIsCrmReadOnly()()) &&
       !this.manualReadReleased &&
       !!this.chat.peerId?.isUser() &&
       this.chat.type === ChatType.Chat;
   }
 
-  /** Is there anything the agent is currently holding back from being read? */
+  /**
+   * Is there anything the agent is currently holding back from being read?
+   * Always false for a read-only trainee — they have no claim to make, so every
+   * "Mark as read" affordance stays hidden rather than failing on click.
+   */
   public hasHeldReads() {
     return this.isReadHeld() &&
+      !useIsCrmReadOnly()() &&
       !!(this.unreaded.size || this.unreadedSeen.size || this.unreadedContent.size || this.unreadedContentSeen.size);
   }
 
@@ -6557,6 +6565,9 @@ export default class ChatBubbles {
   // that, never our own assumption. Fire-and-forget, off the read path.
   private reportSeenToCrm(peerId: PeerId, mids: number[]) {
     if(!peerId?.isUser() || !mids?.length || !useIsCrmLoggedIn()()) return;
+    // A trainee's viewing is not "who picked this up" — and the CRM refuses the
+    // write anyway (EnsureMobileWriteAllowed).
+    if(useIsCrmReadOnly()()) return;
 
     const messageIds = mids
     .map((mid) => getServerMessageId(mid))

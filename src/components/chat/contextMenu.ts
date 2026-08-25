@@ -79,6 +79,7 @@ import noop from '@helpers/noop';
 import {isSensitive} from '@helpers/restrictions';
 import {hasSensitiveSpoiler} from '@components/wrappers/mediaSpoiler';
 import {useIsFrozen} from '@stores/appState';
+import {useIsCrmReadOnly} from '@stores/crmRole';
 import prepareTextWithEntitiesForCopying from '@helpers/prepareTextWithEntitiesForCopying';
 import {runWithHotReloadGuard} from '@lib/solidjs/runWithHotReloadGuard';
 import {PartialByKeys} from '@types';
@@ -813,7 +814,9 @@ export default class ChatContextMenu {
       icon: 'reply',
       text: 'Reply',
       onClick: this.onReplyClick,
+      // Read-only: the composer is hidden, so replying is a dead end.
       verify: async() => !this.isLegacy &&
+        !useIsCrmReadOnly()() &&
         // await this.chat.canSend() &&
         !this.message.pFlags.is_outgoing &&
         !!this.chat.input.messageInput &&
@@ -907,7 +910,8 @@ export default class ChatContextMenu {
           mid: this.message.mid
         });
       },
-      verify: () => !!(this.message as Message.message).message &&
+      verify: () => !useIsCrmReadOnly()() &&
+        !!(this.message as Message.message).message &&
         this.managers.appCrmManager.isConnected()
     }, {
       icon: 'copy',
@@ -1009,6 +1013,7 @@ export default class ChatContextMenu {
       text: 'Message.Context.Pin',
       onClick: this.onPinClick,
       verify: async() => !this.isLegacy &&
+        !useIsCrmReadOnly()() &&
         !this.chat.isMonoforum &&
         !this.message.pFlags.is_outgoing &&
         this.message._ !== 'messageService' &&
@@ -1020,7 +1025,8 @@ export default class ChatContextMenu {
       icon: 'unpin',
       text: 'Message.Context.Unpin',
       onClick: this.onUnpinClick,
-      verify: async() => (this.message as Message.message).pFlags.pinned &&
+      verify: async() => !useIsCrmReadOnly()() &&
+        (this.message as Message.message).pFlags.pinned &&
         await this.managers.appPeersManager.canPinMessage(this.message.peerId) &&
         !useIsFrozen()
     }, {
@@ -1062,7 +1068,9 @@ export default class ChatContextMenu {
       icon: 'forward',
       text: 'Forward',
       onClick: this.onForwardClick, // let forward the message if it's outgoing but not ours (like a changelog)
-      verify: () => !this.noForwards &&
+      // Read-only: forwarding is a send into whichever chat it targets.
+      verify: () => !useIsCrmReadOnly()() &&
+        !this.noForwards &&
         this.chat.type !== ChatType.Scheduled &&
         (!this.message.pFlags.is_outgoing || this.message.fromId === SERVICE_PEER_ID) &&
         this.message._ !== 'messageService'
@@ -1070,7 +1078,8 @@ export default class ChatContextMenu {
       icon: 'forward',
       text: 'Message.Context.Selection.Forward',
       onClick: this.onForwardClick,
-      verify: () => this.chat.selection.selectionForwardBtn &&
+      verify: () => !useIsCrmReadOnly()() &&
+        this.chat.selection.selectionForwardBtn &&
         this.isSelected &&
         !this.chat.selection.selectionForwardBtn.hasAttribute('disabled'),
       notDirect: () => true,
@@ -1512,6 +1521,8 @@ export default class ChatContextMenu {
     let reactionsMenuPosition: 'horizontal' | 'vertical';
     if(
       this.chat.type !== ChatType.Logs &&
+      // Read-only onboarding role: a reaction is a write the customer can see.
+      !useIsCrmReadOnly()() &&
       this.message &&
       (this.message._ === 'message' || (this.message._ === 'messageService' && this.message.pFlags.reactions_are_possible)) &&
       !this.chat.selection.isSelecting &&

@@ -11,6 +11,7 @@ import {
   CrmFirstSeenMap,
   CrmFirstSeenSummary,
   CrmFirstSeenSummaryEntry,
+  CrmAiDraft,
   CrmCreateTaskInput,
   CrmProject,
   CrmProjectMember,
@@ -110,6 +111,21 @@ export default class AppCrmManager extends AppManager {
       baseUrl: (config.baseUrl ?? this.config.baseUrl).trim().replace(/\/+$/, '')
     };
     await this.persist();
+  }
+
+  /**
+   * The Telegram account this session is signed in as — for an agent, their
+   * DEPARTMENT's shared account.
+   *
+   * Every chat-keyed CRM call carries it, because a Telegram chat id does not name
+   * a conversation on its own: one customer can hold an open ticket with Financial
+   * and another with Monetization at the same time, over two different department
+   * accounts, and those two conversations share the customer's chat id. Without
+   * this the CRM would answer with whichever department's ticket, notes and agent
+   * labels it happened to find first — including ones this agent has no access to.
+   */
+  private sessionTelegramUserId(): string {
+    return '' + this.appPeersManager.peerId.toUserId();
   }
 
   public async isConnected(): Promise<boolean> {
@@ -212,6 +228,19 @@ export default class AppCrmManager extends AppManager {
 
   public isSuperAdminCached(): boolean {
     return this.isLoggedInCached() && !!this.config.user?.is_super_admin;
+  }
+
+  /**
+   * Onboarding trainee (read-only CRM role): every outgoing action is refused.
+   *
+   * Checked inside the managers that actually talk to Telegram — sending,
+   * editing, deleting, reacting — rather than only in the UI, so a path that
+   * forgets to hide its button still cannot write. The CRM refuses its own writes
+   * separately (EnsureMobileWriteAllowed); this covers the Telegram side, which
+   * never passes through the CRM at all.
+   */
+  public isReadOnlyCached(): boolean {
+    return this.isLoggedInCached() && !!this.config.user?.is_read_only;
   }
 
   // Re-fetch /auth/me and merge into the stored user. persist() dispatches
@@ -416,7 +445,9 @@ export default class AppCrmManager extends AppManager {
   public async getTicketByTelegram(chatId: string): Promise<CrmTicketLookupResult> {
     if(!(await this.isConnected()) || !chatId) return {failed: true};
     try {
-      const result = await this.request<{ticket: CrmTicketRef | null}>('GET', `${CRM_ENDPOINTS.tickets}/by-telegram/${encodeURIComponent(chatId)}`);
+      const result = await this.request<{ticket: CrmTicketRef | null}>('GET', `${CRM_ENDPOINTS.tickets}/by-telegram/${encodeURIComponent(chatId)}`, {
+        query: {session_telegram_user_id: this.sessionTelegramUserId()}
+      });
       this.rememberTicket(chatId, result?.ticket || undefined);
       if(!result?.ticket) return {noTicket: true};
       return {ticket: result.ticket};
@@ -434,7 +465,9 @@ export default class AppCrmManager extends AppManager {
   public async claimTicketByTelegram(chatId: string): Promise<void> {
     if(!(await this.isConnected()) || !chatId) return;
     try {
-      await this.request('POST', `${CRM_ENDPOINTS.tickets}/by-telegram/${encodeURIComponent(chatId)}/claim`);
+      await this.request('POST', `${CRM_ENDPOINTS.tickets}/by-telegram/${encodeURIComponent(chatId)}/claim`, {
+        body: {session_telegram_user_id: this.sessionTelegramUserId()}
+      });
     } catch(err) {
       this.log.error('claimTicketByTelegram failed', err);
     }
@@ -448,7 +481,7 @@ export default class AppCrmManager extends AppManager {
     if(!(await this.isConnected()) || !chatId || !messageId) return;
     try {
       await this.request('POST', `${CRM_ENDPOINTS.tickets}/by-telegram/${encodeURIComponent(chatId)}/attribute`, {
-        body: {message_id: messageId}
+        body: {message_id: messageId, session_telegram_user_id: this.sessionTelegramUserId()}
       });
     } catch(err) {
       this.log.error('attributeOutboundMessage failed', err);
@@ -463,7 +496,9 @@ export default class AppCrmManager extends AppManager {
   public async getAttributionsByTelegram(chatId: string): Promise<CrmAttributionMap> {
     if(!(await this.isConnected()) || !chatId) return {};
     try {
-      const result = await this.request<{data: CrmAttributionMap}>('GET', `${CRM_ENDPOINTS.tickets}/by-telegram/${encodeURIComponent(chatId)}/attributions`);
+      const result = await this.request<{data: CrmAttributionMap}>('GET', `${CRM_ENDPOINTS.tickets}/by-telegram/${encodeURIComponent(chatId)}/attributions`, {
+        query: {session_telegram_user_id: this.sessionTelegramUserId()}
+      });
       return result?.data || {};
     } catch(err) {
       this.log.error('getAttributionsByTelegram failed', err);
@@ -487,7 +522,7 @@ export default class AppCrmManager extends AppManager {
     if(!(await this.isConnected()) || !chatId || !messageIds?.length) return {};
     try {
       const result = await this.request<{data: CrmFirstSeenMap}>('POST', CRM_ENDPOINTS.markSeen(chatId), {
-        body: {message_ids: messageIds}
+        body: {message_ids: messageIds, session_telegram_user_id: this.sessionTelegramUserId()}
       });
       const map = result?.data || {};
       this.rememberFirstSeen(chatId, map);
@@ -502,7 +537,9 @@ export default class AppCrmManager extends AppManager {
   public async getFirstSeenByTelegram(chatId: string): Promise<CrmFirstSeenMap> {
     if(!(await this.isConnected()) || !chatId) return {};
     try {
-      const result = await this.request<{data: CrmFirstSeenMap}>('GET', CRM_ENDPOINTS.firstSeen(chatId));
+      const result = await this.request<{data: CrmFirstSeenMap}>('GET', CRM_ENDPOINTS.firstSeen(chatId), {
+        query: {session_telegram_user_id: this.sessionTelegramUserId()}
+      });
       const map = result?.data || {};
       this.rememberFirstSeen(chatId, map);
       return map;
@@ -557,7 +594,10 @@ export default class AppCrmManager extends AppManager {
 
     try {
       const result = await this.request<{data: CrmFirstSeenSummary}>('GET', CRM_ENDPOINTS.firstSeenSummary, {
-        query: {chat_ids: peerIds.map((peerId) => peerId.toUserId()).join(',')}
+        query: {
+          chat_ids: peerIds.map((peerId) => peerId.toUserId()).join(','),
+          session_telegram_user_id: this.sessionTelegramUserId()
+        }
       });
 
       const summary = result?.data || {};
@@ -678,7 +718,9 @@ export default class AppCrmManager extends AppManager {
   public async getNotesByTelegram(chatId: string): Promise<CrmNotesResult> {
     if(!(await this.isConnected()) || !chatId) return {ticketId: null, notes: []};
     try {
-      const result = await this.request<{data: {ticket_id: number | null, notes: CrmNote[]}}>('GET', CRM_ENDPOINTS.notes(chatId));
+      const result = await this.request<{data: {ticket_id: number | null, notes: CrmNote[]}}>('GET', CRM_ENDPOINTS.notes(chatId), {
+        query: {session_telegram_user_id: this.sessionTelegramUserId()}
+      });
       return {ticketId: result?.data?.ticket_id ?? null, notes: result?.data?.notes || []};
     } catch(err) {
       this.log.error('getNotesByTelegram failed', err);
@@ -691,7 +733,23 @@ export default class AppCrmManager extends AppManager {
   // toast. Rethrows nothing; a 404 (no ticket) resolves to undefined.
   public async addNoteByTelegram(chatId: string, text: string): Promise<CrmNote | undefined> {
     if(!(await this.isConnected()) || !chatId || !text.trim()) return undefined;
-    const result = await this.request<{data: CrmNote}>('POST', CRM_ENDPOINTS.addNote(chatId), {body: {text: text.trim()}});
+    const result = await this.request<{data: CrmNote}>('POST', CRM_ENDPOINTS.addNote(chatId), {
+      body: {text: text.trim(), session_telegram_user_id: this.sessionTelegramUserId()}
+    });
+    return result?.data;
+  }
+
+  // ── AI draft assistant ────────────────────────────────────────────────────
+  // Ask the CRM to draft a reply for this chat's ticket. Costs a paid model call
+  // per press (the endpoint is throttled per agent), so this is only ever called
+  // from an explicit click — never on chat open, never on a timer.
+  //
+  // Errors propagate rather than resolving to undefined: the agent pressed a
+  // button and is waiting, so a failure has to reach them as a toast instead of
+  // looking like a draft that silently never arrived.
+  public async generateAiDraft(chatId: string): Promise<CrmAiDraft | undefined> {
+    if(!(await this.isConnected()) || !chatId) return undefined;
+    const result = await this.request<{data: CrmAiDraft}>('POST', CRM_ENDPOINTS.aiDraft(chatId));
     return result?.data;
   }
 
