@@ -129,7 +129,7 @@
 "General.SendShortcut.NewLine.ShiftEnter" = "New line by Shift + Enter";
 "General.SendShortcut.NewLine.Enter" = "New line by Enter";
 "KeyboardShortcuts.Title" = "Keyboard Shortcuts";
-"AgentMetrics.Title" = "Agent Performance";
+"AgentMetrics.Title" = "AndroPay CRM";
 "AgentMetrics.TodayOverview" = "Today";
 "AgentMetrics.WeekOverview" = "Last 7 days";
 "AgentMetrics.VsWeekAvg" = "Today vs daily average";
@@ -177,7 +177,7 @@
 "Tasks.TimeLogged" = "Time logged";
 "Tasks.TimeFailed" = "Could not log time.";
 "Tasks.StatusFailed" = "Could not update the task.";
-"Tasks.NotConnected" = "Connect to Andropay first (Settings → Agent Performance).";
+"Tasks.NotConnected" = "Connect to Andropay first (Settings → AndroPay CRM).";
 "Tasks.PickProject" = "Which project?";
 "Tasks.PickProjectFor" = "Create \"%1$s\" in:";
 "Tasks.CreateFromMessage" = "Create task from message";
