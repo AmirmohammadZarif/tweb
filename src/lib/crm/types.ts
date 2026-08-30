@@ -95,11 +95,12 @@ export const CRM_ENDPOINTS = {
 // of these: a filter stage deciding a human should take this one is the system
 // working, not an error, and the agent needs to be told which case they hit.
 export type CrmAiDraftReason =
-  | 'no_pipeline'   // no assist/reply pipeline is enabled for this department
-  | 'no_message'    // nothing from the customer to answer yet
-  | 'filtered_out'  // a filter stage decided this one needs a human
-  | 'empty'         // the pipeline ran but produced no text
-  | 'failed';       // the model call itself failed
+  | 'no_pipeline'      // no assist/reply pipeline is enabled for this department
+  | 'no_message'       // nothing from the customer to answer yet
+  | 'filtered_out'     // a filter stage decided this one needs a human
+  | 'empty'            // the pipeline ran but produced no text
+  | 'failed'           // the model call itself failed
+  | 'budget_exceeded'; // the CRM's daily AI spend cap is used up
 
 // POST /tickets/by-telegram/{chatId}/ai-draft -> {data: CrmAiDraft}
 export type CrmAiDraft = {
@@ -109,7 +110,17 @@ export type CrmAiDraft = {
   // Audit id of the recorded run (ai_pipeline_runs), for tracing a bad draft
   // back to the pipeline and prompt that produced it.
   run_id: number | null,
+  // Tokens this REQUEST spent. Zero on a cache hit — the draft still has text,
+  // it just did not cost anything to re-serve, so summing this client-side gives
+  // real spend rather than double-counting every re-press.
   total_tokens: number,
+  // True when the CRM re-served a draft it had already generated for this exact
+  // conversation instead of paying for a new one. The agent sees the same text
+  // they saw last press, which is why the button offers a re-roll rather than
+  // silently handing back an identical suggestion.
+  cached?: boolean,
+  // What this request cost in USD. Zero for a cache hit.
+  cost_usd?: number,
   // What the draft was grounded in. Not rendered anywhere today — kept because
   // "why did it say that" is the first question about any bad draft.
   grounded_on: {

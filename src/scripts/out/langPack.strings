@@ -276,6 +276,7 @@
 "Crm.AiDraft.Empty" = "The assistant had nothing to suggest here";
 "Crm.AiDraft.Failed" = "Could not draft a reply, please try again";
 "Crm.AiDraft.RateLimited" = "Too many drafts in a row — wait a moment";
+"Crm.AiDraft.BudgetExceeded" = "The daily AI budget is used up — ask an admin to raise it";
 "KeyboardShortcuts.Caption" = "Shortcuts shown for your platform.";
 "KeyboardShortcuts.Section.Formatting" = "Text Formatting";
 "KeyboardShortcuts.Section.Formatting.Caption" = "Select text in the chat input to apply formatting.";

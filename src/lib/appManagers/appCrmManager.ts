@@ -759,9 +759,22 @@ export default class AppCrmManager extends AppManager {
   // Errors propagate rather than resolving to undefined: the agent pressed a
   // button and is waiting, so a failure has to reach them as a toast instead of
   // looking like a draft that silently never arrived.
-  public async generateAiDraft(chatId: string): Promise<CrmAiDraft | undefined> {
+  /**
+   * Ask the CRM to draft a reply for this chat's ticket.
+   *
+   * `force` bypasses the CRM's draft cache and pays for a fresh generation. Left
+   * false, an unchanged conversation is re-served from cache for free — which is
+   * what makes it safe for an agent to press this button as often as they like.
+   * Pass it only when the agent is explicitly asking for a DIFFERENT suggestion,
+   * because every forced call is a real model call on a real bill.
+   */
+  public async generateAiDraft(chatId: string, force?: boolean): Promise<CrmAiDraft | undefined> {
     if(!(await this.isConnected()) || !chatId) return undefined;
-    const result = await this.request<{data: CrmAiDraft}>('POST', CRM_ENDPOINTS.aiDraft(chatId));
+    const result = await this.request<{data: CrmAiDraft}>(
+      'POST',
+      CRM_ENDPOINTS.aiDraft(chatId),
+      force ? {body: {force: true}} : undefined
+    );
     return result?.data;
   }
 
