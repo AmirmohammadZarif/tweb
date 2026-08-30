@@ -217,7 +217,8 @@ const AI_DRAFT_REASON_KEYS: Record<CrmAiDraftReason, LangPackKey> = {
   no_message: 'Crm.AiDraft.NoMessage',
   filtered_out: 'Crm.AiDraft.FilteredOut',
   empty: 'Crm.AiDraft.Empty',
-  failed: 'Crm.AiDraft.Failed'
+  failed: 'Crm.AiDraft.Failed',
+  budget_exceeded: 'Crm.AiDraft.BudgetExceeded'
 };
 
 export default class ChatInput {
@@ -264,6 +265,11 @@ export default class ChatInput {
   // while one is running must not buy a second paid model call.
   private btnAiDraft: HTMLButtonElement;
   private aiDraftPromise: Promise<void>;
+  // Which peer the presses below are counted against, and how many there have
+  // been. Together they turn a second press into "give me a different one"
+  // rather than a repeat of the same suggestion — see requestAiDraft().
+  private aiDraftPeerId: PeerId;
+  private aiDraftPresses = 0;
 
   private sendMenu: SendMenu;
 
@@ -2808,6 +2814,21 @@ export default class ChatInput {
     if(this.aiDraftPromise || !this.chat) return;
 
     const peerId = this.chat.peerId;
+
+    // First press in this chat takes whatever the CRM has, including a cached
+    // draft it already paid for — that is the case worth saving, since an agent
+    // reopening a conversation should not re-buy the same suggestion.
+    //
+    // A second press is a different request: the agent read the draft and wants
+    // another one, and handing back the identical cached text would read as a
+    // broken button. So it forces a fresh generation, which costs real money and
+    // is therefore driven by an explicit press rather than by anything automatic.
+    if(this.aiDraftPeerId !== peerId) {
+      this.aiDraftPeerId = peerId;
+      this.aiDraftPresses = 0;
+    }
+    const force = this.aiDraftPresses > 0;
+    ++this.aiDraftPresses;
     // Same conversion every other CRM call in the fork uses (see crmTicket.tsx):
     // the CRM keys these endpoints by the customer's Telegram chat id.
     const chatId = '' + peerId.toUserId();
@@ -2823,7 +2844,7 @@ export default class ChatInput {
       undoDisability();
     };
 
-    this.aiDraftPromise = this.managers.appCrmManager.generateAiDraft(chatId).then((draft) => {
+    this.aiDraftPromise = this.managers.appCrmManager.generateAiDraft(chatId, force).then((draft) => {
       finish();
 
       // The agent switched chats while the model was thinking — dropping the

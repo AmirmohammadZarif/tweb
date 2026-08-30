@@ -39,12 +39,18 @@ import {
 } from '@lib/crm/types';
 
 /**
- * Hard stop on the open-ticket pagination walk (40 tickets per page). The list is
- * department-scoped, so a healthy department fits in a page or two; this only
- * bites when the scoping fails open — better a truncated folder than dozens of
- * sequential requests every time it refreshes.
+ * The folder needs EVERY open ticket in the department to build its peer list, so
+ * it walks the pagination — ask for big pages to keep that walk short. A busy
+ * department runs into the hundreds (monetize was 436), which is 11 sequential
+ * round-trips at the CRM's default 40 and only 3 at 200. 200 is the server's clamp.
  */
-const MAX_OPEN_TICKET_PAGES = 10;
+const OPEN_TICKETS_PAGE_SIZE = 200;
+/**
+ * Hard stop on that walk, so a CRM that ignores `per_page` (or scoping that fails
+ * open) can't turn one folder refresh into an unbounded request storm. Generous
+ * enough to cover any real department at the page size above.
+ */
+const MAX_OPEN_TICKET_PAGES = 15;
 
 /**
  * Chat-list first-seen labels: how long a peer's cached entry is trusted before
@@ -401,10 +407,11 @@ export default class AppCrmManager extends AppManager {
       return this.openTicketPeerIds;
     }
 
-    // Scope to the department owning THIS Telegram session. Without it a
-    // superadmin token gets every open ticket in the CRM (thousands, 40 per page),
-    // which is neither what the folder means nor something we should page through.
-    const sessionTelegramUserId = this.appPeersManager.peerId.toUserId();
+    // Scope to the department owning THIS Telegram session (see
+    // sessionTelegramUserId) — unscoped, a superadmin token returns every open
+    // ticket in the CRM, which is neither what the folder means nor something
+    // worth paging through.
+    const sessionTelegramUserId = this.sessionTelegramUserId();
 
     try {
       const tickets: CrmTicketListItem[] = [];
@@ -412,7 +419,12 @@ export default class AppCrmManager extends AppManager {
       let lastPage = 1;
       do {
         const result = await this.request<CrmTicketListResult>('GET', CRM_ENDPOINTS.tickets, {
-          query: {status: 'open', page, session_telegram_user_id: sessionTelegramUserId}
+          query: {
+            status: 'open',
+            page,
+            per_page: OPEN_TICKETS_PAGE_SIZE,
+            session_telegram_user_id: sessionTelegramUserId
+          }
         });
         if(page === 1 && result) {
           if(!('department_id' in result)) {
@@ -747,9 +759,22 @@ export default class AppCrmManager extends AppManager {
   // Errors propagate rather than resolving to undefined: the agent pressed a
   // button and is waiting, so a failure has to reach them as a toast instead of
   // looking like a draft that silently never arrived.
-  public async generateAiDraft(chatId: string): Promise<CrmAiDraft | undefined> {
+  /**
+   * Ask the CRM to draft a reply for this chat's ticket.
+   *
+   * `force` bypasses the CRM's draft cache and pays for a fresh generation. Left
+   * false, an unchanged conversation is re-served from cache for free — which is
+   * what makes it safe for an agent to press this button as often as they like.
+   * Pass it only when the agent is explicitly asking for a DIFFERENT suggestion,
+   * because every forced call is a real model call on a real bill.
+   */
+  public async generateAiDraft(chatId: string, force?: boolean): Promise<CrmAiDraft | undefined> {
     if(!(await this.isConnected()) || !chatId) return undefined;
-    const result = await this.request<{data: CrmAiDraft}>('POST', CRM_ENDPOINTS.aiDraft(chatId));
+    const result = await this.request<{data: CrmAiDraft}>(
+      'POST',
+      CRM_ENDPOINTS.aiDraft(chatId),
+      force ? {body: {force: true}} : undefined
+    );
     return result?.data;
   }
 
