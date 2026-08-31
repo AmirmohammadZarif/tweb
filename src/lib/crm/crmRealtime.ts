@@ -121,7 +121,7 @@ class CrmRealtime {
     });
 
     // Sensitive-message reveal workflow rides a sibling per-peer channel.
-    this.sensitiveChannelName = CRM_SENSITIVE_CHANNEL(chatId);
+    this.sensitiveChannelName = CRM_SENSITIVE_CHANNEL(session, chatId);
     this.sensitiveChannel = pusher.subscribe(this.sensitiveChannelName);
     this.sensitiveChannel.bind(CRM_SENSITIVE_REQUESTED_EVENT, (data: SensitiveRequestPush) => {
       if(this.currentPeerId !== peerId || !data?.message_id) return;

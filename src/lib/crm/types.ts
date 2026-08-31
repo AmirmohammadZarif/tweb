@@ -169,7 +169,13 @@ export type CrmTaskCustomer = {
 export type CrmTaskSource = {
   ticket_id?: number,
   peer_chat_id?: string,
-  message_id?: number
+  message_id?: number,
+  // Whether `message_id` was captured on the SAME department account this session
+  // is signed in as. Telegram ids are per-account, so jumping to it from another
+  // department lands on an unrelated message — projectTasks.tsx opens the chat
+  // without a target unless this is true. The CRM compares server-side; the
+  // internal session key is never exposed.
+  same_session?: boolean
 };
 
 // GET /tasks -> {data: CrmTask[]}
@@ -251,7 +257,8 @@ export type CrmSensitiveRequest = {
 // Reverb (Pusher protocol) channel + events for the reveal workflow, mirroring
 // the attribution channel. The backend broadcasts on the private per-peer
 // channel; the client dispatches rootScope events off these.
-export const CRM_SENSITIVE_CHANNEL = (chatId: string) => 'private-sensitive.peer.' + chatId;
+export const CRM_SENSITIVE_CHANNEL = (sessionId: string, chatId: string) =>
+  'private-sensitive.peer.' + sessionId + '.' + chatId;
 export const CRM_SENSITIVE_REQUESTED_EVENT = 'sensitive.reveal.requested';
 export const CRM_SENSITIVE_APPROVED_EVENT = 'sensitive.reveal.approved';
 

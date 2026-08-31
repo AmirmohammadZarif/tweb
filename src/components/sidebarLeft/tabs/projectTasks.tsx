@@ -146,11 +146,17 @@ export default function ProjectTasks() {
     const chatId = task.source?.peer_chat_id || task.customer?.telegram_chat_id;
     if(!chatId) return;
 
+    // Only jump to the exact message when the CRM confirms it was captured on THIS
+    // department account: Telegram message ids are per-account sequences, so the
+    // same id in another department points at an unrelated message. Tasks captured
+    // before this was tracked simply open the chat at the bottom.
+    const capturedHere = task.source?.same_session === true;
+
     appImManager.setInnerPeer({
       peerId: chatId.toPeerId(false),
       // For user peers the client mid IS the server id (generateMessageId only
       // offsets channels), so the stored id can be jumped to as-is.
-      lastMsgId: task.source?.message_id
+      lastMsgId: capturedHere ? task.source?.message_id : undefined
     });
   };
 

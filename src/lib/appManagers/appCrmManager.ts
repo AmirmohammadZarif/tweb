@@ -667,7 +667,9 @@ export default class AppCrmManager extends AppManager {
     const empty: CrmSensitiveRevealState = {approved: [], pending: []};
     if(!(await this.isConnected()) || !chatId) return empty;
     try {
-      const result = await this.request<{data: CrmSensitiveRevealState}>('GET', CRM_ENDPOINTS.sensitiveReveals(chatId));
+      const result = await this.request<{data: CrmSensitiveRevealState}>('GET', CRM_ENDPOINTS.sensitiveReveals(chatId), {
+        query: {session_telegram_user_id: this.sessionTelegramUserId()}
+      });
       return {approved: result?.data?.approved || [], pending: result?.data?.pending || []};
     } catch(err) {
       this.log.error('getSensitiveReveals failed', err);
@@ -684,7 +686,12 @@ export default class AppCrmManager extends AppManager {
     if(!(await this.isConnected()) || !chatId || messageId == null) return false;
     try {
       const result = await this.request<{status?: 'pending' | 'approved'}>('POST', CRM_ENDPOINTS.sensitiveRevealRequest(chatId), {
-        body: {message_id: messageId, ...(reason ? {reason} : {}), ...(content ? {content} : {})}
+        body: {
+          message_id: messageId,
+          session_telegram_user_id: this.sessionTelegramUserId(),
+          ...(reason ? {reason} : {}),
+          ...(content ? {content} : {})
+        }
       });
       return result?.status || 'pending';
     } catch(err) {
@@ -700,7 +707,9 @@ export default class AppCrmManager extends AppManager {
   public async approveSensitiveReveal(chatId: string, messageId: number, userId: number): Promise<boolean> {
     if(!(await this.isConnected()) || !chatId || !messageId) return false;
     try {
-      await this.request('POST', CRM_ENDPOINTS.sensitiveRevealApprove(chatId), {body: {message_id: messageId, user_id: userId}});
+      await this.request('POST', CRM_ENDPOINTS.sensitiveRevealApprove(chatId), {
+        body: {message_id: messageId, user_id: userId, session_telegram_user_id: this.sessionTelegramUserId()}
+      });
       return true;
     } catch(err) {
       this.log.error('approveSensitiveReveal failed', err);
@@ -773,7 +782,10 @@ export default class AppCrmManager extends AppManager {
     const result = await this.request<{data: CrmAiDraft}>(
       'POST',
       CRM_ENDPOINTS.aiDraft(chatId),
-      force ? {body: {force: true}} : undefined
+      // The session decides WHICH conversation gets drafted: the same customer may
+      // have a thread with another department, and grounding the draft in that one
+      // would answer from history this agent never saw.
+      {body: {session_telegram_user_id: this.sessionTelegramUserId(), ...(force ? {force: true} : {})}}
     );
     return result?.data;
   }
@@ -832,7 +844,7 @@ export default class AppCrmManager extends AppManager {
   public async createTask(input: CrmCreateTaskInput): Promise<CrmTask | undefined> {
     if(!(await this.isConnected()) || !input.title.trim()) return undefined;
     const result = await this.request<{data: CrmTask}>('POST', CRM_ENDPOINTS.tasks, {
-      body: {...input, title: input.title.trim()}
+      body: {...input, title: input.title.trim(), session_telegram_user_id: this.sessionTelegramUserId()}
     });
     return result?.data;
   }

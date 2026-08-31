@@ -254,7 +254,7 @@ const lang = {
   'Crm.ReadOnly.Subtitle': 'You can follow conversations, but not reply or change anything',
   'Crm.ReadOnly.Blocked': 'Your account has read-only access',
   'Crm.PeekMode.Title': 'Manual read',
-  'Crm.PeekMode.Caption': 'Open chats without marking them read. The customer sees no read receipt and the chat stays unread for your team until you claim it — with "Mark as read" in the chat menu, by typing /read, or simply by replying. Applies to 1-to-1 customer chats in this browser only.',
+  'Crm.PeekMode.Caption': 'On by default. Open chats without marking them read: the customer sees no read receipt and the chat stays unread for your team until you claim it — with "Mark as read" in the chat menu, by typing /read, or simply by replying. Turn this off only if you want every chat you open to be marked read immediately. Applies to 1-to-1 customer chats in this browser only.',
   'Crm.PeekMode.MarkRead': 'Mark as read',
   'Crm.PeekMode.NothingToRead': 'Nothing left to mark as read here',
   'Crm.SessionExpired': 'CRM session expired',

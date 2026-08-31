@@ -13,8 +13,14 @@ import rootScope from '@lib/rootScope';
 // (topbar "Mark as read", /read, or simply by replying). Only then does tweb read
 // the history and record the first viewer — see ChatBubbles.markChatRead.
 //
-// Deliberately per-browser and not synced: it is a working style, and the agent
-// who turns it on is the one who has to remember to claim chats.
+// ON BY DEFAULT. The failure modes are not symmetric: a read receipt sent by
+// accident cannot be taken back — the customer has already seen "seen", and the
+// whole team has lost the chat's unread state — whereas a chat left unread for a
+// few extra seconds costs nothing. So a fresh browser holds reads until the agent
+// claims the chat, and turning that off is a deliberate per-agent choice.
+//
+// Per-browser and not synced: it is a working style. (An agent who needs it
+// enforced rather than chosen has the CRM's read-only role, which pins it on.)
 
 const KEY = 'agent_manual_read';
 
@@ -25,11 +31,19 @@ class AgentReadMode {
     this.enabled = this.read();
   }
 
+  /**
+   * '1' = on, '0' = explicitly off, absent = on (the default).
+   *
+   * Note this re-enables the mode for anyone who had previously turned it off,
+   * since "off" used to be stored by REMOVING the key and is indistinguishable
+   * from never having chosen. That is the safe direction to err in, and the
+   * toggle is one click away. Storage failures also fall back to on.
+   */
   private read() {
     try {
-      return localStorage.getItem(KEY) === '1';
+      return localStorage.getItem(KEY) !== '0';
     } catch{
-      return false;
+      return true;
     }
   }
 
@@ -40,8 +54,9 @@ class AgentReadMode {
   public setEnabled(enabled: boolean) {
     this.enabled = !!enabled;
     try {
-      if(this.enabled) localStorage.setItem(KEY, '1');
-      else localStorage.removeItem(KEY);
+      // Both states are stored explicitly now — with the default flipped to on,
+      // an absent key means "on", so turning it off has to be recorded.
+      localStorage.setItem(KEY, this.enabled ? '1' : '0');
     } catch{}
     rootScope.dispatchEvent('agent_read_mode_update');
   }
