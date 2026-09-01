@@ -72,6 +72,12 @@ export default function createChatInputState(instance: ChatInput, initial: ChatI
 
     useAiEditorButton({
       forceHidden: () => store.messageCount !== 1,
+      // Upstream additionally waits for the composer to grow to 72px, about three
+      // lines, before this appears. The line above already says there is exactly
+      // one message worth of text to rewrite — messageCount is 0 on an empty input
+      // and 2+ once the text splits — so the height check adds nothing except
+      // hiding the button from anyone writing a normal short reply.
+      shouldShowFromHeight: () => 0,
       instance,
       container: () => {
         if(store.inputMessageContainerInited) return instance.inputMessageContainer;
