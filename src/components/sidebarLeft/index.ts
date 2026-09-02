@@ -99,7 +99,8 @@ import useHasFoldersSidebar, {
 } from '@stores/foldersSidebar';
 import isObject from '@helpers/object/isObject';
 import {useAppSettings} from '@stores/appSettings';
-import useIsCrmSuperAdmin from '@stores/crmRole';
+import useIsCrmSuperAdmin, {useIsCrmLoggedIn, useIsCrmReadOnly} from '@stores/crmRole';
+import showCreateContactPopup from '@components/popups/createContact';
 import {openEmojiStatusPicker} from '@components/sidebarLeft/emojiStatusPicker';
 
 export const LEFT_COLUMN_ACTIVE_CLASSNAME = 'is-left-column-shown';
@@ -1057,6 +1058,18 @@ export class AppSidebarLeft extends SidebarSlider {
       onClick: onContactsClick,
       // Opens the contacts list, which is CRM-superadmin-only.
       verify: () => useIsCrmSuperAdmin()()
+    }, {
+      // Adding a contact by phone number is open to every agent — it only
+      // writes an identity the agent already has. Browsing the contacts list
+      // (which exposes everyone else's) stays superadmin-only above.
+      icon: 'adduser',
+      text: 'AddContactTitle',
+      onClick: () => {
+        closeTabsBefore(() => {
+          showCreateContactPopup();
+        });
+      },
+      verify: () => useIsCrmLoggedIn()() && !useIsCrmReadOnly()()
     }, {
       icon: 'stories',
       text: 'Stories.Composer.NewStory',

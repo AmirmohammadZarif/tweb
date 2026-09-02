@@ -938,6 +938,13 @@ export class AppUsersManager extends AppManager {
   }
 
   public importContacts(contacts: {phones: string[], first_name: string, last_name: string}[]) {
+    // Adding a contact is a write on the shared department account, so a
+    // read-only trainee must not reach it even if a UI gate is missed. Throws
+    // rather than no-oping, so the caller learns the import failed.
+    if(this.appCrmManager.isReadOnlyCached()) {
+      throw new Error('READ_ONLY_AGENT');
+    }
+
     const inputContacts: InputContact[] = [];
 
     for(let i = 0; i < contacts.length; ++i) {
