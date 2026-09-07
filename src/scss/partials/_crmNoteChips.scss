@@ -1,0 +1,151 @@
+@use "../shared" as *;
+@use "chatVariables" as *;
+
+// Internal agent notes drawn inline above the first message after them. Real
+// nodes mounted inside the anchor bubble (not a ::before) so they can be edited
+// and deleted in place. Agent-only content, never shown to the customer.
+.crm-note-chips {
+  display: flex;
+  flex-direction: column;
+  gap: .25rem;
+  margin: $bubble-overflow-big auto;
+  max-width: 480px;
+  width: fit-content;
+  z-index: 2;
+  position: relative;
+}
+
+.crm-note-chip {
+  padding: .375rem .625rem;
+  border-radius: $border-radius-medium;
+  border-inline-start: 3px solid #e3a008;
+  background-color: rgba(#e3a008, .12);
+  text-align: start;
+  color: var(--primary-text-color);
+  font-weight: var(--font-weight-normal);
+  font-size: var(--font-size-14);
+  line-height: 1.35;
+  min-width: 12rem;
+
+  // A note inherited from another department is context, not this
+  // conversation's own hand-off — dimmer edge, no actions.
+  &--foreign {
+    border-inline-start-color: var(--secondary-text-color);
+    background-color: var(--light-secondary-text-color, rgba(#8a8a8a, .12));
+  }
+}
+
+.crm-note-chip-head {
+  display: flex;
+  align-items: center;
+  gap: .375rem;
+  margin-bottom: .125rem;
+}
+
+.crm-note-chip-icon {
+  font-size: 1rem;
+  color: #e3a008;
+}
+
+// Truncate rather than wrap — see the panel's note author.
+.crm-note-chip-author {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: var(--font-weight-medium);
+}
+
+.crm-note-chip-badge {
+  flex: 0 0 auto;
+  padding: 0 .3125rem;
+  border-radius: 6px;
+  background-color: rgba(#e3a008, .22);
+  font-size: var(--font-size-12);
+  white-space: nowrap;
+}
+
+// A badge on an inherited note reads as provenance, not emphasis — drop it to the
+// neutral tone the foreign chip already uses.
+.crm-note-chip--foreign > .crm-note-chip-head > .crm-note-chip-badge {
+  background-color: var(--light-secondary-text-color, rgba(#8a8a8a, .18));
+}
+
+.crm-note-chip-edited {
+  font-size: var(--font-size-12);
+  color: var(--secondary-text-color);
+}
+
+// Actions sit at the end of the head row and only materialise on hover, so a
+// note reads as text until the agent reaches for it.
+.crm-note-chip-actions {
+  display: flex;
+  gap: .125rem;
+  margin-inline-start: auto;
+  opacity: 0;
+  transition: opacity var(--transition-standard-in);
+}
+
+.crm-note-chip:hover > .crm-note-chip-head > .crm-note-chip-actions,
+.crm-note-chip-actions:focus-within {
+  opacity: 1;
+}
+
+.crm-note-chip-action {
+  display: flex;
+  align-items: center;
+  padding: .125rem;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--secondary-text-color);
+  cursor: pointer;
+  font-size: 1.125rem;
+
+  &:hover {
+    color: var(--primary-text-color);
+  }
+
+  &--danger:hover {
+    color: var(--danger-color);
+  }
+}
+
+.crm-note-chip-text {
+  white-space: pre-line;
+  word-break: break-word;
+}
+
+.crm-note-chip-textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 2.75rem;
+  padding: .375rem .5rem;
+  border-radius: $border-radius-medium;
+  border: 1px solid var(--input-search-border-color, var(--border-color));
+  background-color: var(--surface-color, transparent);
+  color: var(--primary-text-color);
+  font-family: inherit;
+  font-size: var(--font-size-14);
+  line-height: 1.35;
+
+  &:focus {
+    border-color: var(--primary-color);
+    outline: none;
+  }
+}
+
+.crm-note-chip-edit-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: .25rem;
+  margin-top: .25rem;
+
+  .btn-primary {
+    width: auto;
+    height: 1.875rem;
+    padding: 0 .75rem;
+    font-size: var(--font-size-14);
+  }
+}

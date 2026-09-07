@@ -898,10 +898,21 @@ export default class PopupPayment extends PopupElement<{
 
               onConfirmed();
             });
+
+            // The page refused to be framed and the user took it to a real tab.
+            // The outcome now lands over MTProto instead of through the frame's
+            // postMessage, so claim neither success nor failure and leave the
+            // result on the 'pending' set just above.
+            let deferred = false;
+            popupPaymentVerification.addEventListener('deferred', () => {
+              deferred = true;
+              this.hide();
+            });
+
             await new Promise<void>((resolve, reject) => {
               popupPaymentVerification.addEventListener('close', () => {
                 popupPaymentVerification = undefined;
-                if(confirmed) {
+                if(confirmed || deferred) {
                   resolve();
                 } else {
                   const err = makeError(undefined, 'payment not finished');

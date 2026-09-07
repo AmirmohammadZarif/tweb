@@ -339,6 +339,13 @@ export default function createChatCrmTicketPlate(
     applyNotes(peerId, next);
   };
 
+  const dropNote = (peerId: PeerId, noteId: number) => {
+    if(peerId !== currentPeerId || !noteId) return;
+    const next = notes().filter((n) => n.id !== noteId);
+    if(next.length === notes().length) return;
+    applyNotes(peerId, next);
+  };
+
   const addNote = async(text: string): Promise<CrmNote | undefined> => {
     const value = (text || '').trim();
     const peerId = currentPeerId;
@@ -403,6 +410,10 @@ export default function createChatCrmTicketPlate(
     mergeNote(peerId, note);
   };
 
+  const onNoteDeletePush = ({peerId, noteId}: {peerId: PeerId, noteId: number}) => {
+    dropNote(peerId, noteId);
+  };
+
   const onChatMessage = (payload: MyMessage | {message: MyMessage}) => {
     const message = (payload as {message: MyMessage})?.message ?? (payload as MyMessage);
     if(message?.peerId && message.peerId === currentPeerId) refresh();
@@ -439,6 +450,7 @@ export default function createChatCrmTicketPlate(
   rootScope.addEventListener('crm_auth_required', onAuthRequired);
   rootScope.addEventListener('crm_config_update', onConfigUpdate);
   rootScope.addEventListener('crm_note_push', onNotePush);
+  rootScope.addEventListener('crm_note_delete_push', onNoteDeletePush);
 
   const closeTicket = async() => {
     const current = ticket();
@@ -467,7 +479,9 @@ export default function createChatCrmTicketPlate(
     getTicket: () => ticket(),
     close: () => closeTicket(),
     getNotes: () => notes(),
-    hasTicketForNotes: () => notesTicketId != null || ticket()?.status === 'open',
+    // Also true on notes alone: with cross-department sharing an agent can have
+    // no ticket of their own here and still have a colleague's shared note to read.
+    hasTicketForNotes: () => notesTicketId != null || ticket()?.status === 'open' || notes().length > 0,
     addNote,
     destroy: () => {
       rootScope.removeEventListener('history_multiappend', onChatMessage);
@@ -476,6 +490,7 @@ export default function createChatCrmTicketPlate(
       rootScope.removeEventListener('crm_auth_required', onAuthRequired);
       rootScope.removeEventListener('crm_config_update', onConfigUpdate);
       rootScope.removeEventListener('crm_note_push', onNotePush);
+      rootScope.removeEventListener('crm_note_delete_push', onNoteDeletePush);
       crmRealtime.leave();
       plate.destroy();
     }

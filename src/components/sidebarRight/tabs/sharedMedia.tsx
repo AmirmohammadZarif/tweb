@@ -456,6 +456,8 @@ const SharedMedia: Component = () => {
     ['stories', 'StoriesCount'],
     ['members', 'Members'],
     ['media', 'MediaFiles'],
+    ['notes', 'Crm.Note.Count'],
+    ['contracts', 'Crm.Contract.Count'],
     ['gifts', 'StarGiftsCount'],
     ['saved', 'SavedMessagesCount'],
     ['files', 'Files'],
@@ -620,6 +622,17 @@ const SharedMedia: Component = () => {
       inputFilter: 'inputMessagesFilterPhotoVideo',
       name: 'SharedMediaTab2',
       type: 'media'
+    }, {
+      // Internal agent notes on the customer's CRM ticket — the same panel the
+      // topbar's "Internal notes" button opens, parked next to the shared media
+      // so an agent picking up a chat reads the hand-off where they already look.
+      name: 'Crm.Note.TabName',
+      type: 'notes'
+    }, {
+      // The customer's contracts at andro.law. Read-only: an agent asked "when
+      // does my contract end" answers it here instead of switching to the CRM.
+      name: 'Crm.Contract.TabName',
+      type: 'contracts'
     }, {
       name: 'SharedMedia.Gifts',
       type: 'gifts'

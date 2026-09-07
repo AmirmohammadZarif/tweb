@@ -63,6 +63,9 @@ export const CRM_ENDPOINTS = {
   // id, like attributions). See CrmNote.
   notes: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/notes`,
   addNote: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/note`,
+  // Edit / remove one note. Author-or-superadmin only, enforced server-side.
+  note: (chatId: string, noteId: number) =>
+    `/tickets/by-telegram/${encodeURIComponent(chatId)}/note/${noteId}`,
   // Sensitive-message reveal workflow (all keyed by the customer's telegram
   // chat id, like attributions). See CrmSensitiveRevealState.
   sensitiveReveals: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/sensitive-reveals`,
@@ -78,6 +81,13 @@ export const CRM_ENDPOINTS = {
   taskEstimate: (id: number) => `/tasks/${id}/estimate`,
   // On-demand AI reply draft for a chat's ticket. See CrmAiDraft.
   aiDraft: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/ai-draft`,
+  // The customer's andro.law contracts, and one contract as a PDF. The PDF goes
+  // through the CRM rather than andro.law directly: that endpoint authenticates
+  // with a shared server-side token and checks nothing else, so the CRM verifies
+  // the file belongs to this customer before fetching it.
+  contracts: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/contracts`,
+  contractPdf: (chatId: string, fileId: number) =>
+    `/tickets/by-telegram/${encodeURIComponent(chatId)}/contracts/${fileId}/pdf`,
   // Crash reports — tweb ships as static files, so without this a JS crash in an
   // agent's browser leaves no trace on our side. See @lib/debug/crashReporter.
   clientLogs: '/client-logs'
@@ -441,18 +451,95 @@ export const CRM_ATTRIBUTION_CHANNEL = (sessionId: string, chatId: string) =>
 // live over Reverb (note.added), rendered both inline in the timeline and in a
 // dedicated notes panel.
 
+// How far a note travels. Notes hang off a ticket and a ticket belongs to ONE
+// department, so 'department' (the default) keeps a note inside the conversation
+// it was written in. 'all' opts a single note into being readable by every
+// department that also has a ticket with this customer — the cross-department
+// hand-off ("the customer already told Financial X"), without un-scoping the rest.
+export type CrmNoteVisibility = 'department' | 'all';
+
 // GET /tickets/by-telegram/{chatId}/notes -> {data: {ticket_id, notes: CrmNote[]}}
 export type CrmNote = {
   id: number,
   text: string,
   author_id: number | null,
   author_name: string,
-  created_at: string // ISO8601
+  created_at: string, // ISO8601
+  /** Set once the note has been edited; drives the "edited" marker. */
+  edited_at?: string | null,
+  visibility?: CrmNoteVisibility,
+  /** The department that WROTE the note (stamped at write time, so it survives the
+   * ticket being moved between departments afterwards). */
+  department_id?: number | null,
+  department_name?: string | null,
+  /** The note was left in ANOTHER department's conversation with this customer and
+   * is shown here for context only. */
+  is_foreign?: boolean,
+  /** The server's own author-or-superadmin verdict. The client recomputes this for
+   * itself (see canEditCrmNote) because realtime pushes are per-channel, not
+   * per-agent, and so cannot carry a per-viewer answer. */
+  can_edit?: boolean
 };
 
 export type CrmNotesResult = {
   ticketId: number | null,
   notes: CrmNote[]
+};
+
+// ── andro.law contracts ──────────────────────────────────────────────────────
+// Read-only here. The CRM proxies these from digicontract (andro.law), which is
+// a separate service the CRM knows a customer by mobile number in, so a chat
+// with no linked customer or no Iranian number simply has no contracts.
+// Issuing a new one lives in the CRM's own panel, where the template form is.
+
+export type CrmContractSigner = {
+  mobile: string,
+  name: string | null,
+  status: number,
+  status_label: string,
+  has_signed: boolean
+};
+
+export type CrmContract = {
+  id: number,
+  title: string,
+  /** 0 created, 1 accepted, 2 rejected, 3 archived, using andro.law's numbering. */
+  status: number,
+  status_label: string,
+  /** 'warning' | 'success' | 'danger' | 'gray', decided server-side so both
+   * clients colour a status the same way. */
+  status_color: string,
+  /** Null when the contract has no document to download. */
+  file_id: number | null,
+  start_date: string | null, // Y-m-d
+  expiration_date: string | null, // Y-m-d, null for open-ended contracts
+  created_at: string | null, // ISO8601
+  /** THIS customer's own position, from the contract's signer pivot. Distinct
+   * from `status`: a two-party contract stays "created" until both sign. */
+  viewer_status: number,
+  viewer_status_label: string,
+  is_expired: boolean,
+  is_active: boolean,
+  /** Issued and waiting on this customer specifically: the actionable state. */
+  awaits_signature: boolean,
+  signers: CrmContractSigner[]
+};
+
+export type CrmContractCounts = {
+  total: number,
+  active: number,
+  awaiting_signature: number,
+  expiring_soon: number
+};
+
+export type CrmContractsResult = {
+  /** False when the CRM has the contracts integration switched off entirely,
+   * which is different from a customer having no contracts. */
+  enabled: boolean,
+  /** False when andro.law has never seen this customer's mobile number. */
+  hasAccount: boolean,
+  contracts: CrmContract[],
+  counts: CrmContractCounts
 };
 
 // Reverb (Pusher protocol) channel + event for live note hand-off, mirroring the
@@ -461,6 +548,8 @@ export type CrmNotesResult = {
 export const CRM_NOTES_CHANNEL = (sessionId: string, chatId: string) =>
   'private-notes.peer.' + sessionId + '.' + chatId;
 export const CRM_NOTE_ADDED_EVENT = 'note.added';
+export const CRM_NOTE_UPDATED_EVENT = 'note.updated';
+export const CRM_NOTE_DELETED_EVENT = 'note.deleted';
 
 // ── Client crash reports ─────────────────────────────────────────────────────
 // POST /client-logs. `entries` is tweb's merged log ring buffer (main thread +

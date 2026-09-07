@@ -108,6 +108,8 @@ import createMiddleware from '@helpers/solid/createMiddleware';
 import Tabs from '@components/tabs';
 import Section from '@components/section';
 import createTopPeersList from '@components/topPeersList';
+import CrmNotesPanel from '@components/crmNotesPanel';
+import CrmContractsPanel from '@components/crmContractsPanel';
 
 export type SearchSuperType = MyInputMessagesFilter/*  | 'members' */;
 export type SearchSuperContext = {
@@ -126,7 +128,7 @@ export type SearchSuperContext = {
 
 export type SearchSuperMediaType = 'stories' | 'members' | 'media' |
   'files' | 'links' | 'music' | 'chats' | 'voice' | 'groups' | 'similar' |
-  'savedDialogs' | 'saved' | 'channels' | 'apps' | 'gifts' | 'posts';
+  'savedDialogs' | 'saved' | 'channels' | 'apps' | 'gifts' | 'posts' | 'notes' | 'contracts';
 export type SearchSuperMediaTab = {
   inputFilter?: SearchSuperType,
   name: LangPackKey,
@@ -1806,6 +1808,73 @@ export default class AppSearchSuper {
     return promise;
   }
 
+  // Internal agent notes for the chat, next to the shared media. The panel is the
+  // same component the topbar popup mounts and keeps itself live off the CRM's
+  // note events, so there is nothing to reload here — one mount per peer, torn
+  // down with the search's middleware.
+  private loadCrmNotes({mediaTab}: SearchSuperLoadTypeOptions) {
+    const {peerId} = this.searchContext;
+    this.loaded[mediaTab.type] = true;
+
+    // canViewNotes() already ruled the tab out (no CRM session, not a 1-on-1) —
+    // don't mount a panel that would go fetch notes nobody can reach.
+    if(!peerId?.isUser() || mediaTab.menuTab.classList.contains('hide')) {
+      this.setCounter(mediaTab.type, 0);
+      this.afterPerforming(0, mediaTab);
+      return Promise.resolve();
+    }
+
+    const middleware = this.middleware.get();
+    createRoot((dispose) => {
+      middleware.onClean(dispose);
+
+      const element = CrmNotesPanel({
+        peerId,
+        onCountChange: (count) => {
+          if(!middleware()) return;
+          this.setCounter(mediaTab.type, count);
+        }
+      }) as HTMLElement;
+
+      mediaTab.itemsTab.replaceChildren(element);
+    });
+
+    this.afterPerforming(1, mediaTab);
+    return Promise.resolve();
+  }
+
+  // The customer's andro.law contracts, next to the shared media. Same shape as
+  // loadCrmNotes: one mount per peer, torn down with the search's middleware.
+  // The panel fetches for itself, so there is nothing to reload here.
+  private loadCrmContracts({mediaTab}: SearchSuperLoadTypeOptions) {
+    const {peerId} = this.searchContext;
+    this.loaded[mediaTab.type] = true;
+
+    if(!peerId?.isUser() || mediaTab.menuTab.classList.contains('hide')) {
+      this.setCounter(mediaTab.type, 0);
+      this.afterPerforming(0, mediaTab);
+      return Promise.resolve();
+    }
+
+    const middleware = this.middleware.get();
+    createRoot((dispose) => {
+      middleware.onClean(dispose);
+
+      const element = CrmContractsPanel({
+        peerId,
+        onCountChange: (count) => {
+          if(!middleware()) return;
+          this.setCounter(mediaTab.type, count);
+        }
+      }) as HTMLElement;
+
+      mediaTab.itemsTab.replaceChildren(element);
+    });
+
+    this.afterPerforming(1, mediaTab);
+    return Promise.resolve();
+  }
+
   private async loadSimilarChannels({mediaTab}: SearchSuperLoadTypeOptions) {
     const middlewareHelper = this.middleware.get().create();
 
@@ -2216,6 +2285,10 @@ export default class AppSearchSuper {
       promise = this.loadPosts(options);
     } else if(type === 'gifts') {
       promise = this.loadGifts();
+    } else if(type === 'notes') {
+      promise = this.loadCrmNotes(options);
+    } else if(type === 'contracts') {
+      promise = this.loadCrmContracts(options);
     }
 
     if(promise) {
@@ -2402,6 +2475,8 @@ export default class AppSearchSuper {
       canViewStories,
       canViewSimilar,
       canViewGifts,
+      canViewNotes,
+      canViewContracts,
       giftsCount,
       maybePinnedGifts
     ] = await Promise.all([
@@ -2413,6 +2488,8 @@ export default class AppSearchSuper {
       this.canViewStories(),
       this.canViewSimilar(),
       this.canViewGifts(),
+      this.canViewNotes(),
+      this.canViewContracts(),
       this.getGiftsCount(),
       peerId === rootScope.myId && this.managers.appGiftsManager.getPinnedGifts(peerId)
     ]);
@@ -2456,6 +2533,8 @@ export default class AppSearchSuper {
     const groupsTab = this.mediaTabsMap.get('groups');
     const similarTab = this.mediaTabsMap.get('similar');
     const giftsTab = this.mediaTabsMap.get('gifts');
+    const notesTab = this.mediaTabsMap.get('notes');
+    const contractsTab = this.mediaTabsMap.get('contracts');
 
     const showGiftsTab = canViewGifts && giftsCount !== 0;
 
@@ -2466,7 +2545,9 @@ export default class AppSearchSuper {
       [membersTab, canViewMembers],
       [groupsTab, canViewGroups],
       [similarTab, canViewSimilar],
-      [giftsTab, showGiftsTab]
+      [giftsTab, showGiftsTab],
+      [notesTab, canViewNotes],
+      [contractsTab, canViewContracts]
     ];
 
     a.forEach(([tab, value]) => {
@@ -2500,6 +2581,17 @@ export default class AppSearchSuper {
 
     if(showGiftsTab && !firstMediaTab) {
       firstMediaTab = giftsTab;
+    }
+
+    // A brand-new ticket has notes but no media yet — without this the whole
+    // shared-media block would stay collapsed and the notes tab unreachable.
+    if(canViewNotes && !firstMediaTab) {
+      firstMediaTab = notesTab;
+    }
+
+    // Same for a customer whose only CRM footprint is a signed contract.
+    if(canViewContracts && !firstMediaTab) {
+      firstMediaTab = contractsTab;
     }
 
     if(maybePinnedGifts) {
@@ -2701,6 +2793,29 @@ export default class AppSearchSuper {
     } catch(err) {
       return false;
     }
+  }
+
+  // Notes hang off the customer's CRM ticket, so the tab only makes sense in a
+  // 1-on-1 chat with a CRM session behind it.
+  public async canViewNotes() {
+    const {peerId, threadId} = this.searchContext;
+    if(threadId || !peerId?.isUser() || !this.mediaTabsMap.has('notes')) {
+      return false;
+    }
+
+    return this.managers.appCrmManager.isConnected();
+  }
+
+  // Contracts belong to the customer behind a 1-on-1 chat, and only the CRM can
+  // say whether andro.law is reachable at all, so the gate is the same as notes:
+  // a real user, and a CRM session to ask through.
+  public async canViewContracts() {
+    const {peerId, threadId} = this.searchContext;
+    if(threadId || !peerId?.isUser() || !this.mediaTabsMap.has('contracts')) {
+      return false;
+    }
+
+    return this.managers.appCrmManager.isConnected();
   }
 
   public canViewGifts() {

@@ -26,6 +26,7 @@ import {
   CrmFaq,
   CrmNote,
   CrmNotesResult,
+  CrmNoteVisibility,
   CrmTemplate,
   CrmTemplateImage,
   CrmTicketLookupResult,
@@ -35,7 +36,9 @@ import {
   CrmSensitiveRevealState,
   CrmClientLogPayload,
   CrmClientLogResult,
-  EMPTY_CRM_CONFIG
+  EMPTY_CRM_CONFIG,
+  CrmContract,
+  CrmContractsResult
 } from '@lib/crm/types';
 
 /**
@@ -752,12 +755,50 @@ export default class AppCrmManager extends AppManager {
   // Add an internal note to the chat's ticket. Returns the created note (so the UI
   // can append it optimistically) or undefined on failure — the caller surfaces a
   // toast. Rethrows nothing; a 404 (no ticket) resolves to undefined.
-  public async addNoteByTelegram(chatId: string, text: string): Promise<CrmNote | undefined> {
+  public async addNoteByTelegram(
+    chatId: string,
+    text: string,
+    visibility?: CrmNoteVisibility
+  ): Promise<CrmNote | undefined> {
     if(!(await this.isConnected()) || !chatId || !text.trim()) return undefined;
     const result = await this.request<{data: CrmNote}>('POST', CRM_ENDPOINTS.addNote(chatId), {
-      body: {text: text.trim(), session_telegram_user_id: this.sessionTelegramUserId()}
+      body: {
+        text: text.trim(),
+        session_telegram_user_id: this.sessionTelegramUserId(),
+        ...(visibility ? {visibility} : {})
+      }
     });
     return result?.data;
+  }
+
+  // Edit a note's text and/or how far it travels. Only its author (or a superadmin)
+  // may — the CRM enforces that and answers 403 otherwise, so the UI's own gate is
+  // a convenience, not the boundary. Errors propagate: the agent pressed Save and
+  // is waiting, so a silent no-op would read as a saved edit that never happened.
+  public async updateNoteByTelegram(
+    chatId: string,
+    noteId: number,
+    changes: {text?: string, visibility?: CrmNoteVisibility}
+  ): Promise<CrmNote | undefined> {
+    if(!(await this.isConnected()) || !chatId || !noteId) return undefined;
+    const result = await this.request<{data: CrmNote}>('PATCH', CRM_ENDPOINTS.note(chatId, noteId), {
+      body: {
+        session_telegram_user_id: this.sessionTelegramUserId(),
+        ...(changes.text !== undefined ? {text: changes.text.trim()} : {}),
+        ...(changes.visibility !== undefined ? {visibility: changes.visibility} : {})
+      }
+    });
+    return result?.data;
+  }
+
+  // Remove a note. Same author-or-superadmin rule as editing; same reason for
+  // letting the error through to a toast.
+  public async deleteNoteByTelegram(chatId: string, noteId: number): Promise<boolean> {
+    if(!(await this.isConnected()) || !chatId || !noteId) return false;
+    await this.request('DELETE', CRM_ENDPOINTS.note(chatId, noteId), {
+      query: {session_telegram_user_id: this.sessionTelegramUserId()}
+    });
+    return true;
   }
 
   // ── AI draft assistant ────────────────────────────────────────────────────
@@ -881,6 +922,116 @@ export default class AppCrmManager extends AppManager {
    * must not itself produce an error toast, and above all must not re-enter the
    * global error handler that triggered it.
    */
+  // ── andro.law contracts ────────────────────────────────────────────────────
+
+  /**
+   * The contracts this chat's customer holds at andro.law.
+   *
+   * Never rejects. Contracts come from a service the CRM itself has to reach, so
+   * "unavailable" is a normal outcome and the panel renders the same empty state
+   * for it as for a customer who has no contracts account. Not cached here: the
+   * CRM caches the upstream call for several minutes already, and an agent
+   * reopening the tab after signing chases a fresh answer.
+   */
+  public async getContractsByTelegram(chatId: string): Promise<CrmContractsResult> {
+    const empty: CrmContractsResult = {
+      enabled: false,
+      hasAccount: false,
+      contracts: [],
+      counts: {total: 0, active: 0, awaiting_signature: 0, expiring_soon: 0}
+    };
+
+    if(!(await this.isConnected()) || !chatId) return empty;
+
+    try {
+      const result = await this.request<{data: {
+        enabled: boolean,
+        has_account: boolean,
+        contracts: CrmContract[],
+        counts: CrmContractsResult['counts']
+      }}>('GET', CRM_ENDPOINTS.contracts(chatId), {
+        query: {session_telegram_user_id: this.sessionTelegramUserId()}
+      });
+
+      const data = result?.data;
+      if(!data) return empty;
+
+      return {
+        enabled: !!data.enabled,
+        hasAccount: !!data.has_account,
+        contracts: data.contracts || [],
+        counts: data.counts || empty.counts
+      };
+    } catch(err) {
+      this.log.error('getContractsByTelegram failed', err);
+      return empty;
+    }
+  }
+
+  /**
+   * One contract's PDF, as bytes.
+   *
+   * Bytes rather than a URL because the endpoint needs the agent's bearer token,
+   * which lives in here: a plain <a href> would either have to carry the token in
+   * the URL or fail unauthenticated. The caller wraps these in a Blob and opens
+   * an object URL, so the token never leaves this manager.
+   */
+  public async getContractPdf(chatId: string, fileId: number): Promise<ArrayBuffer | undefined> {
+    if(!(await this.isConnected()) || !chatId) return undefined;
+
+    try {
+      return await this.requestBinary(CRM_ENDPOINTS.contractPdf(chatId, fileId), {
+        session_telegram_user_id: this.sessionTelegramUserId()
+      });
+    } catch(err) {
+      this.log.error('getContractPdf failed', err);
+      return undefined;
+    }
+  }
+
+  /**
+   * A GET that returns a body rather than JSON.
+   *
+   * Deliberately not folded into request(): that one parses JSON, unwraps the
+   * envelope and clears the token on a 401, none of which applies to a file. The
+   * one behaviour worth keeping is the 401 handling, so it is repeated here.
+   */
+  private async requestBinary(path: string, query?: Record<string, string | number>): Promise<ArrayBuffer> {
+    await this.loadPromise;
+
+    if(!this.config.baseUrl) throw new Error('CRM_NO_BASE_URL');
+    if(!this.config.token) throw new Error('CRM_NO_TOKEN');
+
+    let url = this.config.baseUrl + CRM_API_PREFIX + path;
+    if(query) {
+      const params = new URLSearchParams();
+      for(const key in query) {
+        if(query[key] != null) params.set(key, '' + query[key]);
+      }
+      const qs = params.toString();
+      if(qs) url += '?' + qs;
+    }
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {'Authorization': 'Bearer ' + this.config.token}
+    });
+
+    if(!response.ok) {
+      if(response.status === 401) {
+        this.config.token = '';
+        this.config.user = undefined;
+        this.config.enabled = false;
+        this.persist();
+        this.rootScope.dispatchEvent('crm_auth_required');
+      }
+
+      throw new Error('CRM_HTTP_' + response.status);
+    }
+
+    return response.arrayBuffer();
+  }
+
   public async postClientLogs(payload: CrmClientLogPayload): Promise<CrmClientLogResult | undefined> {
     if(!(await this.isConnected())) return undefined;
     try {

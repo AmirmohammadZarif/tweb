@@ -75,6 +75,7 @@ import PopupBoost from '@components/popups/boost';
 import PopupPremium from '@components/popups/premium';
 import showNoForwardsPopup from '@components/popups/noForwards';
 import {showCrmNotesPopup} from '@components/popups/crmNotes';
+import {showCrmContractsPopup} from '@components/popups/crmContracts';
 import {openCrmTasksTab} from '@lib/crm/createTask';
 
 type ButtonToVerify = {element?: HTMLElement, verify: () => boolean | Promise<boolean>};
@@ -475,15 +476,25 @@ export default class ChatTopbar {
       // actually something being held back.
       verify: () => !!this.chat.bubbles?.hasHeldReads()
     }, {
-      icon: 'note',
+      icon: 'clipboard',
       text: 'Crm.Note.MenuButton',
       onClick: () => {
-        const crmTicket = this.plates?.crmTicket;
-        if(crmTicket) showCrmNotesPopup(this.peerId, crmTicket);
+        showCrmNotesPopup(this.peerId);
       },
       // Internal notes for the customer's ticket. Shown whenever a ticket exists for
       // this chat (reads the plate's already-loaded note state — no round-trip).
       verify: () => !!this.peerId?.isUser() && !!this.plates?.crmTicket.hasTicketForNotes()
+    }, {
+      icon: 'document',
+      text: 'Crm.Contract.MenuButton',
+      onClick: () => {
+        showCrmContractsPopup(this.peerId);
+      },
+      // Shown for any 1-on-1 chat with a CRM session behind it, without a ticket
+      // check: contracts belong to the customer, not to a ticket, and a customer
+      // whose ticket was closed months ago is exactly who an agent asks about.
+      // The panel says "no contracts account" for itself when there is nothing.
+      verify: () => !!this.peerId?.isUser()
     }, {
       icon: 'check',
       text: 'Tasks.Title',

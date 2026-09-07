@@ -1,4 +1,16 @@
 version: "3.8"
+
+# Container logs are unbounded by default. A crash-looping service can fill the
+# host disk, and a full disk on this box does not merely stop logging: nginx can
+# no longer write its proxy temp files, so every response larger than its
+# in-memory buffers (~132 KiB) is truncated mid-body and the app stops loading
+# entirely. Cap every service's log so that cannot happen again.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   tweb.dependencies:
     container_name: tweb.dependencies
@@ -8,6 +20,7 @@ services:
     volumes:
       - "./node_modules:/app/node_modules"
     command: pnpm install
+    logging: *default-logging
 
   tweb.develop:
     container_name: tweb.develop
@@ -19,6 +32,7 @@ services:
     ports:
       - 8080:8080
     command: pnpm start-in-docker
+    logging: *default-logging
 
   tweb.production:
     container_name: tweb.production
@@ -45,6 +59,7 @@ services:
         # ~5.9G production box; lower it when building on something smaller.
         NODE_BUILD_HEAP_MB: "${NODE_BUILD_HEAP_MB:-4096}"
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - shared
 

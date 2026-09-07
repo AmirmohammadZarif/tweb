@@ -2096,38 +2096,6 @@
     font-weight: var(--font-weight-medium);
   }
 
-  // Internal agent note drawn inline above the first message after it — a
-  // full-width note card, distinct from lifecycle dividers (left-aligned, warm
-  // note color, multi-line). Agent-only content, never shown to the customer.
-  &.has-crm-note::before {
-    content: var(--crm-note-text);
-    display: block;
-    white-space: pre-line;
-    margin: $bubble-overflow-big auto;
-    max-width: 480px;
-    width: fit-content;
-    padding: .375rem .625rem;
-    border-radius: $border-radius-medium;
-    border-inline-start: 3px solid #e3a008;
-    text-align: start;
-    color: var(--primary-text-color);
-    line-height: 1.35;
-    font-weight: var(--font-weight-normal);
-    font-size: var(--font-size-14);
-    background-color: rgba(#e3a008, .12);
-    z-index: 2;
-    position: relative;
-  }
-
-  // Bottom-fallback note bubble (note left after the last message).
-  &.is-crm-note .service-msg {
-    white-space: pre-line;
-    text-align: start;
-    color: var(--primary-text-color);
-    background-color: rgba(#e3a008, .16);
-    font-weight: var(--font-weight-normal);
-  }
-
   &-name-forwarded {
     font-weight: var(--font-weight-normal);
 

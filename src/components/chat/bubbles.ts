@@ -5,6 +5,8 @@ import type Chat from '@components/chat/chat';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import {logger} from '@lib/logger';
 import rootScope from '@lib/rootScope';
+import {renderCrmNoteChips} from '@components/chat/crmNoteChips';
+import type {CrmNote} from '@lib/crm/types';
 import agentIdentity from '@lib/agentIdentity';
 import agentReadMode from '@lib/agentReadMode';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
@@ -574,12 +576,11 @@ export default class ChatBubbles {
   private crmMarkedBubbles: HTMLElement[] = []; // message bubbles carrying a ::before divider
   private crmDividers: HTMLElement[] = []; // appended fallback dividers (closed-at-end)
   private updateCrmTicketDividersDebounced: () => void;
-  // Internal agent notes for the peer, rendered inline in the timeline (a ::before
-  // note line above the first message after each note, same positioner-safe trick
-  // as the lifecycle dividers). See updateCrmNoteDividers.
+  // Internal agent notes for the peer, rendered inline in the timeline as real
+  // (editable) chips mounted inside the first bubble at/after each note's time.
+  // See updateCrmNoteDividers.
   private crmNotes: import('@lib/crm/types').CrmNote[] = [];
-  private crmNoteMarkedBubbles: HTMLElement[] = [];
-  private crmNoteDividers: HTMLElement[] = [];
+  private crmNoteChips: {element: HTMLElement, dispose: () => void}[] = [];
   private updateCrmNoteDividersDebounced: () => void;
 
   private scrolledDown = true;
@@ -5051,33 +5052,15 @@ export default class ChatBubbles {
     }
   };
 
-  private createCrmNoteBubble(text: string) {
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble service is-crm-note';
-    const bubbleContent = document.createElement('div');
-    bubbleContent.classList.add('bubble-content');
-    const serviceMsg = document.createElement('div');
-    serviceMsg.classList.add('service-msg');
-    serviceMsg.append(text);
-    bubbleContent.append(serviceMsg);
-    bubble.append(bubbleContent);
-    return bubble;
-  }
-
-  // Internal agent notes drawn inline in the timeline: each note becomes a note
-  // line above the first message at/after its creation time (a `::before` on that
-  // bubble — the same positioner-safe technique as the lifecycle dividers, since
-  // inserting real nodes into the index-positioned group tree corrupts ordering).
-  // Notes after the last rendered message fall back to a service bubble appended
-  // at the very bottom. Notes are agent-only and never shown to the customer.
+  // Internal agent notes drawn inline in the timeline: each note becomes a chip
+  // above the first message at/after its creation time, mounted INSIDE that bubble
+  // — inserting real nodes between bubbles corrupts the index-positioned group
+  // tree, mounting inside one does not. Notes left after the last rendered message
+  // trail into a block appended at the very bottom. Chips are interactive (edit /
+  // delete in place); notes are agent-only and never shown to the customer.
   private updateCrmNoteDividers = () => {
-    this.crmNoteMarkedBubbles.forEach((bubble) => {
-      bubble.classList.remove('has-crm-note');
-      bubble.style.removeProperty('--crm-note-text');
-    });
-    this.crmNoteMarkedBubbles.length = 0;
-    this.crmNoteDividers.forEach((node) => node.remove());
-    this.crmNoteDividers.length = 0;
+    this.crmNoteChips.forEach(({dispose}) => dispose());
+    this.crmNoteChips.length = 0;
 
     if(!this.crmNotes?.length || !this.peerId?.isUser()) return;
 
@@ -5091,52 +5074,38 @@ export default class ChatBubbles {
     }
     entries.sort((a, b) => a.date - b.date);
 
-    const format = (note: import('@lib/crm/types').CrmNote) =>
-      `📝 ${note.author_name}: ${note.text}`;
-
-    // Bucket notes by the bubble they anchor to, so multiple notes on one bubble
-    // become one `::before`. Notes with no following message trail into a bottom
-    // bubble, in order, reading as one block at the end of the conversation.
-    const byBubble = new Map<HTMLElement, string[]>();
-    const trailing: string[] = [];
+    // Bucket notes by the bubble they anchor to, so several notes on one bubble
+    // render as one block. Notes with no following message trail into a block at
+    // the end of the conversation, in order.
+    const byBubble = new Map<HTMLElement, CrmNote[]>();
+    const trailing: CrmNote[] = [];
 
     for(const note of this.crmNotes) {
       const timestamp = Math.floor(new Date(note.created_at).getTime() / 1000);
       if(!timestamp) continue;
-      const text = format(note);
 
       const following = entries.find((entry) => entry.date >= timestamp);
       if(following) {
         const bucket = byBubble.get(following.bubble);
-        if(bucket) bucket.push(text);
-        else byBubble.set(following.bubble, [text]);
+        if(bucket) bucket.push(note);
+        else byBubble.set(following.bubble, [note]);
       } else {
-        trailing.push(text);
+        trailing.push(note);
       }
     }
 
-    // A `::before` renders `content: var(--crm-note-text)`, so the value must be a
-    // valid CSS string: escape backslashes/quotes and turn newlines into `\A `
-    // (a plain `\n` would render as the literal char `n`). pre-line keeps the breaks.
-    const toCssString = (lines: string[]) => {
-      const escaped = lines.map((line) => line.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\A '));
-      return '"' + escaped.join('\\A ') + '"';
-    };
-
-    byBubble.forEach((lines, bubble) => {
-      bubble.style.setProperty('--crm-note-text', toCssString(lines));
-      if(!bubble.classList.contains('has-crm-note')) {
-        bubble.classList.add('has-crm-note');
-        this.crmNoteMarkedBubbles.push(bubble);
-      }
+    const peerId = this.peerId;
+    byBubble.forEach((notes, bubble) => {
+      const chips = renderCrmNoteChips(peerId, notes);
+      bubble.prepend(chips.element);
+      this.crmNoteChips.push(chips);
     });
 
     if(trailing.length) {
-      // Real text node in an appended (positioner-safe) bubble — newlines render
-      // directly under `white-space: pre-line`, no CSS escaping needed.
-      const divider = this.createCrmNoteBubble(trailing.join('\n'));
-      this.chatInner.append(divider);
-      this.crmNoteDividers.push(divider);
+      const chips = renderCrmNoteChips(peerId, trailing);
+      chips.element.classList.add('crm-note-chips-trailing');
+      this.chatInner.append(chips.element);
+      this.crmNoteChips.push(chips);
     }
   };
 
@@ -5272,8 +5241,8 @@ export default class ChatBubbles {
     this.crmFirstSeen = {};
     this.manualReadReleased = false;
     this.crmSensitiveApproved.clear();
-    this.crmNoteMarkedBubbles.length = 0;
-    this.crmNoteDividers.length = 0;
+    this.crmNoteChips.forEach(({dispose}) => dispose());
+    this.crmNoteChips.length = 0;
     this.crmNotes = [];
     this.bubbleGroups?.cleanup();
     this.bubbleGroups = new BubbleGroups(this.chat);

@@ -8,6 +8,8 @@ import {
   CRM_SENSITIVE_APPROVED_EVENT,
   CRM_NOTES_CHANNEL,
   CRM_NOTE_ADDED_EVENT,
+  CRM_NOTE_UPDATED_EVENT,
+  CRM_NOTE_DELETED_EVENT,
   CRM_INBOUND_SEEN_EVENT,
   CrmFirstSeenMap,
   CrmNote
@@ -146,9 +148,17 @@ class CrmRealtime {
     // note appears live in the timeline + notes panel.
     this.notesChannelName = CRM_NOTES_CHANNEL(session, chatId);
     this.notesChannel = pusher.subscribe(this.notesChannelName);
-    this.notesChannel.bind(CRM_NOTE_ADDED_EVENT, (data: NotePush) => {
+    // An edit arrives as the whole note, so add and update are the same merge —
+    // every consumer keys notes by id.
+    [CRM_NOTE_ADDED_EVENT, CRM_NOTE_UPDATED_EVENT].forEach((event) => {
+      this.notesChannel.bind(event, (data: NotePush) => {
+        if(this.currentPeerId !== peerId || !data?.note?.id) return;
+        rootScope.dispatchEvent('crm_note_push', {peerId, note: data.note});
+      });
+    });
+    this.notesChannel.bind(CRM_NOTE_DELETED_EVENT, (data: NotePush) => {
       if(this.currentPeerId !== peerId || !data?.note?.id) return;
-      rootScope.dispatchEvent('crm_note_push', {peerId, note: data.note});
+      rootScope.dispatchEvent('crm_note_delete_push', {peerId, noteId: data.note.id});
     });
   }
 
