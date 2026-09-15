@@ -66,6 +66,8 @@ export const CRM_ENDPOINTS = {
   // Edit / remove one note. Author-or-superadmin only, enforced server-side.
   note: (chatId: string, noteId: number) =>
     `/tickets/by-telegram/${encodeURIComponent(chatId)}/note/${noteId}`,
+  // Newest note per chat for the chat LIST — see CrmNoteSummary.
+  notesSummary: '/tickets/notes/summary',
   // Sensitive-message reveal workflow (all keyed by the customer's telegram
   // chat id, like attributions). See CrmSensitiveRevealState.
   sensitiveReveals: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/sensitive-reveals`,
@@ -486,6 +488,24 @@ export type CrmNotesResult = {
   notes: CrmNote[]
 };
 
+// GET /tickets/notes/summary?chat_ids=… -> {data: {"<chatId>": CrmNoteSummaryEntry}}
+//
+// The chat LIST can't use the per-chat notes endpoint: a row has to know a
+// colleague left a note WITHOUT the chat being open. This is the bulk read — the
+// single newest note each chat has to show, under the same visibility rule.
+// `text` arrives already truncated; the row shows one line of it.
+export type CrmNoteSummaryEntry = {
+  id: number,
+  text: string,
+  author_name: string,
+  created_at: string, // ISO8601
+  visibility?: CrmNoteVisibility,
+  department_name?: string | null,
+  is_foreign?: boolean
+};
+
+export type CrmNoteSummary = Record<string, CrmNoteSummaryEntry>;
+
 // ── andro.law contracts ──────────────────────────────────────────────────────
 // Read-only here. The CRM proxies these from digicontract (andro.law), which is
 // a separate service the CRM knows a customer by mobile number in, so a chat
@@ -547,6 +567,13 @@ export type CrmContractsResult = {
 // the client turns each push into a `crm_note_push` rootScope event.
 export const CRM_NOTES_CHANNEL = (sessionId: string, chatId: string) =>
   'private-notes.peer.' + sessionId + '.' + chatId;
+// Department-wide note feed. An agent has ONE chat open but has to see a
+// colleague's note land on any chat-list row, and there is no subscription per
+// row — so note changes are broadcast here as well as on the per-peer channel,
+// with the chat id in the payload. This is what tweb actually subscribes to;
+// the per-peer channel carries the same events for any other client.
+export const CRM_NOTES_DEPARTMENT_CHANNEL = (sessionId: string) =>
+  'private-notes.department.' + sessionId;
 export const CRM_NOTE_ADDED_EVENT = 'note.added';
 export const CRM_NOTE_UPDATED_EVENT = 'note.updated';
 export const CRM_NOTE_DELETED_EVENT = 'note.deleted';

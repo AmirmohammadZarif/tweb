@@ -238,6 +238,7 @@ export type BroadcastEvents = {
   'crm_notes_update': {peerId: PeerId, notes: import('@lib/crm/types').CrmNote[]},
   'crm_note_push': {peerId: PeerId, note: import('@lib/crm/types').CrmNote},
   'crm_note_delete_push': {peerId: PeerId, noteId: number},
+  'crm_notes_summary_update': {peerIds: PeerId[]},
 
   'account_logged_in': {accountNumber: ActiveAccountNumber, userId: UserId},
 

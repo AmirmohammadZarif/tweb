@@ -276,9 +276,11 @@ ul.chatlist {
           color: var(--primary-color);
         }
 
-        // The first-seen tag is plain text, not a filled badge — on the selected
-        // row it just needs to follow the row's white text.
-        .dialog-subtitle-seen-tag {
+        // The first-seen tag and the note preview are plain text, not filled
+        // badges — on the selected row they just follow the row's white text.
+        .dialog-subtitle-seen-tag,
+        .dialog-subtitle-note,
+        .dialog-subtitle-note.is-foreign {
           color: rgba(255, 255, 255, .8);
         }
 
@@ -709,6 +711,42 @@ ul.chatlist {
   &-subtitle-seen-tag-icon {
     font-size: .875rem;
     flex: 0 0 auto;
+  }
+
+  // An internal note that landed AFTER this chat's last message: the newest thing
+  // that happened here, so it takes the message line the way any other update
+  // would. Amber to match the note chips in the timeline and the notes panel.
+  &-subtitle-note {
+    display: flex;
+    align-items: center;
+    flex: 1 1 auto;
+    gap: .25rem;
+    min-width: 0;
+    color: #e3a008;
+    white-space: nowrap;
+    overflow: hidden;
+
+    > span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    // Inherited from another department — provenance, not this team's own
+    // hand-off, so it stays in the quiet metadata tone.
+    &.is-foreign {
+      color: var(--secondary-text-color);
+    }
+  }
+
+  &-subtitle-note-icon {
+    font-size: .875rem;
+    flex: 0 0 auto;
+  }
+
+  // The message line is hidden rather than emptied, so nothing that rebuilds it
+  // has to know the preview exists — see applyCrmNotePreview.
+  &-subtitle.has-crm-note-preview > .row-subtitle {
+    display: none;
   }
 
   &-avatar {

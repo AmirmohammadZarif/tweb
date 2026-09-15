@@ -6,7 +6,7 @@ import {
   CRM_SENSITIVE_CHANNEL,
   CRM_SENSITIVE_REQUESTED_EVENT,
   CRM_SENSITIVE_APPROVED_EVENT,
-  CRM_NOTES_CHANNEL,
+  CRM_NOTES_DEPARTMENT_CHANNEL,
   CRM_NOTE_ADDED_EVENT,
   CRM_NOTE_UPDATED_EVENT,
   CRM_NOTE_DELETED_EVENT,
@@ -31,7 +31,7 @@ type AttributionPush = {message_id: number, admin_id: number, name: string};
 type InboundSeenPush = {seen: CrmFirstSeenMap};
 type SensitiveRequestPush = {message_id: number, requested_by: number, name: string, reason?: string};
 type SensitiveApprovedPush = {message_id: number, user_id: number | null};
-type NotePush = {ticket_id: number, note: CrmNote};
+type NotePush = {ticket_id: number, peer_chat_id?: string, note: CrmNote};
 
 const ATTRIBUTION_EVENT = 'outbound.attributed';
 
@@ -56,6 +56,33 @@ class CrmRealtime {
   // The peer we should currently be listening to — guards against a stale async
   // ensure() resolving after the user already switched chats.
   private currentPeerId: PeerId;
+
+  constructor() {
+    // The chat LIST needs the note feed before any chat is opened, so it comes up
+    // on session availability rather than on a peer change. Both events are the
+    // same ones crmRole listens to: a fresh login, a reconnect, a token refresh.
+    rootScope.addEventListener('crm_config_update', this.ensureNotesFeed);
+    rootScope.addEventListener('crm_auth_required', this.ensureNotesFeed);
+    if(rootScope.myId) this.ensureNotesFeed();
+    else rootScope.addEventListener('user_auth', this.ensureNotesFeed);
+  }
+
+  /**
+   * Bring up (or keep) the department-wide note feed. Independent of which chat is
+   * open — the chat list is its main consumer, and it has no peer.
+   */
+  public ensureNotesFeed = async() => {
+    if(!rootScope.myId) return;
+    // Cheap synchronous exit BEFORE the async config read: this is called from
+    // every chatlist row that renders, and a manager round-trip per row would
+    // undo the point of pooling the note previews in the first place.
+    if(this.notesChannel && this.notesChannelName === CRM_NOTES_DEPARTMENT_CHANNEL(sessionId())) return;
+
+    const pusher = await this.ensurePusher();
+    if(!pusher || !rootScope.myId) return;
+
+    this.subscribeNotes(pusher, sessionId());
+  };
 
   private async ensurePusher(): Promise<Pusher | undefined> {
     const config: CrmRealtimeConfig = await rootScope.managers.appCrmManager.getRealtimeConfig();
@@ -144,20 +171,49 @@ class CrmRealtime {
       });
     });
 
-    // Internal agent notes ride another sibling per-peer channel — a colleague's
-    // note appears live in the timeline + notes panel.
-    this.notesChannelName = CRM_NOTES_CHANNEL(session, chatId);
-    this.notesChannel = pusher.subscribe(this.notesChannelName);
+    // Internal notes do NOT ride a per-peer channel: an agent has one chat open,
+    // but a colleague's note may land on any chat-list row, and there is no
+    // subscription per row. They come over one department-wide channel instead,
+    // subscribed independently of the open peer — see subscribeNotes.
+    this.subscribeNotes(pusher, session);
+  }
+
+  /**
+   * Department-wide internal-note feed, subscribed once per session rather than
+   * per peer. Every note change in the department arrives here with its chat id,
+   * so the chat list goes live for rows nobody has open — which is the whole point
+   * of it not being per-peer.
+   */
+  private subscribeNotes(pusher: Pusher, session: string) {
+    const name = CRM_NOTES_DEPARTMENT_CHANNEL(session);
+    if(this.notesChannelName === name && this.notesChannel) return;
+
+    if(this.notesChannelName) {
+      pusher.unsubscribe(this.notesChannelName);
+    }
+
+    this.notesChannelName = name;
+    this.notesChannel = pusher.subscribe(name);
+
+    // The chat a push belongs to, or undefined when the payload predates the
+    // department channel (an old CRM broadcasting only the per-peer shape).
+    const pushedPeerId = (data: NotePush) => {
+      const chatId = data?.peer_chat_id;
+      return chatId ? (+chatId).toPeerId() : undefined;
+    };
+
     // An edit arrives as the whole note, so add and update are the same merge —
     // every consumer keys notes by id.
     [CRM_NOTE_ADDED_EVENT, CRM_NOTE_UPDATED_EVENT].forEach((event) => {
       this.notesChannel.bind(event, (data: NotePush) => {
-        if(this.currentPeerId !== peerId || !data?.note?.id) return;
+        const peerId = pushedPeerId(data);
+        if(!peerId || !data?.note?.id) return;
         rootScope.dispatchEvent('crm_note_push', {peerId, note: data.note});
       });
     });
     this.notesChannel.bind(CRM_NOTE_DELETED_EVENT, (data: NotePush) => {
-      if(this.currentPeerId !== peerId || !data?.note?.id) return;
+      const peerId = pushedPeerId(data);
+      if(!peerId || !data?.note?.id) return;
       rootScope.dispatchEvent('crm_note_delete_push', {peerId, noteId: data.note.id});
     });
   }
@@ -169,6 +225,11 @@ class CrmRealtime {
     this.unsubscribeChannel();
   }
 
+  /**
+   * Drop the PER-PEER subscriptions. The notes channel is deliberately not one of
+   * them: it is department-wide, and dropping it on every chat switch would blind
+   * the chat list exactly while the agent is scanning it.
+   */
   private unsubscribeChannel() {
     if(this.channelName && this.pusher) {
       this.pusher.unsubscribe(this.channelName);
@@ -176,19 +237,23 @@ class CrmRealtime {
     if(this.sensitiveChannelName && this.pusher) {
       this.pusher.unsubscribe(this.sensitiveChannelName);
     }
-    if(this.notesChannelName && this.pusher) {
-      this.pusher.unsubscribe(this.notesChannelName);
-    }
     this.channel = undefined;
     this.channelName = undefined;
     this.sensitiveChannel = undefined;
     this.sensitiveChannelName = undefined;
+  }
+
+  private unsubscribeNotes() {
+    if(this.notesChannelName && this.pusher) {
+      this.pusher.unsubscribe(this.notesChannelName);
+    }
     this.notesChannel = undefined;
     this.notesChannelName = undefined;
   }
 
   private teardown() {
     this.unsubscribeChannel();
+    this.unsubscribeNotes();
     if(this.pusher) {
       this.pusher.disconnect();
       this.pusher = undefined;

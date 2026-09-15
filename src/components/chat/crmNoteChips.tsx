@@ -6,6 +6,8 @@ import classNames from '@helpers/string/classNames';
 import I18n, {i18n} from '@lib/langPack';
 import {CrmNote} from '@lib/crm/types';
 import {canEditCrmNote, deleteCrmNote, isCrmNoteShared, saveCrmNote} from '@lib/crm/notes';
+import createCrmTaskFromText from '@lib/crm/createTask';
+import {useIsCrmReadOnly} from '@stores/crmRole';
 
 // Internal agent notes drawn inline in the timeline.
 //
@@ -67,6 +69,14 @@ function CrmNoteChip(props: {peerId: PeerId, note: CrmNote}) {
     }
   };
 
+  // Hand the note off as a task instead of leaving it for whoever reads the chat
+  // next. The composer takes it from here — project, assignee, and the customer,
+  // which the CRM resolves from the chat id. Available on an inherited note too:
+  // acting on another department's hand-off is the point of sharing it.
+  const convertToTask = () => {
+    createCrmTaskFromText(props.note.text || '', {peerId: props.peerId});
+  };
+
   const onKeyDown = (e: KeyboardEvent) => {
     if(e.key === 'Escape') {
       e.preventDefault();
@@ -93,18 +103,27 @@ function CrmNoteChip(props: {peerId: PeerId, note: CrmNote}) {
         <Show when={props.note.edited_at}>
           <span class="crm-note-chip-edited">{i18n('Crm.Note.Edited')}</span>
         </Show>
-        <Show when={canEditCrmNote(props.note) && !editing()}>
+        <Show when={!editing() && !useIsCrmReadOnly()()}>
           <span class="crm-note-chip-actions">
-            <button class="crm-note-chip-action" title={I18n.format('Edit', true)} onClick={startEdit}>
-              <IconTsx icon="edit" />
-            </button>
             <button
-              class="crm-note-chip-action crm-note-chip-action--danger"
-              title={I18n.format('Delete', true)}
-              onClick={remove}
+              class="crm-note-chip-action"
+              title={I18n.format('Crm.Note.ConvertToTask', true)}
+              onClick={convertToTask}
             >
-              <IconTsx icon="delete" />
+              <IconTsx icon="check" />
             </button>
+            <Show when={canEditCrmNote(props.note)}>
+              <button class="crm-note-chip-action" title={I18n.format('Edit', true)} onClick={startEdit}>
+                <IconTsx icon="edit" />
+              </button>
+              <button
+                class="crm-note-chip-action crm-note-chip-action--danger"
+                title={I18n.format('Delete', true)}
+                onClick={remove}
+              >
+                <IconTsx icon="delete" />
+              </button>
+            </Show>
           </span>
         </Show>
       </div>
@@ -151,7 +170,15 @@ export function renderCrmNoteChips(peerId: PeerId, notes: CrmNote[]) {
 
   const dispose = createRoot((dispose) => {
     element = (
-      <div class="crm-note-chips">
+      <div
+        class="crm-note-chips"
+        // The block lives INSIDE a bubble, and bubble clicks are handled by a
+        // delegate on the chat container (select, reply, open media). Without this
+        // every press of an action button — or a drag to select note text — would
+        // also act on the message the note happens to sit above.
+        onClick={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.stopPropagation()}
+      >
         <For each={notes}>{(note) => <CrmNoteChip peerId={peerId} note={note} />}</For>
       </div>
     ) as HTMLElement;

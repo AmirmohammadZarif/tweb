@@ -3,6 +3,7 @@ import type {Dialog, ForumTopic, MyMessage, RequestHistoryOptions, SavedDialog} 
 import type {MyDocument} from '@appManagers/appDocsManager';
 import type {State} from '@config/state';
 import type {AnyDialog} from '@lib/storages/dialogs';
+import {GLOBAL_FOLDER_ID} from '@lib/storages/dialogs';
 import type {CustomEmojiRendererElement} from '@customEmoji/renderer';
 import PopupElement from '@components/popups';
 import PopupElementTsx from '@components/popups/indexTsx';
@@ -64,6 +65,7 @@ import cancelEvent from '@helpers/dom/cancelEvent';
 import noop from '@helpers/noop';
 import pause from '@helpers/schedulers/pause';
 import apiManagerProxy from '@lib/apiManagerProxy';
+import crmRealtime from '@lib/crm/crmRealtime';
 import filterAsync from '@helpers/array/filterAsync';
 import indexOfAndSplice from '@helpers/array/indexOfAndSplice';
 import {getMiddleware, MiddlewareHelper} from '@helpers/middleware';
@@ -136,6 +138,11 @@ export type DialogDom = {
   pollVotesBadge?: HTMLElement,
   crmTicketBadge?: HTMLElement,
   crmSeenTag?: HTMLElement,
+  // Chat-list note preview: the element, the entry behind it, and the date of the
+  // row's own last message — the note only takes the row over while it is newer.
+  crmNoteLine?: HTMLElement,
+  crmNote?: import('@lib/crm/types').CrmNoteSummaryEntry,
+  crmLastMessageDate?: number,
   lastMessageSpan: HTMLSpanElement,
   containerEl: HTMLElement,
   listEl: HTMLElement,
@@ -175,6 +182,48 @@ function getFolderTitleTextColor(active: boolean) {
 
 const BADGE_SIZE = 22;
 
+/**
+ * Render (or clear) a row's internal-note preview.
+ *
+ * A note only takes over the row's message line while it is NEWER than the row's
+ * own last message. That is the whole rule, and it is what makes the note read as
+ * an UPDATE — the newest thing that happened in this conversation — instead of a
+ * permanent label that would hide real messages forever. Once the customer or an
+ * agent writes after the note, the row goes back to the message preview and the
+ * note stays where it belongs: inline in the chat and in the profile's Notes tab.
+ *
+ * Called from two places, which is why it lives here rather than on the element:
+ * the note cache updating (DialogElement.setCrmNote) and the last message being
+ * re-rendered (setLastMessage), because either side can flip the comparison.
+ */
+function applyCrmNotePreview(dom: DialogDom) {
+  const entry = dom?.crmNote;
+  const at = entry?.created_at ? Math.floor(new Date(entry.created_at).getTime() / 1000) : 0;
+  const show = !!entry && !!at && at >= (dom.crmLastMessageDate || 0);
+
+  if(!show) {
+    dom.crmNoteLine?.remove();
+    dom.crmNoteLine = undefined;
+    dom.subtitleEl.classList.remove('has-crm-note-preview');
+    return;
+  }
+
+  if(!dom.crmNoteLine) {
+    const line = dom.crmNoteLine = document.createElement('div');
+    line.className = 'dialog-subtitle-note';
+    line.append(Icon('clipboard', 'dialog-subtitle-note-icon'), document.createElement('span'));
+    dom.subtitleEl.append(line);
+  }
+
+  const text = `${entry.author_name}: ${entry.text || ''}`;
+  dom.crmNoteLine.lastElementChild.textContent = text;
+  dom.crmNoteLine.title = text;
+  dom.crmNoteLine.classList.toggle('is-foreign', !!entry.is_foreign);
+  // The message line is hidden by CSS rather than emptied: whatever rebuilds it
+  // (new message, typing, draft) must not have to know this preview exists.
+  dom.subtitleEl.classList.add('has-crm-note-preview');
+}
+
 
 const avatarSizeMap: {[k in DialogElementSize]?: number} = {
   bigger: 54,
@@ -213,6 +262,8 @@ export class DialogElement extends Row {
   private onCrmTicketUpdate?: (payload: {peerId: PeerId}) => void;
   private onCrmFirstSeenSummaryUpdate?: (payload: {peerIds: PeerId[]}) => void;
   private onCrmFirstSeenPush?: (payload: {peerId: PeerId}) => void;
+  private onCrmNotesSummaryUpdate?: (payload: {peerIds: PeerId[]}) => void;
+  private onCrmNotePush?: (payload: {peerId: PeerId}) => void;
 
   constructor({
     peerId,
@@ -444,7 +495,47 @@ export class DialogElement extends Row {
       };
       rootScope.addEventListener('crm_first_seen_summary_update', this.onCrmFirstSeenSummaryUpdate);
       rootScope.addEventListener('crm_first_seen_push', this.onCrmFirstSeenPush as any);
+
+      // A colleague's internal note, shown in the row like any other update. Pooled
+      // manager-side exactly like first-seen, so a scrolling chatlist is one request
+      // per batch. Unlike the open chat there is no per-peer channel for a chat
+      // nobody has open, so these rows go live on the summary's TTL.
+      const refreshCrmNote = () => {
+        Promise.resolve(rootScope.managers.appCrmManager.getLatestNoteCached(peerId))
+        .then((entry) => this.setCrmNote(entry));
+      };
+      rootScope.managers.appCrmManager.requestLatestNotesForPeers([peerId]);
+      refreshCrmNote();
+      // The chat list is the department feed's main consumer, and it is the only
+      // part of the app that exists before any chat is opened — so it is what
+      // brings the feed up. Idempotent and synchronous once subscribed.
+      crmRealtime.ensureNotesFeed();
+
+      this.onCrmNotesSummaryUpdate = ({peerIds}) => {
+        if(peerIds?.includes(peerId)) refreshCrmNote();
+      };
+      // Somebody added / edited / removed a note in this chat right now (it is the
+      // open one) — re-pull instead of waiting out the cache TTL.
+      this.onCrmNotePush = ({peerId: pushedPeerId}) => {
+        if(pushedPeerId === peerId) {
+          rootScope.managers.appCrmManager.requestLatestNotesForPeers([peerId], true);
+        }
+      };
+      rootScope.addEventListener('crm_notes_summary_update', this.onCrmNotesSummaryUpdate);
+      rootScope.addEventListener('crm_note_push', this.onCrmNotePush as any);
+      rootScope.addEventListener('crm_note_delete_push', this.onCrmNotePush as any);
     }
+  }
+
+  /**
+   * Chat-list note preview. The note takes over the row's message line only while
+   * it is NEWER than the last message — that is what makes it read as an update
+   * rather than a permanent label, and it stops a note from hiding real
+   * conversation forever. See applyCrmNotePreview.
+   */
+  public setCrmNote(entry?: import('@lib/crm/types').CrmNoteSummaryEntry) {
+    this.dom.crmNote = entry;
+    applyCrmNotePreview(this.dom);
   }
 
   /** Chatlist label: "👁 <agent>" for the newest customer message with a viewer. */
@@ -502,6 +593,15 @@ export class DialogElement extends Row {
     if(this.onCrmFirstSeenPush) {
       rootScope.removeEventListener('crm_first_seen_push', this.onCrmFirstSeenPush as any);
       this.onCrmFirstSeenPush = undefined;
+    }
+    if(this.onCrmNotesSummaryUpdate) {
+      rootScope.removeEventListener('crm_notes_summary_update', this.onCrmNotesSummaryUpdate);
+      this.onCrmNotesSummaryUpdate = undefined;
+    }
+    if(this.onCrmNotePush) {
+      rootScope.removeEventListener('crm_note_push', this.onCrmNotePush as any);
+      rootScope.removeEventListener('crm_note_delete_push', this.onCrmNotePush as any);
+      this.onCrmNotePush = undefined;
     }
     this.middlewareHelper?.destroy();
   }
@@ -980,7 +1080,39 @@ export class AppDialogsManager {
     return this.onTabChange();
   }
 
+  // A long-lived tab only gets live updates after the launch-time walk; if it
+  // was hidden or offline for a while, re-walk once it's back so client-side
+  // folders don't drift from other sessions (see fillConversations).
+  private initDialogsResyncListeners() {
+    const RESYNC_AFTER = 10 * 60e3;
+    let hiddenAt = 0, offlineAt = 0;
+    const resync = (since: number) => {
+      if(since && Date.now() - since >= RESYNC_AFTER) {
+        this.managers.appMessagesManager.fillConversations(GLOBAL_FOLDER_ID, true);
+      }
+    };
+
+    document.addEventListener('visibilitychange', () => {
+      if(document.hidden) {
+        hiddenAt ||= Date.now();
+      } else {
+        resync(hiddenAt);
+        hiddenAt = 0;
+      }
+    });
+
+    window.addEventListener('offline', () => {
+      offlineAt ||= Date.now();
+    });
+    window.addEventListener('online', () => {
+      resync(offlineAt);
+      offlineAt = 0;
+    });
+  }
+
   private initListeners() {
+    this.initDialogsResyncListeners();
+
     rootScope.addEventListener('folder_unread', async(folder) => {
       if(folder.id < 0) {
         const dialogElement = this.xd.getDialogElement(folder.id);
@@ -1212,7 +1344,10 @@ export class AppDialogsManager {
     this.managers.appNotificationsManager.getNotifyPeerTypeSettings();
 
     // await (await m(loadDialogsPromise)).renderPromise.catch(noop);
-    this.managers.appMessagesManager.fillConversations();
+    // forced: re-walk the whole list on every launch so client-side folders
+    // (Unread etc.) and their badges are computed from fresh server state,
+    // not from whatever snapshot this session's IndexedDB cache last saw
+    this.managers.appMessagesManager.fillConversations(GLOBAL_FOLDER_ID, true);
 
     if(!this.suggestionContainer) {
       this.suggestionContainer = document.createElement('div');
@@ -2510,7 +2645,15 @@ export class AppDialogsManager {
     if(lastMessage || draftMessage/*  && lastMessage._ !== 'draftMessage' */) {
       const date = draftMessage ? Math.max(draftMessage.date, lastMessage?.date || 0) : lastMessage.date;
       replaceContent(dom.lastTimeSpan, formatDateAccordingToTodayNew(new Date(date * 1000)));
-    } else dom.lastTimeSpan.textContent = '';
+      dom.crmLastMessageDate = date;
+    } else {
+      dom.lastTimeSpan.textContent = '';
+      dom.crmLastMessageDate = 0;
+    }
+
+    // A newer message retires the note preview (and a note left after the last
+    // message survives a re-render) — see applyCrmNotePreview.
+    applyCrmNotePreview(dom);
 
     promise.resolve();
   }

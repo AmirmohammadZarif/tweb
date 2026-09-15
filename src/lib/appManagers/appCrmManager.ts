@@ -26,6 +26,8 @@ import {
   CrmFaq,
   CrmNote,
   CrmNotesResult,
+  CrmNoteSummary,
+  CrmNoteSummaryEntry,
   CrmNoteVisibility,
   CrmTemplate,
   CrmTemplateImage,
@@ -65,6 +67,16 @@ const FIRST_SEEN_TTL = 60000;
 const FIRST_SEEN_BATCH_MS = 200;
 const MAX_FIRST_SEEN_CHAT_IDS = 300;
 
+/**
+ * Chat-list note previews, pooled the same way. Shorter TTL than first-seen: a
+ * note is a hand-off someone is waiting on, and unlike the notes inside an open
+ * chat there is no per-peer Reverb channel for a chat the agent hasn't opened —
+ * so the TTL IS the liveness for every row but the current one.
+ */
+const NOTES_SUMMARY_TTL = 30000;
+const NOTES_SUMMARY_BATCH_MS = 200;
+const MAX_NOTES_SUMMARY_CHAT_IDS = 300;
+
 export default class AppCrmManager extends AppManager {
   private storage: AppStorage<Record<string, CrmConfig>, ReturnType<typeof getDatabaseState>>;
   private config: CrmConfig;
@@ -78,6 +90,10 @@ export default class AppCrmManager extends AppManager {
   private firstSeenFetchedAt = new Map<PeerId, number>();
   private pendingFirstSeenPeerIds = new Set<PeerId>();
   private firstSeenBatchTimeout: number;
+  private latestNoteByPeerId = new Map<PeerId, CrmNoteSummaryEntry>();
+  private latestNoteFetchedAt = new Map<PeerId, number>();
+  private pendingNotePeerIds = new Set<PeerId>();
+  private noteBatchTimeout: number;
 
   protected after() {
     this.name = 'CRM';
@@ -745,11 +761,113 @@ export default class AppCrmManager extends AppManager {
       const result = await this.request<{data: {ticket_id: number | null, notes: CrmNote[]}}>('GET', CRM_ENDPOINTS.notes(chatId), {
         query: {session_telegram_user_id: this.sessionTelegramUserId()}
       });
-      return {ticketId: result?.data?.ticket_id ?? null, notes: result?.data?.notes || []};
+      const notes = result?.data?.notes || [];
+      this.rememberLatestNote(chatId, notes);
+      return {ticketId: result?.data?.ticket_id ?? null, notes};
     } catch(err) {
       this.log.error('getNotesByTelegram failed', err);
       return {ticketId: null, notes: []};
     }
+  }
+
+  /**
+   * The chat-list note preview for a peer, or undefined when the chat has no note
+   * to show. Synchronous by design: dialog rows render from cache and refresh off
+   * `crm_notes_summary_update` — see requestLatestNotesForPeers.
+   */
+  public getLatestNoteCached(peerId: PeerId): CrmNoteSummaryEntry | undefined {
+    return this.latestNoteByPeerId.get(peerId);
+  }
+
+  /**
+   * Ask for the chat-list note previews of these peers. Called per dialog row, so
+   * it pools requests over NOTES_SUMMARY_BATCH_MS and skips peers refreshed within
+   * NOTES_SUMMARY_TTL — a scrolling chatlist costs one request per batch, not one
+   * per row. Fire-and-forget: the result lands as `crm_notes_summary_update`.
+   */
+  public async requestLatestNotesForPeers(peerIds: PeerId[], force = false): Promise<void> {
+    if(!(await this.isConnected()) || !peerIds?.length) return;
+
+    const now = Date.now();
+    for(const peerId of peerIds) {
+      if(!peerId?.isUser()) continue;
+      const fetchedAt = this.latestNoteFetchedAt.get(peerId);
+      if(!force && fetchedAt && now - fetchedAt < NOTES_SUMMARY_TTL) continue;
+      this.pendingNotePeerIds.add(peerId);
+    }
+
+    if(!this.pendingNotePeerIds.size || this.noteBatchTimeout) return;
+    this.noteBatchTimeout = ctx.setTimeout(() => {
+      this.noteBatchTimeout = undefined;
+      this.flushNotesSummaryBatch();
+    }, NOTES_SUMMARY_BATCH_MS);
+  }
+
+  private async flushNotesSummaryBatch() {
+    const peerIds = Array.from(this.pendingNotePeerIds).slice(0, MAX_NOTES_SUMMARY_CHAT_IDS);
+    if(!peerIds.length) return;
+    peerIds.forEach((peerId) => this.pendingNotePeerIds.delete(peerId));
+
+    // Mark them fetched up front: a failed request must not make every dialog row
+    // retry on its next render, and the TTL will let them through again anyway.
+    const now = Date.now();
+    peerIds.forEach((peerId) => this.latestNoteFetchedAt.set(peerId, now));
+
+    try {
+      const result = await this.request<{data: CrmNoteSummary}>('GET', CRM_ENDPOINTS.notesSummary, {
+        query: {
+          chat_ids: peerIds.map((peerId) => peerId.toUserId()).join(','),
+          session_telegram_user_id: this.sessionTelegramUserId()
+        }
+      });
+
+      const summary = result?.data || {};
+      for(const peerId of peerIds) {
+        const entry = summary['' + peerId.toUserId()];
+        if(entry) this.latestNoteByPeerId.set(peerId, entry);
+        else this.latestNoteByPeerId.delete(peerId);
+      }
+
+      this.rootScope.dispatchEvent('crm_notes_summary_update', {peerIds});
+    } catch(err) {
+      this.log.error('notes summary failed', err);
+    }
+
+    // More peers queued up while this request was in flight (long chatlist).
+    if(this.pendingNotePeerIds.size && !this.noteBatchTimeout) {
+      this.noteBatchTimeout = ctx.setTimeout(() => {
+        this.noteBatchTimeout = undefined;
+        this.flushNotesSummaryBatch();
+      }, NOTES_SUMMARY_BATCH_MS);
+    }
+  }
+
+  /**
+   * Fold a chat's full note list into the chat-list cache, so the open chat keeps
+   * its own list row in step (and drops the preview when its last note is deleted)
+   * without waiting out the TTL or spending a second request.
+   */
+  private rememberLatestNote(chatId: string, notes: CrmNote[]) {
+    if(!chatId) return;
+
+    const peerId = (+chatId).toPeerId();
+    const newest = notes?.length ? notes[notes.length - 1] : undefined;
+
+    if(!newest) this.latestNoteByPeerId.delete(peerId);
+    else {
+      this.latestNoteByPeerId.set(peerId, {
+        id: newest.id,
+        text: newest.text,
+        author_name: newest.author_name,
+        created_at: newest.created_at,
+        visibility: newest.visibility,
+        department_name: newest.department_name,
+        is_foreign: newest.is_foreign
+      });
+    }
+
+    this.latestNoteFetchedAt.set(peerId, Date.now());
+    this.rootScope.dispatchEvent('crm_notes_summary_update', {peerIds: [peerId]});
   }
 
   // Add an internal note to the chat's ticket. Returns the created note (so the UI

@@ -295,6 +295,7 @@ const lang = {
   'Crm.Note.EditFailed': 'Could not save the note, please try again',
   'Crm.Note.DeleteFailed': 'Could not delete the note, please try again',
   'Crm.Note.EditForbidden': 'Only the note\u2019s author can change it',
+  'Crm.Note.ConvertToTask': 'Create task from note',
   'Crm.Contract.PanelTitle': 'Contracts',
   'Crm.Contract.TabName': 'Contracts',
   'Crm.Contract.MenuButton': 'Contracts',

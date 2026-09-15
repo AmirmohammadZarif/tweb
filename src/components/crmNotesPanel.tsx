@@ -17,6 +17,7 @@ import {
   saveCrmNote,
   sortCrmNotes
 } from '@lib/crm/notes';
+import createCrmTaskFromText from '@lib/crm/createTask';
 import {useIsCrmReadOnly} from '@stores/crmRole';
 
 // Internal-notes panel: agents leave context for each other on the customer's
@@ -164,6 +165,13 @@ export default function CrmNotesPanel(props: {
     }
   };
 
+  // Hand the note off as a task instead of leaving it for whoever reads next. The
+  // composer takes it from here; available on an inherited note too, since acting
+  // on another department's hand-off is the point of sharing it.
+  const convertToTask = (note: CrmNote) => {
+    createCrmTaskFromText(note.text || '', {peerId: props.peerId});
+  };
+
   const formatTime = (iso: string) => {
     const date = new Date(iso);
     return isNaN(date.getTime()) ? '' : date.toLocaleString();
@@ -215,22 +223,31 @@ export default function CrmNotesPanel(props: {
               {' · '}{i18n('Crm.Note.Edited')}
             </Show>
           </span>
-          <Show when={editable() && !editing()}>
+          <Show when={!editing() && !useIsCrmReadOnly()()}>
             <span class="crm-notes-item-actions">
               <button
                 class="crm-notes-item-action"
-                title={I18n.format('Edit', true)}
-                onClick={() => startEdit(note)}
+                title={I18n.format('Crm.Note.ConvertToTask', true)}
+                onClick={() => convertToTask(note)}
               >
-                <IconTsx icon="edit" />
+                <IconTsx icon="check" />
               </button>
-              <button
-                class="crm-notes-item-action crm-notes-item-action--danger"
-                title={I18n.format('Delete', true)}
-                onClick={() => remove(note)}
-              >
-                <IconTsx icon="delete" />
-              </button>
+              <Show when={editable()}>
+                <button
+                  class="crm-notes-item-action"
+                  title={I18n.format('Edit', true)}
+                  onClick={() => startEdit(note)}
+                >
+                  <IconTsx icon="edit" />
+                </button>
+                <button
+                  class="crm-notes-item-action crm-notes-item-action--danger"
+                  title={I18n.format('Delete', true)}
+                  onClick={() => remove(note)}
+                >
+                  <IconTsx icon="delete" />
+                </button>
+              </Show>
             </span>
           </Show>
         </div>

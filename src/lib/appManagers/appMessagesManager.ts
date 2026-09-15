@@ -3435,13 +3435,39 @@ export class AppMessagesManager extends AppManager {
     }
   }
 
-  public async fillConversations(folderId = GLOBAL_FOLDER_ID): Promise<void> {
+  /**
+   * Walks the dialog list page by page (100 per request) until the server says
+   * there is nothing more.
+   *
+   * `force` ignores the persisted `allDialogsLoaded` flag and re-walks the
+   * whole list even when the cache claims to be complete. Custom folders
+   * (e.g. an "Unread" folder = `exclude_read`) are computed purely client-side
+   * from this cache, and once `allDialogsLoaded` has been persisted the cache
+   * is never re-fetched — it relies on `updates.getDifference` alone. For a
+   * busy multi-session account that leaves every session with its own stale
+   * snapshot of `unread_count` / `read_inbox_max_id` / `top_message`, so the
+   * same folder shows different dialogs (and badges) on different sessions.
+   * A forced walk re-saves every dialog with fresh server state, which
+   * `saveDialog` merges over the cached one.
+   */
+  public async fillConversations(folderId = GLOBAL_FOLDER_ID, force = false): Promise<void> {
     const middleware = this.middleware.get();
-    while(!this.dialogsStorage.isDialogsLoaded(folderId)) {
+    let lastOffsetDate = this.dialogsStorage.getOffsetDate(folderId);
+    while(force || !this.dialogsStorage.isDialogsLoaded(folderId)) {
       const result = await this.getTopMessages({limit: 100, folderId});
-      if(!middleware() || !result || result.isEnd) {
+      if(!middleware() || !result || (force ? result.isLastPage : result.isEnd)) {
         break;
       }
+
+      // safety net for the forced walk: a page that didn't move the offset
+      // would otherwise re-request the same slice forever
+      const offsetDate = this.dialogsStorage.getOffsetDate(folderId);
+      if(force && offsetDate === lastOffsetDate) {
+        this.log.warn('fillConversations: offset did not advance, stopping', folderId, offsetDate);
+        break;
+      }
+
+      lastOffsetDate = offsetDate;
     }
   }
 
@@ -3558,6 +3584,9 @@ export class AppMessagesManager extends AppManager {
       const items: Array<Dialog | ForumTopic | SavedDialog> =
         (result as MessagesDialogs.messagesDialogsSlice).dialogs as Dialog[] ||
         (result as MessagesForumTopics).topics as ForumTopic[];
+      // raw page size before bugged entries get spliced out below — the only
+      // trustworthy "server has nothing more" signal (see isLastPage)
+      const receivedLength = items.length;
       log('saving', {setFolderId, saveGlobalOffset, noIdsDialogs, isSearch});
       forEachReverse(items, (dialog, idx, arr) => {
         if(!dialog) {
@@ -3674,8 +3703,18 @@ export class AppMessagesManager extends AppManager {
       const dialogs = items;
       const slicedDialogs = limit === useLimit ? dialogs : dialogs.slice(0, limit);
 
+      // `isEnd` compares the LOCAL folder length against the server count, so a
+      // cache that still holds dialogs the server has since dropped reports
+      // "end" after the very first page. `isLastPage` is pure pagination: the
+      // server returned a non-slice or a short page — use it when walking the
+      // whole list to refresh the cache.
+      const isLastPage = isSearch ?
+        isEnd :
+        (result._ === 'messages.dialogs' || receivedLength < useLimit);
+
       return {
         isEnd: isEnd && slicedDialogs[slicedDialogs.length - 1] === dialogs[dialogs.length - 1],
+        isLastPage,
         count: Math.max(count || 0, items.length),
         dialogs: slicedDialogs
       };
