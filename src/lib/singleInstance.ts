@@ -28,6 +28,11 @@ export type AppInstance = {
 export type InstanceDeactivateReason = 'version' | 'tabs' | 'otherClient';
 
 const CHECK_INSTANCE_INTERVAL = 5000;
+// How often a running tab asks the server which build it is serving. The
+// k_build check below only fires once SOME tab in this browser has loaded the
+// new bundle — a tab that stays open for days never reloads, so without this
+// poll it would never learn a deploy happened.
+const CHECK_SERVER_BUILD_INTERVAL = 3 * 60e3;
 const DEACTIVATE_TIMEOUT = 30000;
 const MULTIPLE_TABS_THRESHOLD = 20000;
 const IS_MULTIPLE_TABS_SUPPORTED = IS_SHARED_WORKER_SUPPORTED;
@@ -66,6 +71,15 @@ export class SingleInstance extends EventListenerBase<{
 
     idleController.addEventListener('change', this.checkInstance);
     apiManagerProxy.setInterval(this.checkInstance, CHECK_INSTANCE_INTERVAL);
+
+    // Poll the server's build number, and re-check whenever the tab comes back
+    // into focus so an agent returning from a break picks the update up at once.
+    apiManagerProxy.setInterval(this.checkServerBuild, CHECK_SERVER_BUILD_INTERVAL);
+    idleController.addEventListener('change', (idle) => {
+      if(!idle) {
+        this.checkServerBuild();
+      }
+    });
 
     try {
       document.documentElement.addEventListener('beforeunload', this.clearInstance);
@@ -145,6 +159,44 @@ export class SingleInstance extends EventListenerBase<{
     }
   }
 
+  // Fetches `/version` (written by set_build.js at image build time, format
+  // "2.2 (1789642478)") and, when it is newer than the bundle we are running,
+  // routes through the same 'version' deactivation the k_build check uses.
+  // Writing k_build makes every other tab in this browser follow within
+  // CHECK_INSTANCE_INTERVAL via checkInstance, so only one tab has to poll.
+  private checkServerBuild = async() => {
+    if(this.deactivated) {
+      return;
+    }
+
+    let serverBuild: number;
+    try {
+      const response = await fetch('version', {cache: 'no-store', credentials: 'same-origin'});
+      if(!response.ok) {
+        return;
+      }
+
+      serverBuild = +(await response.text()).match(/\((\d+)\)/)?.[1];
+    } catch(err) {
+      return;
+    }
+
+    if(!serverBuild || serverBuild <= App.build) {
+      return;
+    }
+
+    this.log.warn('server has a newer build', serverBuild, '>', App.build);
+    await sessionStorage.set({k_build: serverBuild});
+    this.onNewerBuild();
+  };
+
+  private onNewerBuild() {
+    this.masterInstance = false;
+    rootScope.managers.all.networkerFactory.stopAll();
+    this.deactivateInstance('version');
+    apiManagerProxy.toggleStorages(false, false);
+  }
+
   private checkInstance = async(idle = idleController.isIdle) => {
     if(this.deactivated) {
       return;
@@ -164,10 +216,7 @@ export class SingleInstance extends EventListenerBase<{
     ]);
 
     if(build > App.build) {
-      this.masterInstance = false;
-      rootScope.managers.all.networkerFactory.stopAll();
-      this.deactivateInstance('version');
-      apiManagerProxy.toggleStorages(false, false);
+      this.onNewerBuild();
       return;
     } else if(IS_MULTIPLE_TABS_SUPPORTED) {
       sessionStorage.set({xt_instance: newInstance});

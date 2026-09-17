@@ -8,6 +8,7 @@ import '@helpers/dom/previewUnfreeze';
 import '@helpers/dom/previewRaf';
 import App from '@config/app';
 import blurActiveElement from '@helpers/dom/blurActiveElement';
+import idleController from '@helpers/idleController';
 import {IS_STICKY_INPUT_BUGGED} from '@helpers/dom/fixSafariStickyInputFocusing';
 import loadFonts from '@helpers/dom/loadFonts';
 import IS_EMOJI_SUPPORTED from '@environment/emojiSupport';
@@ -373,6 +374,21 @@ function onInstanceDeactivated(reason: InstanceDeactivateReason) {
 
   popup.addEventListener('close', map[reason].onClick);
   popup.show();
+
+  // A new build was deployed: don't make an idle tab wait for a click. Reload
+  // as soon as the tab is (or becomes) unfocused so that agents mid-reply are
+  // not yanked, but a tab left alone silently updates itself.
+  if(isUpdated) {
+    if(idleController.isIdle) {
+      onVersionClick();
+    } else {
+      idleController.addEventListener('change', (idle) => {
+        if(idle) {
+          onVersionClick();
+        }
+      }, {once: true});
+    }
+  }
 };
 
 const TIME_LABEL = 'Elapsed time since unlocked';
