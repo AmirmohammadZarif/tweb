@@ -25,6 +25,10 @@ import fastSmoothScroll from '@helpers/fastSmoothScroll';
 import ChatThemesPicker from '@components/chatThemesPicker';
 import ChatBackgroundStore from '@lib/chatBackgroundStore';
 import appDownloadManager from '@lib/appDownloadManager';
+import CheckboxFieldTsx from '@components/checkboxFieldTsx';
+import {InputFieldTsx} from '@components/inputFieldTsx';
+import debounce from '@helpers/schedulers/debounce';
+import {normalizeRelayHost} from '@lib/mtproto/relay';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Section 1 — text size, chat background, animations toggle, lite mode entry
@@ -338,6 +342,48 @@ const TimeFormatSection = () => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Section 5 — MTProto relay (route all Telegram traffic through our own host)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ConnectionSection = () => {
+  const [appSettings, setAppSettings] = useAppSettings();
+
+  // The worker reconnects every DC on each `settings.mtprotoRelay.*` write, so
+  // commit the host only once typing has settled, not per keystroke.
+  const commitHost = debounce((value: string) => {
+    const host = normalizeRelayHost(value);
+    if(host !== appSettings.mtprotoRelay.host) {
+      setAppSettings('mtprotoRelay', 'host', host);
+    }
+  }, 600, false, true);
+  onCleanup(() => commitHost.clearTimeout());
+
+  return (
+    <Section name="Connection.Title" caption="Connection.Relay.Caption">
+      <Row>
+        <Row.CheckboxFieldToggle>
+          <CheckboxFieldTsx
+            checked={appSettings.mtprotoRelay.enabled}
+            toggle
+            onChange={(checked) => setAppSettings('mtprotoRelay', 'enabled', checked)}
+          />
+        </Row.CheckboxFieldToggle>
+        <Row.Title>{i18n('Connection.Relay.Toggle')}</Row.Title>
+      </Row>
+      <div class="input-wrapper">
+        <InputFieldTsx
+          label="Connection.Relay.Host"
+          name="mtproto-relay-host"
+          plainText
+          value={appSettings.mtprotoRelay.host}
+          onRawInput={commitHost}
+        />
+      </div>
+    </Section>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tab root
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -348,6 +394,7 @@ const GeneralSettings = () => {
       <ThemeSection />
       {IS_GEOLOCATION_SUPPORTED && <DistanceUnitsSection />}
       <TimeFormatSection />
+      <ConnectionSection />
     </>
   );
 };

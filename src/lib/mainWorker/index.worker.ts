@@ -17,6 +17,7 @@ import Modes from '@config/modes';
 import {IS_WORKER} from '@helpers/context';
 import {ActiveAccountNumber} from '@lib/accounts/types';
 import commonStateStorage from '@lib/commonStateStorage';
+import {setRelayConfig} from '@lib/mtproto/relay';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 import AppStorage from '@lib/storage';
 import EncryptionKeyStore from '@lib/passcode/keyStore';
@@ -68,6 +69,12 @@ port.addMultipleEventsListeners({
     // }
 
     log('got state', accountNumber, state, pushedKeys);
+
+    // Settings are global (common state), delivered once with account 1. Apply
+    // the relay target now — before any manager gets to create a transport.
+    if(accountNumber === 1 && common?.settings) {
+      setRelayConfig(common.settings.mtprotoRelay);
+    }
 
     const appStateManager = appManagersManager.stateManagersByAccount[accountNumber];
     appStateManager.userId = userId;

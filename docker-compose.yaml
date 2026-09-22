@@ -63,6 +63,19 @@ services:
     networks:
       - shared
 
+  # MTProto relay (Settings → General → Connection). Stock nginx, config only.
+  # Exposed via an NPM custom location `/mtproto/` → http://tweb.relay:80 with
+  # websockets enabled, bypassing tweb-auth — see .docker/relay.nginx.conf.
+  tweb.relay:
+    container_name: tweb.relay
+    image: nginx:1.27-alpine
+    volumes:
+      - "./.docker/relay.nginx.conf:/etc/nginx/conf.d/default.conf:ro"
+    restart: unless-stopped
+    logging: *default-logging
+    networks:
+      - shared
+
 networks:
   shared:
     external: true

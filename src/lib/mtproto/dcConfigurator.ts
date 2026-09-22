@@ -16,6 +16,7 @@ import {IS_WEB_WORKER} from '@helpers/context';
 import {DcId} from '@types';
 import {getEnvironment} from '@environment/utils';
 import SocketProxied from '@lib/mtproto/transports/socketProxied';
+import {constructRelayHttpUrl, constructRelayWebSocketUrl, isRelayEnabled} from '@lib/mtproto/relay';
 
 export type TransportType = 'websocket' | 'https' | 'http';
 export type ConnectionType = 'client' | 'download' | 'upload';
@@ -43,14 +44,34 @@ export function constructTelegramWebSocketUrl(dcId: DcId, connectionType: Connec
 
   const suffix = getTelegramConnectionSuffix(connectionType);
   const path = connectionType !== 'client' ? 'apiws' + TEST_SUFFIX + (premium ? PREMIUM_SUFFIX : '') : ('apiws' + TEST_SUFFIX);
+  if(isRelayEnabled()) {
+    return constructRelayWebSocketUrl(dcId, suffix, path);
+  }
+
   const chosenServer = `wss://${App.suffix.toLowerCase()}ws${dcId}${suffix}.web.telegram.org/${path}`;
 
   return chosenServer;
 }
 
-export class DcConfigurator {
-  private sslSubdomains = ['pluto', 'venus', 'aurora', 'vesta', 'flora'];
+const SSL_SUBDOMAINS = ['pluto', 'venus', 'aurora', 'vesta', 'flora'];
 
+// NOT our domain: pluto/venus/aurora/vesta/flora.web.telegram.org are
+// Telegram's own MTProto-over-HTTPS endpoints. The rebrand find/replace
+// pointed these at web.andropay.xyz, where nothing answers — and .env's
+// VITE_MTPROTO_AUTO makes HTTPS the transport tried *first*
+// (modes.ts: multipleTransports -> Modes.http -> transport = 'https').
+export function constructTelegramHttpUrl(dcId: DcId, connectionType: ConnectionType) {
+  const suffix = getTelegramConnectionSuffix(connectionType);
+  const subdomain = SSL_SUBDOMAINS[dcId - 1] + suffix;
+  const path = Modes.test ? 'apiw_test1' : 'apiw1';
+  if(isRelayEnabled()) {
+    return constructRelayHttpUrl(subdomain, path);
+  }
+
+  return 'https://' + subdomain + '.web.telegram.org/' + path;
+}
+
+export class DcConfigurator {
   private dcOptions = Modes.test ?
     [
       {id: 1, host: '149.154.175.10',  port: 80},
@@ -94,15 +115,7 @@ export class DcConfigurator {
 
     let chosenServer: string;
     if(Modes.ssl || !Modes.http) {
-      const suffix = getTelegramConnectionSuffix(connectionType);
-      const subdomain = this.sslSubdomains[dcId - 1] + suffix;
-      const path = Modes.test ? 'apiw_test1' : 'apiw1';
-      // NOT our domain: pluto/venus/aurora/vesta/flora.web.telegram.org are
-      // Telegram's own MTProto-over-HTTPS endpoints. The rebrand find/replace
-      // pointed these at web.andropay.xyz, where nothing answers — and .env's
-      // VITE_MTPROTO_AUTO makes HTTPS the transport tried *first*
-      // (modes.ts: multipleTransports -> Modes.http -> transport = 'https').
-      chosenServer = 'https://' + subdomain + '.web.telegram.org/' + path;
+      chosenServer = constructTelegramHttpUrl(dcId, connectionType);
     } else {
       for(const dcOption of this.dcOptions) {
         if(dcOption.id === dcId) {

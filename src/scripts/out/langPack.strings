@@ -241,6 +241,10 @@
 "Crm.ReadOnly.Title" = "Read-only access";
 "Crm.ReadOnly.Subtitle" = "You can follow conversations, but not reply or change anything";
 "Crm.ReadOnly.Blocked" = "Your account has read-only access";
+"Connection.Title" = "Connection";
+"Connection.Relay.Toggle" = "Connect through relay";
+"Connection.Relay.Host" = "Relay host (empty = this site)";
+"Connection.Relay.Caption" = "Sends all Telegram traffic through a relay server instead of connecting to Telegram directly. Use it when Telegram is blocked on your network but this site is reachable. Leave the host empty to relay through the server this app is loaded from. Takes effect immediately, no reload needed.";
 "Crm.PeekMode.Title" = "Manual read";
 "Crm.PeekMode.Caption" = "On by default. Open chats without marking them read: the customer sees no read receipt and the chat stays unread for your team until you claim it — with \"Mark as read\" in the chat menu, by typing /read, or simply by replying. Turn this off only if you want every chat you open to be marked read immediately. Applies to 1-to-1 customer chats in this browser only.";
 "Crm.PeekMode.MarkRead" = "Mark as read";

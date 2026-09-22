@@ -67,9 +67,35 @@ const DEV_HTTP2_CERT = path.join(certsDir, 'localhost.pem');
 const USE_DEV_HTTP2 = !USE_SSL && !process.env.TWEB_PREVIEW && !process.env.VITEST &&
   existsSync(DEV_HTTP2_KEY) && existsSync(DEV_HTTP2_CERT);
 
+// Dev-server side of the MTProto relay (Settings → General → Connection). Same
+// URL layout as .docker/relay.nginx.conf, see src/lib/mtproto/relay.ts:
+//   /mtproto/ws/{dc}{-1?}/…   → wss://kws{dc}{-1?}.web.telegram.org/…
+//   /mtproto/http/{sub}{-1?}/… → https://{sub}{-1?}.web.telegram.org/…
+// Vite's proxy has no per-request router, so one static entry per upstream.
+const MTPROTO_RELAY_PROXY: ServerOptions['proxy'] = {};
+for(const media of ['', '-1']) {
+  for(let dc = 1; dc <= 5; ++dc) {
+    MTPROTO_RELAY_PROXY[`^/mtproto/ws/${dc}${media}/`] = {
+      target: `wss://kws${dc}${media}.web.telegram.org`,
+      ws: true,
+      changeOrigin: true,
+      rewrite: (p) => p.replace(/^\/mtproto\/ws\/[^/]+/, '')
+    };
+  }
+
+  for(const sub of ['pluto', 'venus', 'aurora', 'vesta', 'flora']) {
+    MTPROTO_RELAY_PROXY[`^/mtproto/http/${sub}${media}/`] = {
+      target: `https://${sub}${media}.web.telegram.org`,
+      changeOrigin: true,
+      rewrite: (p) => p.replace(/^\/mtproto\/http\/[^/]+/, '')
+    };
+  }
+}
+
 const serverOptions: ServerOptions = {
   host,
   port: USE_SSL ? 443 : 8080,
+  proxy: MTPROTO_RELAY_PROXY,
   watch: {
     // NB: anchor on rootDir. A worktree checkout's own path contains
     // ".claude/worktrees/<name>/", so a bare '**/.claude/**' glob would also match

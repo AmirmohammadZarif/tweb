@@ -39,6 +39,11 @@ export default class HTTP implements MTTransport {
     this.connected = false;
   }
 
+  // Every request is a fresh fetch, so re-pointing is just swapping the URL.
+  public changeUrl(url: string) {
+    this.url = url;
+  }
+
   public _send(
     body: Uint8Array,
     mode?: RequestMode,

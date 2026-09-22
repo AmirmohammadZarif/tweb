@@ -168,6 +168,16 @@ export type StateSettings = {
   // so reopens land back where they left off. `nightMode` falls back to the
   // global theme's brightness when unset; `selectedThemeId` empty = the
   // DEFAULT_THEME sentinel (i.e. "use the current chat theme").
+  // Route every MTProto connection (WebSocket, and the HTTPS transport tried
+  // first under VITE_MTPROTO_AUTO) through a same-origin reverse proxy instead
+  // of *.web.telegram.org directly — see @lib/mtproto/relay. The relay just
+  // forwards the (already obfuscated) byte stream, so this is a plain
+  // transport switch, not a protocol change. `host` empty = the host the app
+  // is served from; anything else is assumed to be a TLS endpoint.
+  mtprotoRelay: {
+    enabled: boolean,
+    host: string
+  },
   qrCode: {
     nightMode?: boolean,
     selectedThemeId: string
@@ -543,6 +553,10 @@ export const SETTINGS_INIT: StateSettings = {
     noiseSuppression: true
   },
   recordingMediaType: 'voice',
+  mtprotoRelay: {
+    enabled: false,
+    host: ''
+  },
   qrCode: {
     selectedThemeId: ''
   }

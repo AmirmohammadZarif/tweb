@@ -29,7 +29,7 @@ export default class Socket extends EventListenerBase<{
     let logTypes = LogTypes.Error | LogTypes.Log;
     if(this.debug) logTypes |= LogTypes.Debug;
     this.log = logger(`WS-${dcId}` + logSuffix, logTypes);
-    this.log('constructor');
+    this.log('constructor', url);
     this.connect();
   }
 

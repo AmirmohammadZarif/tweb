@@ -9,9 +9,11 @@ import type {UserAuth} from '@appManagers/constants';
 import type {DcAuthKey, DcId, DcServerSalt, InvokeApiOptions, TrueDcId} from '@types';
 import type {MethodDeclMap} from '@layer';
 import type TcpObfuscated from '@lib/mtproto/transports/tcpObfuscated';
+import type HTTP from '@lib/mtproto/transports/http';
 import sessionStorage from '@lib/sessionStorage';
 import MTPNetworker, {MTMessage} from '@lib/mtproto/networker';
-import {ConnectionType, constructTelegramWebSocketUrl, DcConfigurator, TransportType} from '@lib/mtproto/dcConfigurator';
+import {ConnectionType, constructTelegramHttpUrl, constructTelegramWebSocketUrl, DcConfigurator, TransportType} from '@lib/mtproto/dcConfigurator';
+import {setRelayConfig} from '@lib/mtproto/relay';
 import deferredPromise, {CancellablePromise} from '@helpers/cancellablePromise';
 import App from '@config/app';
 import {MOUNT_CLASS_TO} from '@config/debug';
@@ -116,6 +118,30 @@ export class ApiManager extends ApiManagerMethods {
       if(this.config) { // refresh configs if had a config during authorization
         this.apiUpdatesManager.processLocalUpdate({_: 'updateConfig'});
       }
+    });
+
+    // Relay toggled / re-hosted from Settings: repoint every live transport.
+    // WebSocket transports reconnect (changeUrl → forceReconnect); HTTP ones
+    // simply fetch the next request from the new URL. Networkers, auth keys
+    // and salts are untouched — only the byte pipe moves.
+    this.rootScope.addEventListener('settings_updated', ({key, settings}) => {
+      if(!key.startsWith('settings.mtprotoRelay')) {
+        return;
+      }
+
+      setRelayConfig(settings.mtprotoRelay);
+      this.iterateNetworkers(({networker, connectionType, dcId, transportType}) => {
+        const transport = networker.transport;
+        if(!transport) {
+          return;
+        }
+
+        if(transportType === 'websocket') {
+          (transport as TcpObfuscated).changeUrl(constructTelegramWebSocketUrl(dcId, connectionType, this.rootScope.premium));
+        } else {
+          (transport as HTTP).changeUrl(constructTelegramHttpUrl(dcId, connectionType));
+        }
+      });
     });
 
     this.rootScope.addEventListener('premium_toggle', (isPremium) => {
