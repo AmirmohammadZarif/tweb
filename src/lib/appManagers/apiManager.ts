@@ -46,6 +46,7 @@ import {MTAuthKey} from '@lib/mtproto/authKey';
  * To not be used in an ApiManager instance as there is no account number attached to it
  */
 import globalRootScope from '@lib/rootScope';
+import {joinDeepPath} from '@helpers/object/setDeepProperty';
 import RepayRequestHandler from '@appManagers/utils/repayRequestHandler';
 
 const PREMIUM_FILE_NETWORKERS_COUNT = 6;
@@ -124,8 +125,15 @@ export class ApiManager extends ApiManagerMethods {
     // WebSocket transports reconnect (changeUrl → forceReconnect); HTTP ones
     // simply fetch the next request from the new URL. Networkers, auth keys
     // and salts are untouched — only the byte pipe moves.
-    this.rootScope.addEventListener('settings_updated', ({key, settings}) => {
-      if(!key.startsWith('settings.mtprotoRelay')) {
+    // Two non-obvious things here, both of which silently no-op if got wrong:
+    // 1. globalRootScope, NOT this.rootScope. Each account's manager set gets its
+    //    own `new RootScope` (createManagers.ts), while appStateManager.setByKey
+    //    dispatches on the imported global singleton — a listener on
+    //    this.rootScope sits on a different bus and never fires.
+    // 2. The key is joined with DEEP_PATH_JOINER ('\x01'), not '.', so it reads
+    //    "settings\x01mtprotoRelay\x01enabled". Compare via joinDeepPath.
+    globalRootScope.addEventListener('settings_updated', ({key, settings}) => {
+      if(!key.startsWith(joinDeepPath('settings', 'mtprotoRelay'))) {
         return;
       }
 
