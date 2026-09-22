@@ -1398,7 +1398,7 @@
 "NotificationsForChannels" = "Notifications for channels";
 "NotificationsStoriesGlobal" = "New Stories";
 "NotificationsStoriesImportant" = "Important Stories";
-"NotificationsStoriesImportantInfo" = "Always on for top 5 contacts.";
+"NotificationsStoriesImportantInfo" = "Always on for top 5 users.";
 "NotificationsStoriesDisplayAuthor" = "Show Sender's Name";
 "ReactionsNotifyMessages" = "Reactions to my Messages";
 "ReactionsNotifyStories" = "Reactions to my Stories";
@@ -2708,13 +2708,13 @@
 "SponsoredMessageAdWhatIsThis" = "what's this?";
 "RevenueSharingAdsAlertSubtitle" = "Telegram Ads are very different from ads on other platforms. Ads such as this one:";
 "RevenueSharingAdsInfo1Title" = "Respect Your Privacy";
-"RevenueSharingAdsInfo1Subtitle" = "Ads on Telegram do not use your personal information and are based on the channel in which you see them.";
+"RevenueSharingAdsInfo1Subtitle" = "We don't use the contents of your private chats or contacts lists for ad targeting or other commercial purposes. ";
 "RevenueSharingAdsInfo2Title" = "Help the Channel Creator";
 "RevenueSharingAdsInfo2Subtitle" = "50% of the revenue from Telegram Ads goes to the owner of the channel where they are displayed.";
 "RevenueSharingAdsInfo3Title" = "Can Be Removed";
 "RevenueSharingAdsInfo3Subtitle" = "You can turn off ads by subscribing to **Telegram Premium**, and Level %1$s channels can remove them for their subscribers.";
 "RevenueSharingAdsInfo4Title" = "Can I Launch an Ad?";
-"RevenueSharingAdsInfo4Subtitle2" = "Anyone can create an ad to display in this channel — with minimal budgets. Check out the **Telegram Ad Platform** for details. %1$s";
+"RevenueSharingAdsInfo4Subtitle2" = "Anyone can post ads on Telegram — with minimal budgets. Check out the **Telegram Ad Platform** for details. %1$s";
 "RevenueSharingAdsAlertButton" = "Understood";
 "ViewReplies_one" = "View %1$d Reply";
 "ViewReplies_other" = "View %1$d Replies";
@@ -4486,7 +4486,7 @@
 "Contacts.PhoneNumber.Placeholder" = "Phone Number";
 "Login.Next" = "Next";
 "Login.ContinueOnLanguage" = "Continue in English";
-"Login.QR.Title" = "Log in to AndroGram";
+"Login.QR.Title" = "Log in by QR Code";
 "Login.QR.Help1" = "Open Telegram on your phone";
 "Login.QR.Help2" = "Go to **Settings** > **Devices** > **Add Device**";
 "Login.QR.Help3" = "Point your phone at this screen to confirm login";
