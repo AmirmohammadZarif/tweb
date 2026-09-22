@@ -38,6 +38,9 @@ type UpdatesState = {
 };
 
 const SYNC_DELAY = 6;
+// Backoff for the initial updates.getState when this account has no stored pts
+// yet. Nothing can be processed until it lands, so it has to keep trying.
+const GET_STATE_RETRY_TIMEOUT = 5000;
 
 class ApiUpdatesManager {
   public updatesState: UpdatesState = {
@@ -461,12 +464,17 @@ class ApiUpdatesManager {
     state.syncLoading = promise;
     !channelId && this.rootScope.dispatchEvent('state_synchronizing');
 
-    promise.then(() => {
+    // ! both arms must dispatch 'state_synchronized'. The UI latches on
+    // ! 'state_synchronizing' (connectionStatus.ts sets updating = true) and only
+    // ! ever clears it on 'state_synchronized' — so a rejected getDifference used
+    // ! to leave every open tab of this account showing "Updating" forever, with
+    // ! no retry to get it out of that state.
+    const onFinish = () => {
       state.syncLoading = null;
       !channelId && this.rootScope.dispatchEvent('state_synchronized');
-    }, () => {
-      state.syncLoading = null;
-    });
+    };
+
+    promise.then(onFinish, onFinish);
   }
 
   public addChannelState(channelId: ChatId, pts: number) {
@@ -712,24 +720,39 @@ class ApiUpdatesManager {
       if(!state || !state.pts || !state.date/*  || !state.seq */) { // seq can be undefined because of updates.differenceTooLong
         this.log('will get new state');
 
+        // ! the rejection arm is not optional. syncLoading gates saveUpdate /
+        // ! processUpdate: while it is truthy every incoming update is parked in
+        // ! pendingSeqUpdates and forceGetDifference() early-returns. attach() is
+        // ! also one-shot (`if(this.attached) return`) and the managers live in the
+        // ! shared worker, so a getState that rejected once left this account
+        // ! permanently frozen — no reload and no account switch could clear it,
+        // ! only closing the last tab so the worker died. Retry instead: we have no
+        // ! pts baseline until this succeeds, so resolving early is not an option.
         this.updatesState.syncLoading = new Promise((resolve) => {
-          this.apiManager.invokeApi('updates.getState', {}, {noErrorBox: true}).then((stateResult) => {
-            this.updatesState.seq = stateResult.seq;
-            this.updatesState.pts = stateResult.pts;
-            this.updatesState.date = stateResult.date;
-            this.saveUpdatesState();
-            // setTimeout(() => {
-            this.updatesState.syncLoading = null;
-            resolve();
-            // rootScope.broadcast('state_synchronized');
-            // }, 1000);
+          const getState = () => {
+            this.apiManager.invokeApi('updates.getState', {}, {noErrorBox: true}).then((stateResult) => {
+              this.updatesState.seq = stateResult.seq;
+              this.updatesState.pts = stateResult.pts;
+              this.updatesState.date = stateResult.date;
+              this.saveUpdatesState();
+              // setTimeout(() => {
+              this.updatesState.syncLoading = null;
+              resolve();
+              // rootScope.broadcast('state_synchronized');
+              // }, 1000);
 
-          // ! for testing
-          // updatesState.seq = 1
-          // updatesState.pts = stateResult.pts - 5000
-          // updatesState.date = 1
-          // getDifference()
-          });
+            // ! for testing
+            // updatesState.seq = 1
+            // updatesState.pts = stateResult.pts - 5000
+            // updatesState.date = 1
+            // getDifference()
+            }, (error) => {
+              this.log.error('updates.getState failed, retrying', error);
+              ctx.setTimeout(getState, GET_STATE_RETRY_TIMEOUT);
+            });
+          };
+
+          getState();
         });
       } else {
         // ! for testing

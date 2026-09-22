@@ -69,6 +69,18 @@ export class SingleInstance extends EventListenerBase<{
     this.listenOtherClients();
     this.reset();
 
+    // ! networkerFactory.akStopped lives in the shared worker, which outlives this
+    // ! document — a reload (and an account switch is a reload) does not clear it.
+    // ! stopAll() is reached from onNewerBuild / onOtherClient and applies to
+    // ! `.all` accounts at once, while the only live startAll() is onMyClient,
+    // ! which needs *another* K tab to post on the interclient channel (a
+    // ! BroadcastChannel never delivers to its own sender, and checkInstance's
+    // ! startAll branch is dead whenever IS_MULTIPLE_TABS_SUPPORTED). So a tab
+    // ! could boot onto a worker whose networkers were still forced-stopped and
+    // ! sit at "Reconnecting" forever — including tabs of accounts that were
+    // ! never deactivated themselves. Clear that on every boot.
+    rootScope.managers.all.networkerFactory.startAll();
+
     idleController.addEventListener('change', this.checkInstance);
     apiManagerProxy.setInterval(this.checkInstance, CHECK_INSTANCE_INTERVAL);
 
@@ -135,6 +147,9 @@ export class SingleInstance extends EventListenerBase<{
   public activateInstance() {
     if(this.deactivated) {
       this.reset();
+      // * same as onMyClient: deactivation stopped the networkers, so reactivating
+      // * the UI without this leaves the tab connected to nothing.
+      rootScope.managers.all.networkerFactory.startAll();
       this.checkInstance(false);
       this.dispatchEvent('activated');
     }
