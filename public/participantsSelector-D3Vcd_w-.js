@@ -1,0 +1,2 @@
+import{aC as t}from"./index-CV7NmJE4.js";import{b8 as a}from"./appDialogsManager-BFhCGJ1C.js";function o(e){const r=t();return{selector:new a({...e,multiSelect:!1,headerSearch:!0,placeholder:"SearchPlaceholder",meAsSaved:!1,onFirstRender:()=>{r.resolve()}}),loadPromise:r}}function n(e){return o({...e,peerType:["channelParticipants"]})}export{o as a,n as c};
+//# sourceMappingURL=participantsSelector-D3Vcd_w-.js.map

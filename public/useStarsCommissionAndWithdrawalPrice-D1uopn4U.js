@@ -1,0 +1,2 @@
+import{eM as u,l as s}from"./index-CV7NmJE4.js";const l=(e,{commissionKey:a="stars_paid_message_commission_permille",withdrawRateKey:r="stars_usd_withdraw_rate_x1000"}={})=>{const{useAppConfig:n}=u(),o=n(),t=s(()=>(+o[a]||0)/1e3),i=s(()=>(+o[r]||0)/1e3),c=s(()=>Math.round(t()*100)),m=s(()=>Math.max(.01*+!!e(),Math.round(t()*i()*e())/100));return{commissionPercents:c,willReceiveDollars:m}};export{l as u};
+//# sourceMappingURL=useStarsCommissionAndWithdrawalPrice-D1uopn4U.js.map

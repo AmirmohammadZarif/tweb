@@ -1,0 +1,2 @@
+const a="/mtproto";let r={enabled:!1,host:""};function i(t){t&&(r={enabled:!!t.enabled,host:c(t.host)})}function u(){return r.enabled}function c(t){return t=(t||"").trim(),t?(t=t.replace(/^[a-z]+:\/\//i,""),t=t.replace(/\/.*$/,""),t.toLowerCase()):""}function s(t,e){const n=self.location.host,o=r.host||n;return`${o!==n||self.location.protocol==="https:"?t:e}://${o}${a}`}function f(t,e,n){return`${s("wss","ws")}/ws/${t}${e}/${n}`}function $(t,e){return`${s("https","http")}/http/${t}/${e}`}export{$ as a,f as c,u as i,c as n,i as s};
+//# sourceMappingURL=relay-Dkr6lyH5.js.map

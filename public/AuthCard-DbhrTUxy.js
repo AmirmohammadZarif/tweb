@@ -1,0 +1,2 @@
+import{i as a,b as l,U as c,g as u,a as i,k as d,t as n}from"./index-CV7NmJE4.js";import{d as m}from"./bootstrapIm-B2eYDuyG.js";const o=n("<div class=input-wrapper>"),p=n("<div>");function g(e){const s=()=>e.inputWrapper!==!1;return(()=>{const t=p();return a(t,()=>e.header,null),a(t,l(c,{get when(){return s()},get fallback(){return e.children},get children(){const r=o();return a(r,()=>e.children),r}}),null),u(()=>i(t,d(m.card,e.class))),t})()}export{g as A};
+//# sourceMappingURL=AuthCard-DbhrTUxy.js.map
