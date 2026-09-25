@@ -76,6 +76,7 @@ import PopupPremium from '@components/popups/premium';
 import showNoForwardsPopup from '@components/popups/noForwards';
 import {showCrmNotesPopup} from '@components/popups/crmNotes';
 import {showCrmContractsPopup} from '@components/popups/crmContracts';
+import showCrmProfileFormPopup from '@components/popups/crmProfileForm';
 import {openCrmTasksTab} from '@lib/crm/createTask';
 
 type ButtonToVerify = {element?: HTMLElement, verify: () => boolean | Promise<boolean>};
@@ -495,6 +496,18 @@ export default class ChatTopbar {
       // whose ticket was closed months ago is exactly who an agent asks about.
       // The panel says "no contracts account" for itself when there is nothing.
       verify: () => !!this.peerId?.isUser()
+    }, {
+      icon: 'user',
+      text: 'Crm.ProfileForm.MenuButton',
+      onClick: () => {
+        showCrmProfileFormPopup({
+          peerId: this.peerId,
+          insert: (text) => this.chat.input.insertQuickReply({text})
+        });
+      },
+      // Like contracts: the profile belongs to the customer, not to a ticket.
+      // Read-only (onboarding) agents cannot issue links, so it is hidden.
+      verify: () => !!this.peerId?.isUser() && !useIsCrmReadOnly()()
     }, {
       icon: 'check',
       text: 'Tasks.Title',
