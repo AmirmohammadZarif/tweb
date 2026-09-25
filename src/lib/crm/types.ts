@@ -90,6 +90,9 @@ export const CRM_ENDPOINTS = {
   contracts: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/contracts`,
   contractPdf: (chatId: string, fileId: number) =>
     `/tickets/by-telegram/${encodeURIComponent(chatId)}/contracts/${fileId}/pdf`,
+  // The customer's andropay.org profile: is it complete, and a timed form link
+  // for the agent to send them. See CrmProfileFormStatus.
+  profileForm: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/profile-form`,
   // Crash reports — tweb ships as static files, so without this a JS crash in an
   // agent's browser leaves no trace on our side. See @lib/debug/crashReporter.
   clientLogs: '/client-logs'
@@ -560,6 +563,47 @@ export type CrmContractsResult = {
   hasAccount: boolean,
   contracts: CrmContract[],
   counts: CrmContractCounts
+};
+
+// ── andropay.org profile form ────────────────────────────────────────────────
+// GET/POST /tickets/by-telegram/{chatId}/profile-form. The CRM checks two
+// places: andropay.org itself (read through its law-api, by the customer's
+// mobile) and the form links it issued. "Complete" in either means there is
+// nothing left to ask the customer for.
+
+export type CrmProfileFormMissingField = {key: string, label: string};
+
+export type CrmProfileFormStatus = {
+  /** False when there is no CRM customer for this chat at all. */
+  hasCustomer: boolean,
+  complete: boolean,
+  andropay: {
+    /** False when the CRM could not ask: integration off, no Iranian mobile
+     * (a Telegram ghost), or andropay.org down. Not the same as incomplete. */
+    checked: boolean,
+    isMember: boolean,
+    complete: boolean,
+    missing: CrmProfileFormMissingField[]
+  },
+  /** The newest form link for this customer, or null if none was ever sent. */
+  crm: null | {
+    id: number,
+    status: 'pending' | 'submitted' | 'completed' | 'revoked' | 'expired',
+    statusLabel: string,
+    expiresAt: string,
+    submittedAt: string | null,
+    requestedBy: string | null
+  },
+  /** A link is out there and still works. */
+  isPending: boolean
+};
+
+export type CrmProfileFormLink = {
+  id: number,
+  url: string,
+  expires_at: string,
+  /** Ready-to-send Persian message with the link, for the composer. */
+  message: string
 };
 
 // Reverb (Pusher protocol) channel + event for live note hand-off, mirroring the

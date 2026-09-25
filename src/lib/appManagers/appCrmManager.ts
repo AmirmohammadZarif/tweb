@@ -40,7 +40,9 @@ import {
   CrmClientLogResult,
   EMPTY_CRM_CONFIG,
   CrmContract,
-  CrmContractsResult
+  CrmContractsResult,
+  CrmProfileFormLink,
+  CrmProfileFormStatus
 } from '@lib/crm/types';
 
 /**
@@ -1040,6 +1042,77 @@ export default class AppCrmManager extends AppManager {
    * must not itself produce an error toast, and above all must not re-enter the
    * global error handler that triggered it.
    */
+  // ── andropay.org profile form ──────────────────────────────────────────────
+
+  /**
+   * Whether this chat's customer still has profile details to give, at
+   * andropay.org or through a form link they already filled in.
+   *
+   * Resolves undefined on failure rather than rejecting, so the panel can say
+   * "could not check" instead of throwing inside a render.
+   */
+  public async getProfileFormStatus(chatId: string): Promise<CrmProfileFormStatus | undefined> {
+    if(!(await this.isConnected()) || !chatId) return undefined;
+
+    try {
+      const result = await this.request<{data: any}>('GET', CRM_ENDPOINTS.profileForm(chatId), {
+        query: {session_telegram_user_id: this.sessionTelegramUserId()}
+      });
+      const data = result?.data;
+      if(!data) return undefined;
+
+      if(!data.has_customer) {
+        return {
+          hasCustomer: false,
+          complete: false,
+          andropay: {checked: false, isMember: false, complete: false, missing: []},
+          crm: null,
+          isPending: false
+        };
+      }
+
+      const org = data.andropay_org || {};
+      const crm = data.crm;
+      return {
+        hasCustomer: true,
+        complete: !!data.complete,
+        andropay: {
+          checked: !!org.checked,
+          isMember: !!org.is_member,
+          complete: !!org.complete,
+          missing: org.missing || []
+        },
+        crm: crm ? {
+          id: crm.id,
+          status: crm.status,
+          statusLabel: crm.status_label,
+          expiresAt: crm.expires_at,
+          submittedAt: crm.submitted_at,
+          requestedBy: crm.requested_by
+        } : null,
+        isPending: !!data.is_pending
+      };
+    } catch(err) {
+      this.log.error('getProfileFormStatus failed', err);
+      return undefined;
+    }
+  }
+
+  /**
+   * Issue a new form link. Revokes any earlier one for the same customer on
+   * the CRM side. Rejects so the popup can show why (409 when the profile is
+   * already complete and $force was not set).
+   */
+  public async issueProfileFormLink(chatId: string, force = false): Promise<CrmProfileFormLink> {
+    const result = await this.request<{data: CrmProfileFormLink}>('POST', CRM_ENDPOINTS.profileForm(chatId), {
+      body: {
+        session_telegram_user_id: this.sessionTelegramUserId(),
+        ...(force ? {force: true} : {})
+      }
+    });
+    return result.data;
+  }
+
   // ── andro.law contracts ────────────────────────────────────────────────────
 
   /**
