@@ -1040,21 +1040,26 @@
 	.toggle-ai-draft {
 		color: var(--primary-color);
 
+		.andropay-mark {
+			width: auto;
+			height: 1.375rem;
+		}
+
 		&.is-loading {
 			pointer-events: none;
-			opacity: .6;
 
-			.tgico {
-				display: inline-block;
-				animation: toggle-ai-draft-spin 1s linear infinite;
+			// The monogram is a play-arrow, so spinning it reads as broken —
+			// it breathes instead while the draft is being generated.
+			.andropay-mark {
+				animation: toggle-ai-draft-pulse 1s ease-in-out infinite;
 			}
 		}
 	}
 }
 
-@keyframes toggle-ai-draft-spin {
-	from { transform: rotate(0deg); }
-	to { transform: rotate(360deg); }
+@keyframes toggle-ai-draft-pulse {
+	0%, 100% { opacity: 1; transform: scale(1); }
+	50% { opacity: .4; transform: scale(.85); }
 }
 
 .input-message-container {

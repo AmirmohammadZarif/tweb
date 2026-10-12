@@ -107,7 +107,7 @@ const colorMap: {
   }
 } = {
   day: {
-    'primary-color': '#3390ec',
+    'primary-color': '#502675',
     'message-out-primary-color': '#5CA853',
     'message-background-color': '#ffffff',
     'surface-color': '#ffffff',
@@ -121,25 +121,25 @@ const colorMap: {
     'body-background-color': '#ffffff',
     'border-color': '#dfe1e5',
     'secondary-color': '#c4c9cc',
-    'link-color': '#00488f',
+    'link-color': '#502675',
     'input-search-background-color': '#ffffff'
   },
   night: {
-    'primary-color': '#8774E1',
-    'message-out-primary-color': '#8774E1',
+    'primary-color': '#A979D2',
+    'message-out-primary-color': '#A979D2',
     'message-background-color': '#212121',
     'surface-color': '#212121',
     'danger-color': '#ff595a',
     'primary-text-color': '#ffffff',
     'secondary-text-color': '#aaaaaa',
-    'saved-color': '#8774E1',
+    'saved-color': '#A979D2',
     'green-color': '#5CC85E',
     // SCSS-side defaults migrated from base.scss .night
     'background-color': '#181818',
     'body-background-color': '#181818',
     'border-color': '#0f0f0f',
     'secondary-color': '#707579',
-    'link-color': '#8774E1', // SCSS resolves to var(--primary-color)
+    'link-color': '#A979D2', // SCSS resolves to var(--primary-color)
     'input-search-background-color': '#181818'
   },
   tinted: {
