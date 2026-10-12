@@ -113,7 +113,17 @@
     }
   }
 
-  &-share {
+  // The profile mount lives inside .search-super, which pins every .checkbox-field
+  // absolutely (the media-selection checkboxes) — keep our toggles in the flow, or
+  // they float over the submit button. And a toggle normally lives in a .row that
+  // takes the click for it (.checkbox-field-toggle is pointer-events: none); ours
+  // stand alone, so the label has to take the click itself.
+  .checkbox-field.checkbox-field-toggle {
+    position: relative !important;
+    pointer-events: auto;
+  }
+
+  &-share.checkbox-field {
     display: flex;
     margin-top: 0.625rem;
   }

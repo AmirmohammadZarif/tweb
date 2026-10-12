@@ -49,6 +49,7 @@ export default function CrmNotesPanel(props: {
   // id of the note currently open for editing, plus its working copy.
   const [editingId, setEditingId] = createSignal<number | undefined>();
   const [editText, setEditText] = createSignal('');
+  let composeTextarea: HTMLTextAreaElement;
 
   const apply = (list: CrmNote[]) => {
     setNotes(sortCrmNotes(list));
@@ -111,6 +112,8 @@ export default function CrmNotesPanel(props: {
       }
     } finally {
       setBusy(false);
+      // `disabled` while saving drops focus — hand it back so the agent can keep typing.
+      composeTextarea?.focus();
     }
   };
 
@@ -311,6 +314,7 @@ export default function CrmNotesPanel(props: {
         <div class="crm-notes-compose">
           <textarea
             class="crm-notes-textarea"
+            ref={composeTextarea}
             rows={3}
             placeholder={I18n.format('Crm.Note.Placeholder', true)}
             value={text()}
