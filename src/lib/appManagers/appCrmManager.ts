@@ -31,6 +31,8 @@ import {
   CrmNoteVisibility,
   CrmTemplate,
   CrmTemplateImage,
+  CrmVoiceTemplate,
+  CrmVoiceTemplateAudio,
   CrmTicketLookupResult,
   CrmTicketRef,
   CrmTicketStatus,
@@ -356,6 +358,28 @@ export default class AppCrmManager extends AppManager {
     } catch(err) {
       this.log.error('getTemplateImages failed', err);
       return [];
+    }
+  }
+
+  public async getVoiceTemplates(): Promise<CrmVoiceTemplate[]> {
+    if(!(await this.isConnected())) return [];
+    try {
+      return this.unwrap(await this.request<{data: CrmVoiceTemplate[]}>('GET', CRM_ENDPOINTS.voiceTemplates));
+    } catch(err) {
+      this.log.error('getVoiceTemplates failed', err);
+      return [];
+    }
+  }
+
+  // The audio bytes of a voice template (base64 data URI), fetched lazily when it
+  // is previewed or sent — same api/mobile CORS reasoning as getTemplateImages.
+  public async getVoiceTemplateAudio(templateId: number): Promise<CrmVoiceTemplateAudio> {
+    if(!(await this.isConnected())) return;
+    try {
+      return this.unwrap(await this.request<{data: CrmVoiceTemplateAudio}>('GET', CRM_ENDPOINTS.voiceTemplateAudio(templateId)));
+    } catch(err) {
+      this.log.error('getVoiceTemplateAudio failed', err);
+      return;
     }
   }
 

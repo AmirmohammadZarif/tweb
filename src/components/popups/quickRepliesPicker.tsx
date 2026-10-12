@@ -1,14 +1,17 @@
 import PopupElement, {createPopup, PopupContext} from '@components/popups/indexTsx';
-import {createMemo, createResource, createSignal, For, Show, untrack, useContext} from 'solid-js';
+import {createMemo, createResource, createSignal, For, onCleanup, Show, untrack, useContext} from 'solid-js';
 import InputField from '@components/inputField';
 import Row from '@components/rowTsx';
 import Scrollable from '@components/scrollable2';
 import classNames from '@helpers/string/classNames';
 import {i18n} from '@lib/langPack';
 import {QuickReply} from '@lib/quickReplies/types';
+import prepareCrmVoiceTemplate from '@lib/crm/voiceTemplate';
+import cancelEvent from '@helpers/dom/cancelEvent';
+import {ButtonIconTsx} from '@components/buttonIconTsx';
 import styles from './quickRepliesPicker.module.scss';
 
-type PickerItem = QuickReply & {source?: 'crm', crmTemplateId?: number, imageCount?: number};
+type PickerItem = QuickReply & {source?: 'crm', crmTemplateId?: number, crmVoiceTemplateId?: number, imageCount?: number};
 
 export default function showQuickRepliesPickerPopup(options: {
   onSelect: (reply: PickerItem) => void
@@ -18,9 +21,10 @@ export default function showQuickRepliesPickerPopup(options: {
     const managers = untrack(() => context.managers);
 
     const [items] = createResource(async(): Promise<PickerItem[]> => {
-      const [local, templates, faqs] = await Promise.all([
+      const [local, templates, voiceTemplates, faqs] = await Promise.all([
         managers.appQuickRepliesManager.getQuickReplies(),
         managers.appCrmManager.getTemplates(),
+        managers.appCrmManager.getVoiceTemplates(),
         managers.appCrmManager.getFaqs()
       ]);
 
@@ -33,6 +37,14 @@ export default function showQuickRepliesPickerPopup(options: {
           source: 'crm' as const,
           crmTemplateId: t.id,
           imageCount: t.image_urls?.length || 0
+        })),
+        ...voiceTemplates.map((t) => ({
+          id: 'crm-v-' + t.id,
+          title: t.name,
+          text: '',
+          date: 0,
+          source: 'crm' as const,
+          crmVoiceTemplateId: t.id
         })),
         ...faqs.map((f) => ({id: 'crm-f-' + f.id, title: f.question, text: f.answer, date: 0, source: 'crm' as const}))
       ];
@@ -63,6 +75,36 @@ export default function showQuickRepliesPickerPopup(options: {
       context.hide();
     };
 
+    // * voice templates get a play/stop button to listen before sending
+    const [playingId, setPlayingId] = createSignal<number>();
+    let audio: HTMLAudioElement;
+    const stopPreview = () => {
+      audio?.pause();
+      audio = undefined;
+      setPlayingId(undefined);
+    };
+    onCleanup(stopPreview);
+
+    const togglePreview = async(e: Event, templateId: number) => {
+      cancelEvent(e);
+      if(playingId() === templateId) {
+        stopPreview();
+        return;
+      }
+
+      stopPreview();
+      setPlayingId(templateId);
+      try {
+        const {objectURL} = await prepareCrmVoiceTemplate(templateId);
+        if(playingId() !== templateId) return;
+        audio = new Audio(objectURL);
+        audio.addEventListener('ended', stopPreview, {once: true});
+        await audio.play();
+      } catch(err) {
+        if(playingId() === templateId) stopPreview();
+      }
+    };
+
     return (
       <>
         <PopupElement.Header>
@@ -79,6 +121,15 @@ export default function showQuickRepliesPickerPopup(options: {
               <For each={filtered()} fallback={<div class={styles.empty}>{i18n('QuickReplies.NoMatches')}</div>}>
                 {(reply) => (
                   <Row clickable={() => select(reply)} class={styles.row}>
+                    <Show when={reply.crmVoiceTemplateId !== undefined}>
+                      <Row.RightContent>
+                        <ButtonIconTsx
+                          class={styles.play}
+                          icon={playingId() === reply.crmVoiceTemplateId ? 'pause' : 'play'}
+                          onClick={(e) => togglePreview(e, reply.crmVoiceTemplateId)}
+                        />
+                      </Row.RightContent>
+                    </Show>
                     <Row.Title>
                       {reply.title}
                       <Show when={reply.source === 'crm'}>
@@ -88,7 +139,7 @@ export default function showQuickRepliesPickerPopup(options: {
                         <span class={styles.images}>{(reply.imageCount > 1 ? reply.imageCount + ' ' : '') + '🖼'}</span>
                       </Show>
                     </Row.Title>
-                    <Row.Subtitle>{reply.text}</Row.Subtitle>
+                    <Row.Subtitle>{reply.crmVoiceTemplateId !== undefined ? i18n('QuickReplies.VoiceMessage') : reply.text}</Row.Subtitle>
                   </Row>
                 )}
               </For>

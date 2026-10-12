@@ -141,6 +141,7 @@ import asyncThrottle from '@helpers/schedulers/asyncThrottle';
 import focusInput from '@helpers/dom/focusInput';
 import showChecklistPopup from '@components/popups/checklist';
 import showQuickRepliesPickerPopup from '@components/popups/quickRepliesPicker';
+import prepareCrmVoiceTemplate from '@lib/crm/voiceTemplate';
 import assumeType from '@helpers/assumeType';
 import {formatFullSentTime} from '@helpers/date';
 import useStars from '@stores/stars';
@@ -1238,6 +1239,7 @@ export default class ChatInput {
           onSelect: (reply) => this.insertQuickReply({
             text: reply.text,
             crmTemplateId: reply.crmTemplateId,
+            crmVoiceTemplateId: reply.crmVoiceTemplateId,
             hasImages: !!reply.imageCount,
             isHelper: false
           })
@@ -3597,13 +3599,24 @@ export default class ChatInput {
   // * CRM template with attached images, the images are fetched lazily, turned into Files and
   // * staged in the send-preview — PopupNewMedia lifts the just-inserted text into the album caption
   // * and clears the input, so the agent reviews text + images together before sending.
+  // * a CRM voice template has no text — it's sent straight away as a voice message.
   public async insertQuickReply(options: {
     text: string,
     crmTemplateId?: number,
+    crmVoiceTemplateId?: number,
     hasImages?: boolean,
     isHelper?: boolean
   }) {
-    const {text, crmTemplateId, hasImages, isHelper} = options;
+    const {text, crmTemplateId, crmVoiceTemplateId, hasImages, isHelper} = options;
+
+    if(crmVoiceTemplateId !== undefined) {
+      // * drop the typed `/query` token, keep whatever else the agent has written
+      if(isHelper) {
+        this.insertAtCaret('', undefined, true);
+      }
+
+      return this.sendCrmVoiceTemplate(crmVoiceTemplateId);
+    }
 
     // * always run for the slash helper (even with empty text) so the typed `/query` token is
     // * cleared — otherwise it would linger and become the album caption for an image-only template
@@ -3639,6 +3652,49 @@ export default class ChatInput {
     // * ignoreInputValue defaults to false → the popup pulls the input text in as the caption
     const popup = new PopupNewMedia(this.chat, files, 'media');
     popup.show(false);
+  }
+
+  private async sendCrmVoiceTemplate(templateId: number) {
+    const isAnyChat = this.chat.peerId.isAnyChat();
+    const flag: ChatRights = 'send_voices';
+    if(isAnyChat && !(await this.chat.canSend(flag))) {
+      toastNew({langPackKey: POSTING_NOT_ALLOWED_MAP[flag]});
+      return;
+    }
+
+    if(await this.showSlowModeTooltipIfNeeded()) {
+      return;
+    }
+
+    const middleware = this.middlewareHelper.get();
+    let prepared: Awaited<ReturnType<typeof prepareCrmVoiceTemplate>>;
+    try {
+      prepared = await prepareCrmVoiceTemplate(templateId);
+    } catch(err) {
+      if(middleware()) toastNew({langPackKey: 'QuickReplies.VoiceLoadError'});
+      return;
+    }
+
+    if(!middleware()) {
+      return;
+    }
+
+    const sendingParams = this.chat.getMessageSendingParams();
+    const preparedPaymentResult = await this.paidMessageInterceptor.prepareStarsForPayment(1);
+    if(preparedPaymentResult === PAYMENT_REJECTED || !middleware()) return;
+    sendingParams.confirmedPaymentResult = preparedPaymentResult;
+
+    this.managers.appMessagesManager.sendFile({
+      ...sendingParams,
+      file: prepared.file,
+      isVoiceMessage: prepared.isVoice,
+      isMedia: true,
+      duration: prepared.duration,
+      waveform: prepared.waveform,
+      objectURL: prepared.objectURL
+    });
+
+    this.onMessageSent(false, true);
   }
 
   public onEmojiSelected = (emoji: ReturnType<typeof getEmojiFromElement>, autocomplete: boolean, replaceText?: string) => {
