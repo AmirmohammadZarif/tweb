@@ -10,11 +10,17 @@
   --popup-min-height: var(--popup-height);
   --popup-max-height: auto;
   --popup-border-radius: 2.5rem;
+  --popup-background-color: var(--background-color);
 
   // --popup-footer-padding: #{$popup-footer-padding};
   // --popup-footer-button-height: #{$popup-footer-button-size};
   --popup-footer-padding: #{$popup-footer-abitlarger-padding};
   --popup-footer-button-height: #{$popup-footer-abitlarger-button-size};
+  // A footer with one button in it, which is what every popup in the app has today. Two things
+  // read it: the height an empty footer still holds (`forward` shows its footer before there is
+  // a button to put in it), and the room a floating footer asks of the content it covers.
+  // Anything more in a footer — a second button, a caption — makes it taller, and CSS cannot
+  // measure that: a popup that floats such a footer reserves the difference itself.
   --popup-footer-height: calc(var(--popup-footer-padding) * 2 + var(--popup-footer-button-height));
   --popup-footer-gradient-start: 50%;
 
@@ -81,7 +87,7 @@
     --translateX: 0;
     position: relative;
     border-radius: var(--popup-border-radius);
-    background-color: var(--background-color);
+    background-color: var(--popup-background-color);
     transform: translate3d(var(--translateX), 3rem, 0);
     backface-visibility: hidden;
     transition: transform var(--popup-transition-time) var(--popup-transition-function);
@@ -123,10 +129,6 @@
 
   &-centerer {
     margin: auto;
-  }
-
-  &:not(.old) &-close {
-    --secondary-text-color: var(--primary-text-color);
   }
 
   &-close {
@@ -184,7 +186,6 @@
 
     .btn-icon {
       flex: 0 0 auto;
-      color: var(--primary-text-color);
     }
   }
 
@@ -207,12 +208,81 @@
     // }
   }
 
+  // The scroll is the container's own flex child — a scroll is absolutely positioned by default.
+  #{&}-container > #{&}-scrollable {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  // The body inside a scroll is sized by its content — and fills the scrollport when there is
+  // less of it than that. It clips nothing: the shadows the cards paint below themselves are
+  // the scroll's business, not the body's.
+  #{&}-scrollable > #{&}-body {
+    // `min-height` fills the scrollport where the scroll lays out as a block, `flex` where a
+    // popup has made it a column — and never shrinks below what the body actually holds
+    min-height: 100%;
+    flex: 1 0 auto;
+    overflow: visible;
+  }
+
+  // The last card ends flush with the scroll, so its shadow would be cut off at that edge. The
+  // clip box reaches into the footer's padding just far enough to keep it, and the negative
+  // margin hands those pixels straight back — the footer, and everything in it, stays put.
+  // Only against a footer that is right below it in the flow: the pixels have to land in
+  // something that can spare them, and a floating footer is not part of that column at all.
+  // The content's own z-indexes stay inside the scroll: a field's label (2) would otherwise paint
+  // over the footer (1) where the bleed puts it behind the footer's edge.
+  &-scrollable:has(+ #{&}-footer-shaded) {
+    padding-bottom: $popup-scroll-bleed;
+    margin-bottom: -$popup-scroll-bleed;
+    isolation: isolate;
+  }
+
+  // A floating footer is painted over the end of the scroll. The browser does
+  // not know that: tabbing to a row down there scrolls it only just inside the
+  // box, which parks it behind the footer with its focus ring out of sight.
+  // This tells the scroll where its usable edge actually is.
+  :where(.a11y) &-container:has(> #{&}-footer-floating) .scrollable-y {
+    scroll-padding-bottom: var(--popup-footer-height);
+  }
+
+  // The flow footer draws the line the scroll used to: it lands on the junction itself rather
+  // than inside the bleed, and it is there only while content actually runs behind that edge.
+  #{&}-footer-shaded {
+    // the scroll is positioned, so the footer has to be as well to paint over the bleed
+    position: relative;
+    z-index: 1;
+    border-top: 1px solid transparent;
+    background-color: transparent;
+
+    @include animation-level(2) {
+      transition: background-color var(--transition-standard-in), border-top-color var(--transition-standard-in);
+    }
+
+    &:not(.scrolled-end) {
+      border-top-color: var(--border-color);
+      background-color: var(--popup-background-color);
+    }
+  }
+
+  // A section's trailing gap is the distance to the *next* section; after the last one the
+  // footer's own padding is that distance, so the content stops there.
+  &-body:has(+ #{&}-footer),
+  &-scrollable:has(+ #{&}-footer) {
+    .sidebar-left-section-container:last-child {
+      padding-bottom: 0;
+    }
+  }
+
   &-footer {
     flex: 0 0 auto;
     padding: var(--popup-footer-padding);
+    // a footer with nothing in it yet still stands a button tall
     min-height: var(--popup-footer-height);
 
     &-placeholder {
+      // the room a floating footer takes out of the content behind it
       height: var(--popup-footer-height);
     }
 
@@ -251,7 +321,7 @@
       inset-inline: 0;
       background: linear-gradient(
         0deg,
-        var(--background-color) var(--popup-footer-gradient-start),
+        var(--popup-background-color) var(--popup-footer-gradient-start),
         transparent 100%
       );
       z-index: 1;
@@ -293,14 +363,14 @@
     }
 
     &-icon {
+      font-size: 1.25rem;
+
       &.left {
-        font-size: 1.25rem;
         margin-inline: -.1875rem .1875rem;
       }
 
       &.right {
-        font-size: 1.5rem;
-        margin-inline-start: .625rem;
+        margin-inline: .1875rem -.1875rem;
       }
     }
   }
@@ -326,13 +396,25 @@
   }
 
   &.old {
-    --background-color: var(--surface-color);
+    --popup-background-color: var(--surface-color);
+  }
+}
 
-    .popup-header {
-      .btn-icon {
-        color: var(--secondary-text-color);
-      }
-    }
+// A movable panel (the call popups) squares off a corner pushed into the window's own corner —
+// `--movable-round-*` is 0 there (movableElement.ts). No more specific than the container's own
+// radius, so a full-screen or bottom-sheet panel still squares all of them.
+:where(.popup.movable-element) > .popup-container {
+  border-radius:
+    calc(var(--popup-border-radius) * var(--movable-round-tl, 1))
+    calc(var(--popup-border-radius) * var(--movable-round-tr, 1))
+    calc(var(--popup-border-radius) * var(--movable-round-br, 1))
+    calc(var(--popup-border-radius) * var(--movable-round-bl, 1));
+  transition:
+    transform var(--popup-transition-time) var(--popup-transition-function),
+    border-radius var(--transition-standard-in);
+
+  body.animation-level-0 & {
+    transition: none;
   }
 }
 

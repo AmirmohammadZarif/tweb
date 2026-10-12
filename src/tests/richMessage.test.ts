@@ -1,5 +1,6 @@
 import {PageBlock, RichMessage, RichText} from '@layer';
-import {flattenRichMessageSummary, richMessageToPage} from '@lib/richMessage';
+import wrapTelegramRichText from '@lib/richTextProcessor/wrapTelegramRichText';
+import {flattenRichMessageContent, flattenRichMessageSummary, isRichMessageFullWidth, richMessageToPage} from '@lib/richMessage';
 
 const text = (value: string): RichText => ({_: 'textPlain', text: value});
 
@@ -28,6 +29,20 @@ describe('richMessageToPage', () => {
     expect(page.pFlags.rtl).toBe(true);
     expect(page.pFlags.part).toBe(true);
     expect(page.views).toBe(0);
+  });
+
+  test('survives a revision that carries no flags at all', () => {
+    // Streamed drafts render every revision the sender pushes, so this runs on partial data;
+    // a throw here happens inside renderMessage and costs the whole bubble.
+    const rich = {_: 'richMessage', blocks: []} as unknown as RichMessage;
+
+    const page = richMessageToPage(rich);
+
+    expect(page.pFlags.rtl).toBeUndefined();
+    expect(page.pFlags.part).toBeUndefined();
+    expect(page.blocks).toEqual([]);
+    expect(page.photos).toEqual([]);
+    expect(page.documents).toEqual([]);
   });
 });
 
@@ -89,7 +104,7 @@ describe('flattenRichMessageSummary', () => {
 
   test('flattens quotes, details, tables and math', () => {
     const summary = flattenRichMessageSummary(richMessage([
-      {_: 'pageBlockBlockquote', text: text('quote'), caption: text('author')},
+      {_: 'pageBlockBlockquote', pFlags: {}, text: text('quote'), caption: text('author')},
       {
         _: 'pageBlockDetails',
         pFlags: {},
@@ -133,6 +148,115 @@ describe('flattenRichMessageSummary', () => {
     expect(summary.text).toBe('caption\nVideo');
   });
 
+  test('content-only flattening keeps real captions and excludes synthetic media and unsupported labels', () => {
+    const rich = richMessage([
+      {
+        _: 'pageBlockPhoto',
+        pFlags: {},
+        photo_id: 1,
+        caption: {_: 'pageCaption', text: {_: 'textEmpty'}, credit: {_: 'textEmpty'}}
+      },
+      {
+        _: 'pageBlockVideo',
+        pFlags: {},
+        video_id: 2,
+        caption: {_: 'pageCaption', text: text('real caption'), credit: {_: 'textEmpty'}}
+      },
+      {_: 'pageBlockUnsupported'}
+    ]);
+
+    expect(flattenRichMessageSummary(rich).text).toBe('Photo\nreal caption\nUnsupported block');
+    expect(flattenRichMessageContent(rich).text).toBe('real caption');
+  });
+
+  test('content-only flattening keeps caption credits and nested media text without expanding summaries', () => {
+    const rich = richMessage([{
+      _: 'pageBlockSlideshow',
+      caption: {
+        _: 'pageCaption',
+        text: text('outer caption'),
+        credit: text('outer credit')
+      },
+      items: [{
+        _: 'pageBlockPhoto',
+        pFlags: {},
+        photo_id: 1,
+        caption: {
+          _: 'pageCaption',
+          text: text('nested caption'),
+          credit: text('nested credit')
+        }
+      }]
+    }]);
+
+    expect(flattenRichMessageSummary(rich).text).toBe('outer caption');
+    expect(flattenRichMessageContent(rich).text).toBe(
+      'outer caption\nouter credit\nnested caption\nnested credit'
+    );
+  });
+
+  test('content-only flattening includes embed blocks and author-date text', () => {
+    const rich = richMessage([{
+      _: 'pageBlockEmbedPost',
+      url: '',
+      webpage_id: 1,
+      author_photo_id: 0,
+      author: 'Post author',
+      date: 1_000,
+      caption: {
+        _: 'pageCaption',
+        text: text('embed caption'),
+        credit: text('embed credit')
+      },
+      blocks: [{_: 'pageBlockParagraph', text: text('embedded body')}]
+    }, {
+      _: 'pageBlockAuthorDate',
+      author: text('Article author'),
+      published_date: 1_000
+    }]);
+
+    expect(flattenRichMessageSummary(rich).text).toBe(
+      'embed caption\nArticle author'
+    );
+    expect(flattenRichMessageContent(rich).text).toBe(
+      'embed caption\nembed credit\nPost author\nembedded body\nArticle author'
+    );
+  });
+
+  test('content-only flattening includes every visible metadata label', () => {
+    const rich = richMessage([{
+      _: 'pageBlockChannel',
+      channel: {_: 'channel', id: 1, pFlags: {}, title: 'Visible channel'} as any
+    }, {
+      _: 'pageBlockRelatedArticles',
+      title: text('Related'),
+      articles: [{
+        _: 'pageRelatedArticle',
+        url: 'https://example.com',
+        webpage_id: 1,
+        title: 'Article title',
+        description: 'Article description',
+        author: 'Article author',
+        published_date: 0
+      }]
+    }, {
+      _: 'inputPageBlockMap',
+      geo: {_: 'inputGeoPointEmpty'},
+      zoom: 1,
+      w: 1,
+      h: 1,
+      caption: {
+        _: 'pageCaption',
+        text: text('Map caption'),
+        credit: text('Map credit')
+      }
+    }]);
+
+    expect(flattenRichMessageContent(rich).text).toBe(
+      'Visible channel\nRelated\nArticle title\nArticle description\nArticle author\nMap caption\nMap credit'
+    );
+  });
+
   test('keeps RTL as a page flag and tolerates unknown future blocks', () => {
     const rich = richMessage([
       {_: 'pageBlockFuture', value: 1} as any
@@ -140,6 +264,21 @@ describe('flattenRichMessageSummary', () => {
 
     expect(richMessageToPage(rich).pFlags.rtl).toBe(true);
     expect(flattenRichMessageSummary(rich).text).toBe('Unsupported block: pageBlockFuture');
+  });
+
+  test('renders the updated side of layer 228 text diffs', () => {
+    const summary = flattenRichMessageSummary(richMessage([
+      {
+        _: 'pageBlockParagraph',
+        text: {
+          _: 'textDiff',
+          text: text('new'),
+          old_text: text('old')
+        }
+      }
+    ]));
+
+    expect(summary.text).toBe('new');
   });
 
   test('decodes inline textMath to source and keeps following entities aligned', () => {
@@ -169,28 +308,78 @@ describe('flattenRichMessageSummary', () => {
     });
   });
 
-  test('truncates without shifting entities when the text has leading whitespace', () => {
-    const summary = flattenRichMessageSummary(richMessage([
-      {
-        _: 'pageBlockParagraph',
+  test('resizes entities that span decoded inline math', () => {
+    const summary = flattenRichMessageSummary(richMessage([{
+      _: 'pageBlockParagraph',
+      text: {
+        _: 'textBold',
         text: {
           _: 'textConcat',
           texts: [
-            text(' '.repeat(3)),
-            {_: 'textBold', text: text('bold')},
-            text('x'.repeat(200))
+            text('before '),
+            {_: 'textMath', source: 'x'} as RichText,
+            text(' after')
           ]
         }
       }
-    ]), 100);
+    }]));
 
-    // Leading spaces must NOT be trimmed (that would shift the bold entity); the bold stays at 3.
-    expect(summary.text.startsWith('   bold')).toBe(true);
-    expect(summary.text.length).toBe(103); // 100 chars + '...'
+    expect(summary.text).toBe('before x after');
     expect(summary.entities).toContainEqual({
       _: 'messageEntityBold',
-      offset: 3,
-      length: 4
+      offset: 0,
+      length: summary.text.length
     });
+  });
+});
+
+describe('layer 229 rich text', () => {
+  test('shows the label of a page button until pages can draw real buttons', () => {
+    const button: RichText = {
+      _: 'textButton',
+      text: {_: 'textConcat', texts: [text('Open '), {_: 'textBold', text: text('now')}]},
+      type: {_: 'inlineButtonTypeUrl', url: 'https://example.com/'}
+    } as RichText;
+
+    const wrapped = wrapTelegramRichText(button);
+    expect(wrapped.text).toBe('Open now');
+    // the inner formatting survives; only the button chrome is dropped
+    expect(wrapped.entities.some((entity) => entity._ === 'messageEntityBold')).toBe(true);
+  });
+});
+
+describe('isRichMessageFullWidth', () => {
+  const paragraph: PageBlock = {_: 'pageBlockParagraph', text: text('a line')};
+  const table = {_: 'pageBlockTable', pFlags: {}, title: {_: 'textEmpty'}, rows: []} as PageBlock;
+  const buttonRow = {_: 'pageBlockButtonRow', pFlags: {}, buttons: []} as PageBlock;
+
+  test('text takes the width of its lines', () => {
+    expect(isRichMessageFullWidth([
+      paragraph,
+      {_: 'pageBlockHeading1', text: text('Heading')},
+      {_: 'pageBlockBlockquote', pFlags: {}, text: text('quote'), caption: {_: 'textEmpty'}},
+      {_: 'pageBlockPreformatted', text: text('code'), language: ''},
+      {_: 'pageBlockMath', source: 'x'},
+      {_: 'pageBlockDivider'}
+    ])).toBe(false);
+  });
+
+  test('a table, a row of buttons, details, a pullquote and media take the whole width', () => {
+    const blocks = [
+      table,
+      buttonRow,
+      {_: 'pageBlockDetails', pFlags: {}, blocks: [paragraph], title: text('More')},
+      {_: 'pageBlockPullquote', text: text('pull'), caption: {_: 'textEmpty'}},
+      {_: 'pageBlockPhoto', photo_id: '1', caption: {_: 'pageCaption', text: {_: 'textEmpty'}, credit: {_: 'textEmpty'}}}
+    ] as PageBlock[];
+    blocks.forEach((block) => expect(isRichMessageFullWidth([paragraph, block])).toBe(true));
+  });
+
+  test('a quote or a list is as wide as what is inside it', () => {
+    expect(isRichMessageFullWidth([{_: 'pageBlockBlockquoteBlocks', blocks: [paragraph], caption: {_: 'textEmpty'}}])).toBe(false);
+    expect(isRichMessageFullWidth([{_: 'pageBlockBlockquoteBlocks', blocks: [table], caption: {_: 'textEmpty'}}])).toBe(true);
+    expect(isRichMessageFullWidth([{_: 'pageBlockList', items: [{_: 'pageListItemText', pFlags: {}, text: text('item')}]} as PageBlock])).toBe(false);
+    expect(isRichMessageFullWidth([{_: 'pageBlockList', items: [{_: 'pageListItemBlocks', pFlags: {}, blocks: [buttonRow]}]} as PageBlock])).toBe(true);
+    expect(isRichMessageFullWidth([{_: 'pageBlockOrderedList', pFlags: {}, items: [{_: 'pageListOrderedItemBlocks', pFlags: {}, num: '1', blocks: [table]}]} as PageBlock])).toBe(true);
   });
 });

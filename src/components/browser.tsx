@@ -127,7 +127,7 @@ function BrowserHeaderTab(props: {
       }}
       onClick={() => actions.select(props.page)}
     >
-      <BrowserHeaderButton class={styles.BrowserHeaderTabIcon}>
+      <BrowserHeaderButton class={styles.BrowserHeaderTabIcon} aria-label={props.page.title}>
         <span class={styles.BrowserHeaderTabIconInner}>{props.page.icon}</span>
         <IconTsx
           icon="more"
@@ -237,7 +237,7 @@ function BrowserHeader(props: {
     } else if(pages.length === 2) {
       return i18n('MiniApps.Collapsed.Two', wrapTitles(pages.slice(0, 2)));
     } else {
-      return i18n('MiniApps.Collapsed.Many', [...wrapTitles([pages[0]]), pages.length - 1]);
+      return i18n('MiniApps.Collapsed.Many', [pages.length - 1, ...wrapTitles([pages[0]])]);
     }
   });
 
@@ -245,6 +245,7 @@ function BrowserHeader(props: {
   return (
     <div class={styles.BrowserHeader}>
       <BrowserHeaderButton
+        aria-label={I18n.format(needBackButton() ? 'AccDescr.Back' : 'Close', true)}
         onClick={() => {
           if(needBackButton()) {
             state.page.onBackClick();
@@ -287,6 +288,7 @@ function BrowserHeader(props: {
           </Animated>
           <BrowserHeaderButton
             class={classNames(styles.BrowserHeaderTabIcon, styles.BrowserHeaderNewButton)}
+            aria-label={I18n.format('MiniApps.OpenApp', true)}
             onClick={() => openCatalogueInAppBrowser()}
           >
             <span class={styles.BrowserHeaderTabIconInner}><IconTsx icon="plus" /></span>
@@ -302,6 +304,7 @@ function BrowserHeader(props: {
       <Show when={state.canCollapse}>
         <BrowserHeaderButton
           icon={state.collapsed ? 'app_expand' : 'app_shrink'}
+          aria-label={I18n.format(state.collapsed ? 'InAppBrowser.Restore' : 'InAppBrowser.Minimize', true)}
           onClick={() => actions.toggleCollapsed()}
         />
       </Show>
@@ -641,6 +644,11 @@ export function openInAppBrowser(page?: BrowserPageProps) {
   });
 }
 
+/** Takes the in-app browser down with every page in it, the way its own close button does. */
+export function closeInAppBrowser() {
+  lastContext?.[1].destroy();
+}
+
 export async function openWebAppInAppBrowser(options: WebAppLaunchOptions) {
   if(lastContext && options.cacheKey) {
     const page = lastContext[0].pages.find((page) => page.cacheKey === options.cacheKey);
@@ -663,6 +671,12 @@ export async function openWebAppInAppBrowser(options: WebAppLaunchOptions) {
   });
 
   const title = await webApp.getTitle(true);
+  if(destroy()) {
+    webApp.destroy();
+    options.onClose?.();
+    return;
+  }
+
   webApp.init(() => deferred);
 
   const middlewareHelper = getMiddleware();
@@ -672,6 +686,12 @@ export async function openWebAppInAppBrowser(options: WebAppLaunchOptions) {
     middleware: middlewareHelper.get()
   });
   await avatar.readyThumbPromise;
+  if(destroy()) {
+    middlewareHelper.destroy();
+    webApp.destroy();
+    options.onClose?.();
+    return;
+  }
 
   return createRoot((dispose) => {
     const initialState: BrowserPageProps = {
@@ -688,7 +708,10 @@ export async function openWebAppInAppBrowser(options: WebAppLaunchOptions) {
       cacheKey: webApp.cacheKey
     };
 
-    onCleanup(() => webApp.destroy());
+    onCleanup(() => {
+      webApp.destroy();
+      options.onClose?.();
+    });
 
     createEffect(() => {
       if(destroy()) {
@@ -935,7 +958,7 @@ export async function openCatalogueInAppBrowser() {
       icon: IconTsx({icon: 'plus'}),
       dispose,
       content: (
-        <Scrollable class={styles.BrowserCatalogueScrollable}>
+        <Scrollable>
           <div
             class={styles.BrowserCatalogue}
             onClick={(e) => {
@@ -1169,7 +1192,7 @@ export function openInstantViewInAppBrowser({
         },
         verify: () => !!url
       }],
-      icon: <IconTsx icon="boostcircle" />,
+      icon: <IconTsx icon="boostcircle_filled" />,
       dispose,
       content: (
         <Show when={pageResource()}>

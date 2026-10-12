@@ -25,6 +25,9 @@ const [crmUserId, setCrmUserId] = createRoot(() => createSignal<number | undefin
 const [requireSensitiveApproval, setRequireSensitiveApproval] = createRoot(() => createSignal(true));
 
 const refresh = () => {
+  // no managers yet (unit tests that import this store): the flags stay at their
+  // fail-closed defaults
+  if(!rootScope.managers) return;
   rootScope.managers.appCrmManager.getConfig().then((config) => {
     const loggedIn = !!(config.enabled && config.baseUrl && config.token);
     setIsCrmLoggedIn(loggedIn);

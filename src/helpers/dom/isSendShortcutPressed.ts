@@ -30,3 +30,30 @@ export default function isSendShortcutPressed(e: KeyboardEvent) {
 
   return false;
 }
+
+export function isNewLineShortcutPressed(e: KeyboardEvent) {
+  if(e.key !== 'Enter' || IS_MOBILE || e.isComposing || e.altKey) return false;
+
+  const [appSettings] = useAppSettings();
+  if(appSettings.sendShortcut === 'enter') {
+    return e.shiftKey && !e.ctrlKey && !e.metaKey;
+  }
+
+  return !e.shiftKey && !e.ctrlKey && !e.metaKey;
+}
+
+const SEND_SHORTCUT_LEFT = Symbol('sendShortcutLeft');
+type LeftSendShortcutEvent = KeyboardEvent & {[SEND_SHORTCUT_LEFT]?: true};
+
+/**
+ * A message field whose popup sends on the shortcut keeps its editor from breaking the line on it,
+ * which prevents the event's default — so it marks the event for the popup to still send on
+ * (`PopupElement`'s confirm-on-Enter) rather than read it as handled by someone else.
+ */
+export function leaveSendShortcut(e: KeyboardEvent) {
+  (e as LeftSendShortcutEvent)[SEND_SHORTCUT_LEFT] = true;
+}
+
+export function isSendShortcutLeft(e: KeyboardEvent) {
+  return !!(e as LeftSendShortcutEvent)[SEND_SHORTCUT_LEFT];
+}

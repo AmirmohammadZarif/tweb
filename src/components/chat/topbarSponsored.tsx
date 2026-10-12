@@ -1,4 +1,5 @@
 import {Accessor, createEffect, createSignal, on, Show} from 'solid-js';
+import Modes from '@config/modes';
 import {AppManagers} from '@lib/managers';
 import {NULL_PEER_ID} from '@appManagers/constants';
 import Chat from '@components/chat/chat';
@@ -13,7 +14,7 @@ import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
 import appImManager from '@lib/appImManager';
 import PhotoTsx from '@components/wrappers/photoTsx';
 import {MyPhoto} from '@appManagers/appPhotosManager';
-import PopupPremium from '@components/popups/premium';
+import showPremiumPopup from '@components/popups/premium';
 import createContextMenu from '@helpers/dom/createContextMenu';
 import {copyTextToClipboard} from '@helpers/clipboard';
 import {getSponsoredMessageButtons} from '@components/chat/contextMenu';
@@ -22,6 +23,8 @@ import createMiddleware from '@helpers/solid/createMiddleware';
 import Button from '@components/buttonTsx';
 import RippleElement from '@components/rippleElement';
 import {createTopbarPlate, TopbarPlateController} from '@components/chat/topbarPlate';
+import I18n from '@lib/langPack';
+import A11yButton from '@components/a11yButton';
 
 export type ChatSponsoredPlate = TopbarPlateController & {
   setPeerId: (peerId: PeerId) => void
@@ -95,11 +98,15 @@ function SponsoredPlateBody(props: {
           </div>
         </Show>
         <div class={/* @once */ classNames(styles.content, 'disable-hover')}>
-          <div class="text-bold">
+          {/* a native button only with the keyboard layer: it is inline-block, keeps its own line height and takes the focus on click */}
+          <A11yButton
+            class="text-bold"
+            style={Modes.a11y ? {color: 'inherit', 'text-align': 'inherit'} : undefined}
+          >
             <I18nTsx class="primary" key="SponsoredMessageAd" />
             {' '}
             {wrapEmojiText(message().title)}
-          </div>
+          </A11yButton>
           <div class="pre-wrap">
             {wrapRichText(message().message, {entities: message().entities})}
           </div>
@@ -107,9 +114,10 @@ function SponsoredPlateBody(props: {
       </RippleElement>
       <Button.Icon
         icon="close"
+        aria-label={I18n.format('Premium.Boarding.NoAds.Action', true)}
         onClick={(e) => {
           e.stopPropagation();
-          PopupPremium.show({feature: 'no_ads'});
+          showPremiumPopup({feature: 'no_ads'});
         }}
       />
     </Show>

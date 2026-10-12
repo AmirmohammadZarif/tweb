@@ -1,6 +1,6 @@
 import forEachReverse from '@helpers/array/forEachReverse';
-import throttle from '@helpers/schedulers/throttle';
-import {GroupCallConnectionType, GroupCallId, JoinGroupCallJsonPayload} from '@appManagers/appGroupCallsManager';
+import createSerializedQueue from '@helpers/createSerializedQueue';
+import {GroupCallConnectionType, JoinGroupCallJsonPayload} from '@appManagers/appGroupCallsManager';
 import {AppManagers} from '@lib/managers';
 import rootScope from '@lib/rootScope';
 import CallConnectionInstanceBase, {CallConnectionInstanceOptions} from '@lib/calls/callConnectionInstanceBase';
@@ -8,7 +8,15 @@ import GroupCallInstance from '@lib/calls/groupCallInstance';
 import filterServerCodecs from '@lib/calls/helpers/filterServerCodecs';
 import fixLocalOffer from '@lib/calls/helpers/fixLocalOffer';
 import processMediaSection from '@lib/calls/helpers/processMediaSection';
+import {getUnsafeConnectionDataReason} from '@lib/calls/helpers/sdpSafety';
+import sameInputGroupCall from '@lib/calls/helpers/sameInputGroupCall';
 import senderKind from '@lib/calls/helpers/senderKind';
+import {
+  applyVideoSendParameters,
+  getVideoSimulcastLayerCount,
+  SenderVideoConstraint,
+  VideoSendContent
+} from '@lib/calls/helpers/videoSendParameters';
 import {E2E_MAIN_CHANNEL_ID, E2E_SCREENCAST_CHANNEL_ID} from '@lib/calls/constants';
 import {ConferenceEntry} from '@lib/calls/localConferenceDescription';
 import SDP from '@lib/calls/sdp';
@@ -16,6 +24,24 @@ import SDPMediaSection from '@lib/calls/sdp/mediaSection';
 import {WebRTCLineType} from '@lib/calls/sdpBuilder';
 import {UpdateGroupCallConnectionData} from '@lib/calls/types';
 import {InputGroupCall} from '@layer';
+
+// The server decides how many video participants it announces, so what we ask
+// it to forward must not scale with that: no more than this many endpoints get
+// a non-zero constraint, the pinned one first.
+const MAX_REQUESTED_VIDEO_ENDPOINTS = 16;
+// Receive tiers, as Telegram iOS requests them (VideoChatParticipantsComponent):
+// the expanded/pinned video at full quality while every other tile shrinks to a
+// thumbnail, and medium for everyone when nothing is pinned. The pinned one is
+// the only endpoint "on stage", like tgcalls (maybeUpdateRemoteVideoConstraints
+// puts only full-quality channels there).
+const PINNED_VIDEO_MAX_HEIGHT = 720;
+const THUMBNAIL_VIDEO_MAX_HEIGHT = 180;
+const GRID_VIDEO_MAX_HEIGHT = 360;
+const MIN_VIDEO_HEIGHT = 180;
+// Coalesces a burst of pin/tile changes into one ReceiverVideoConstraints
+// message; the periodic resend stays as a safety net.
+const REMOTE_VIDEO_CONSTRAINTS_DEBOUNCE_MS = 100;
+const REMOTE_VIDEO_CONSTRAINTS_REFRESH_MS = 5000;
 
 export default class GroupCallConnectionInstance extends CallConnectionInstanceBase {
   private groupCall: GroupCallInstance;
@@ -31,12 +57,19 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
     // conference iff BOTH are present.
     e2ePublicKey?: Uint8Array,
     e2eBlock?: Uint8Array,
+    // Fresh conference starts submit the same key/block/SDP atomically through
+    // phone.createConferenceCall instead of creating an empty call first.
+    e2eCreateConference?: boolean,
     // Override the default `inputGroupCall(id, access_hash)` derived from the
     // GroupCallInstance id. Needed for invite-link / invite-message joins
     // where the joinee doesn't yet have a personal access_hash — they pass
     // `inputGroupCallSlug` or `inputGroupCallInviteMessage` and the server
     // echoes back the real id+access_hash in the join response.
     e2eCallInput?: InputGroupCall,
+    // Canonical identity obtained while previewing a slug/invite-message. The
+    // original e2eCallInput remains the authorization used by fetch/join; this
+    // value is only the identity the response is allowed to promote to.
+    e2eExpectedCallInput?: InputGroupCall.inputGroupCall,
     // Called when `phone.joinGroupCall` fails with CONF_WRITE_CHAIN_INVALID
     // (the chain advanced between our fetch + submit). Should re-fetch the
     // chain head and return a freshly-built self-add block. WebRTC state
@@ -44,14 +77,34 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
     // e2e block and the resulting `phone.joinGroupCall` request change.
     // Matches tdlib GroupCallManager.cpp:4565-4568 try_join_group_call.
     e2eRebuildBlock?: () => Promise<Uint8Array>,
+    // Completes the worker-local half of a rebuilt join only after the server
+    // accepted the exact block returned by e2eRebuildBlock. Kept separate from
+    // rebuilding so a rejected proposal can never become the worker's anchor.
+    e2eCommitRebuiltBlock?: () => Promise<void>,
+    // Opens polling, roster reconciliation and verification broadcasts only
+    // after join success, optional reanchor and invite-id promotion.
+    e2eActivate?: () => Promise<void>,
   } | {
     type: Extract<GroupCallConnectionType, 'presentation'>,
   };
 
   private updateConstraintsInterval: number;
-  public negotiateThrottled: () => void;
+  private updateConstraintsTimeout: number;
+  private negotiationRequested = false;
+  private negotiationQueue: Promise<void>;
+  // The SFU's request for our outgoing camera height (SenderVideoConstraints).
+  private senderVideoConstraint = new SenderVideoConstraint(() => {
+    void this.updateVideoSendParameters();
+  });
+  // setParameters needs the result of the latest getParameters, so applying
+  // two configurations at once would make the second one fail.
+  private videoSendParametersQueue = createSerializedQueue();
 
   private managers: AppManagers;
+  /** True once phone.joinGroupCall has accepted this media source server-side. */
+  public joinAccepted = false;
+  /** Exact call reference accepted by phone.joinGroupCall, retained for rollback. */
+  public acceptedCallInput?: InputGroupCall;
 
   constructor(options: CallConnectionInstanceOptions & {
     groupCall: GroupCallConnectionInstance['groupCall'],
@@ -60,8 +113,43 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
     managers: AppManagers
   }) {
     super(options);
+  }
 
-    this.negotiateThrottled = throttle(this.negotiate.bind(this), 0, false);
+  /**
+   * Coalesce negotiationneeded bursts without dropping the Promise or a dirty
+   * event that arrives while an offer is in flight. A rejected attempt leaves
+   * the dirty flag set so the next roster/event can retry or recovery can take
+   * over explicitly.
+   */
+  public requestNegotiation(): Promise<void> {
+    this.negotiationRequested = true;
+    if(this.negotiationQueue) return this.negotiationQueue;
+
+    const queue = Promise.resolve().then(async() => {
+      try {
+        while(this.negotiationRequested) {
+          this.negotiationRequested = false;
+          const joinedExistingNegotiation = !!this.negotiating;
+          try {
+            await this.negotiate();
+          } catch(err) {
+            this.negotiationRequested = true;
+            throw err;
+          }
+
+          // A direct negotiation that was already in flight cannot contain the
+          // mutation represented by this request. Run one owned pass after it.
+          if(joinedExistingNegotiation) this.negotiationRequested = true;
+        }
+      } finally {
+        // Clear before the queue Promise settles. Clearing in an outer finally
+        // leaves a microtask-sized gap where a request can mark the queue dirty,
+        // receive the already-settled Promise and then be lost.
+        this.negotiationQueue = undefined;
+      }
+    });
+    this.negotiationQueue = queue;
+    return queue;
   }
 
   public createPeerConnection() {
@@ -88,13 +176,103 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
     });
 
     dataChannel.addEventListener('close', () => {
-      if(this.updateConstraintsInterval) {
-        clearInterval(this.updateConstraintsInterval);
-        this.updateConstraintsInterval = undefined;
-      }
+      this.clearUpdateConstraintsInterval();
     });
 
     return dataChannel;
+  }
+
+  private clearUpdateConstraintsInterval() {
+    if(this.updateConstraintsInterval) {
+      clearInterval(this.updateConstraintsInterval);
+      this.updateConstraintsInterval = undefined;
+    }
+
+    if(this.updateConstraintsTimeout) {
+      clearTimeout(this.updateConstraintsTimeout);
+      this.updateConstraintsTimeout = undefined;
+    }
+  }
+
+  public closeConnection() {
+    // The data channel's `close` event was the only thing stopping the
+    // constraints timer, and pc.close() does not reliably fire it — the timer
+    // kept ticking against a dead channel for the rest of the session.
+    this.clearUpdateConstraintsInterval();
+    this.senderVideoConstraint.dispose();
+    super.closeConnection();
+  }
+
+  protected onDataChannelMessage(message: Record<string, unknown>) {
+    if(message.colibriClass !== 'SenderVideoConstraints') {
+      return;
+    }
+
+    const idealHeight = (message.videoConstraints as {idealHeight?: unknown})?.idealHeight;
+    if(typeof idealHeight === 'number') {
+      this.log('SenderVideoConstraints', idealHeight);
+      this.senderVideoConstraint.request(idealHeight);
+    }
+  }
+
+  private get videoSendContent(): VideoSendContent {
+    return this.type === 'presentation' ? 'screencast' : 'camera';
+  }
+
+  /** How many simulcast layers this connection's video is offered with. */
+  public get simulcastLayers() {
+    return getVideoSimulcastLayerCount(this.videoSendContent, !!this.groupCall?.isConference);
+  }
+
+  private getVideoSender(): RTCRtpSender | undefined {
+    const entry = this.description?.findEntry((entry) => {
+      return entry.type === 'video' &&
+        (entry.direction === 'sendonly' || entry.direction === 'sendrecv') &&
+        !!entry.transceiver;
+    });
+    return entry?.transceiver.sender;
+  }
+
+  /**
+   * Bring the video sender's encodings in line with the layer table and the
+   * SFU's current request. Encodings only exist once the (munged) offer has
+   * been applied, so this runs after every negotiation and on each
+   * SenderVideoConstraints change; an unchanged sender is left alone.
+   */
+  public updateVideoSendParameters(): Promise<void> {
+    return this.videoSendParametersQueue.enqueue(async() => {
+      try {
+        const sender = this.getVideoSender();
+        if(!sender || this.connection?.signalingState === 'closed') {
+          return;
+        }
+
+        await applyVideoSendParameters(sender, this.videoSendContent, this.senderVideoConstraint.value);
+      } catch(err) {
+        this.log?.warn?.('setting video sender parameters failed', err);
+      }
+    });
+  }
+
+  // The SFU's answer is interpolated into the SDP handed to setRemoteDescription
+  // (transport ufrag / pwd / fingerprints, the codec tables), so it gets the same
+  // shape-and-line-safety check as the 1-on-1 signalling. Throwing is the
+  // fail-closed path: an initial join rolls back through rollbackFailedJoin, a
+  // runtime renegotiation ends in hangUpAfterTransportFailure.
+  private parseConnectionData(raw: string): UpdateGroupCallConnectionData {
+    let data: unknown;
+    try {
+      data = JSON.parse(raw);
+    } catch(err) {
+      this.log.error('group call connection data is not JSON', err);
+    }
+
+    const reason = getUnsafeConnectionDataReason(data);
+    if(reason !== undefined) {
+      throw new Error(`Invalid group call connection data: ${reason}`);
+    }
+
+    return data as UpdateGroupCallConnectionData;
   }
 
   public createDescription() {
@@ -117,8 +295,11 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
     return description;
   }
 
-  public appendStreamToConference(onSenderCreated?: (sender: RTCRtpSender) => void) {
-    super.appendStreamToConference(onSenderCreated);/* .then(() => {
+  public appendStreamToConference(
+    onSenderCreated?: (sender: RTCRtpSender) => void,
+    throwOnReplaceError = false
+  ) {
+    return super.appendStreamToConference(onSenderCreated, throwOnReplaceError);/* .then(() => {
       currentGroupCall.connections.main.negotiating = false;
       this.startNegotiation({
         type: type,
@@ -128,7 +309,7 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
     }); */
   }
 
-  private async invokeJoinGroupCall(localSdp: SDP, mainChannels: SDPMediaSection[], options: GroupCallConnectionInstance['options']) {
+  private async invokeGroupCallConnection(localSdp: SDP, mainChannels: SDPMediaSection[], options: GroupCallConnectionInstance['options']) {
     const {groupCall, description} = this;
     const groupCallId = groupCall.id;
 
@@ -174,10 +355,8 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
       };
     }
 
-    // Conference + legacy both use phone.joinGroupCall — for conferences we
-    // additionally pass `public_key` + `block` via the options. Conference
-    // creation (the EMPTY phone.createConferenceCall(flags=0) call) is done
-    // by the caller (controller) BEFORE we get here.
+    // Existing calls use phone.joinGroupCall. A fresh conference uses the same
+    // SDP/key/block payload in one atomic phone.createConferenceCall request.
     //
     // On CONF_WRITE_CHAIN_INVALID — the e2e chain advanced between our fetch
     // and our submit (a concurrent join, key change, etc.). Refetch chain
@@ -188,15 +367,36 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
     // worker proxy and `postMessage`'s structured clone refuses functions
     // (silently hanging the call on some browsers). Keep the callback in
     // the closure so the retry loop can still invoke it locally.
-    const rebuildBlock = options.type === 'main' ? options.e2eRebuildBlock : undefined;
-    const stripCallback = (o: typeof options): typeof options =>
-      o.type === 'main' ? {...o, e2eRebuildBlock: undefined} : o;
+    const rebuildBlock = options.type === 'main' && !options.e2eCreateConference ?
+      options.e2eRebuildBlock :
+      undefined;
+    const commitRebuiltBlock = options.type === 'main' ? options.e2eCommitRebuiltBlock : undefined;
+    const activateE2e = options.type === 'main' ? options.e2eActivate : undefined;
+    const stripCallback = <T extends typeof options>(o: T): T =>
+      (o.type === 'main' ? {
+        ...o,
+        e2eRebuildBlock: undefined,
+        e2eCommitRebuiltBlock: undefined,
+        e2eActivate: undefined
+      } : o) as T;
     const maxRetries = 5;
     let update: Awaited<ReturnType<typeof this.managers.appGroupCallsManager.joinGroupCall>>;
     let activeOptions = options;
+    let rebuiltBlock = false;
     for(let attempt = 0; ; attempt++) {
       try {
-        update = await this.managers.appGroupCallsManager.joinGroupCall(groupCallId, params, stripCallback(activeOptions));
+        if(activeOptions.type === 'main' && activeOptions.e2eCreateConference) {
+          update = await this.managers.appGroupCallsManager.createConferenceCall(
+            params,
+            stripCallback(activeOptions)
+          );
+        } else {
+          update = await this.managers.appGroupCallsManager.joinGroupCall(
+            groupCallId,
+            params,
+            stripCallback(activeOptions)
+          );
+        }
         break;
       } catch(err) {
         const msg = (err as {type?: string} | Error & {type?: string})?.type ??
@@ -205,6 +405,7 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
         if(!isChainRace || attempt >= maxRetries - 1) throw err;
         if(!rebuildBlock) throw err;
         const newBlock = await rebuildBlock();
+        rebuiltBlock = true;
         // Build a fresh options bag with the new block — keep WebRTC state.
         activeOptions = {...activeOptions, e2eBlock: newBlock} as typeof activeOptions;
       }
@@ -214,12 +415,81 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
     // id. The server hands back the real id+access_hash in updateGroupCall —
     // joinGroupCall stitches them onto `update`. Promote them onto the
     // instance so downstream code (polling, hangUp, leave) works.
-    const extras = update as typeof update & {resolvedCallId?: GroupCallId};
-    if(extras.resolvedCallId != null && extras.resolvedCallId !== this.groupCall.id) {
+    const extras = update;
+    // Store the accepted identity before canonical promotion, worker commit,
+    // chain replay, activation or SDP parsing. Any of those can throw after
+    // the server has already installed our participant and source.
+    this.acceptedCallInput = extras.acceptedCallInput ??
+      (activeOptions.type === 'main' ? activeOptions.e2eCallInput : undefined);
+    this.joinAccepted = true;
+    const promotedPlaceholder = extras.resolvedCallId != null && extras.resolvedCallId !== this.groupCall.id;
+    if(promotedPlaceholder) {
       this.groupCall.id = extras.resolvedCallId;
     }
 
-    const data: UpdateGroupCallConnectionData = JSON.parse(update.params.data);
+    // Take the access_hash the join actually returned. `joinGroupCall` stitches
+    // it on beside the id, but only the id was ever read — so a cached call
+    // object left over from an earlier session (state survives a reload, and a
+    // rejoin mints a NEW hash) kept its stale hash forever. Every request built
+    // from it then failed GROUPCALL_INVALID: the chain poll, the roster refresh,
+    // getGroupCallFull. Media already negotiated keeps flowing, so the call
+    // looks fine while it has silently stopped learning about participants —
+    // and because the recv transform is fail-closed, any source a peer starts
+    // AFTER that point is never mapped and is dropped. Observed live as "I see
+    // their video but hear nothing".
+    if(extras.resolvedGroupCall) {
+      this.groupCall.groupCall = extras.resolvedGroupCall;
+    }
+    const cachedCall = this.groupCall.groupCall;
+    if(extras.resolvedAccessHash != null && cachedCall?._ === 'groupCall') {
+      cachedCall.access_hash = extras.resolvedAccessHash as typeof cachedCall.access_hash;
+    }
+
+    const canonicalInput = this.groupCall.toInputGroupCall();
+    if(!canonicalInput) {
+      throw new Error('Conference join response did not resolve a canonical group call');
+    }
+
+    const acceptedChainUpdates: NonNullable<typeof extras.resolvedChainUpdates> = [];
+    const acceptedSubChains = new Set<number>();
+    for(const chainUpdate of extras.resolvedChainUpdates || []) {
+      if(!sameInputGroupCall(chainUpdate.call, canonicalInput)) continue;
+      if(acceptedSubChains.has(chainUpdate.sub_chain_id)) {
+        throw new Error('Conference join response contained multiple chain slices for one subchain');
+      }
+      acceptedSubChains.add(chainUpdate.sub_chain_id);
+      acceptedChainUpdates.push(chainUpdate);
+    }
+
+    // A rebuilt proposal becomes the worker anchor only after the exact RPC
+    // carrying it was accepted and the placeholder has been promoted. This
+    // keeps every later poll/broadcast bound to the canonical call identity.
+    if(rebuiltBlock) {
+      if(!commitRebuiltBlock) {
+        throw new Error('Conference join block was rebuilt without a worker commit callback');
+      }
+      await commitRebuiltBlock();
+    }
+
+    // Apply the accepted join response through its authoritative initial path
+    // before activation. Canonical joins may already have buffered the same
+    // slices through apiUpdatesManager; invite placeholders missed that push.
+    // The instance handles both cases without allowing arbitrary later pushes
+    // to rebase the compacted verification cursor.
+    for(const chainUpdate of acceptedChainUpdates) {
+      const accepted = await this.groupCall.deliverAcceptedE2eJoinChainBlocks(
+        chainUpdate.sub_chain_id,
+        chainUpdate.blocks,
+        chainUpdate.next_offset
+      );
+      if(!accepted) {
+        throw new Error('Conference join response contained an invalid chain slice');
+      }
+    }
+
+    await activateE2e?.();
+
+    const data = this.parseConnectionData(update.params.data);
 
     data.audio = data.audio || groupCall.connections.main.description.audio;
     description.setData(data);
@@ -243,7 +513,8 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
 
     const {sdp: localSdp, offer} = fixLocalOffer({
       offer: originalOffer,
-      data: description
+      data: description,
+      simulcastLayers: this.simulcastLayers
     });
 
     log('[sdp] setLocalDescription', offer.sdp);
@@ -254,11 +525,8 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
     });
 
     if(isNewConnection) {
-      try {
-        await this.invokeJoinGroupCall(localSdp, mainChannels, this.options);
-      } catch(e) {
-        this.log.error('[tdweb] joinGroupCall error', e);
-      }
+        await this.invokeGroupCallConnection(localSdp, mainChannels, this.options);
+      this.clearE2eJoinSecrets();
     }
 
     /* if(!data) {
@@ -328,6 +596,14 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
       description.deleteEntry(entry);
     });
 
+    // The answer rejects these m-lines: their participants left or stopped the
+    // stream. Their playback elements go with them rather than lingering (one
+    // media player each) until hang-up — even if the answer below fails, as the
+    // entries are already gone from the description.
+    if(entriesToDelete.length) {
+      this.groupCall?.releaseRemovedEntries?.(entriesToDelete);
+    }
+
     log(`[sdp] setRemoteDescription signaling=${connection.signalingState} ice=${connection.iceConnectionState} gathering=${connection.iceGatheringState} connection=${connection.connectionState}`, answerDescription.sdp);
     await connection.setRemoteDescription(answerDescription);
 
@@ -345,35 +621,53 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
     // NB: don't try to attach e2e transforms here. Chrome rejects
     // `RTCRtpScriptTransform` assignments after the codec has produced its
     // first frame ("Too late to create encoded streams" in the parallel
-    // createEncodedStreams API). Senders get their transforms pre-negotiate
-    // in groupCallsController.joinConferenceCommon; receivers get them in
-    // the `track` event handler, also before the first frame.
+    // createEncodedStreams API). Senders get their transforms pre-negotiate in
+    // groupCallsController.joinConferenceCommon; receivers get them when their
+    // recvonly transceivers are created in GroupCallInstance.onParticipantUpdate.
 
     if(this.updateConstraints) {
-      promise.then(() => {
-        this.maybeUpdateRemoteVideoConstraints();
+      void promise.then(() => {
         this.updateConstraints = false;
-      });
+        this.scheduleRemoteVideoConstraintsUpdate();
+      }, (): undefined => undefined);
     }
 
-    if(this.options.type === 'presentation') {
-      promise.then(() => {
-        this.connection.getTransceivers().find((transceiver) => {
-          if(transceiver.sender?.track?.kind === 'video') {
-            transceiver.sender.setParameters({
-              ...transceiver.sender.getParameters(),
-              degradationPreference: 'maintain-resolution'
-            });
-          }
-        });
-      });
-    }
+    // The offer that was just applied may have created the simulcast encodings
+    // (first negotiation) or a camera/screen track may have been attached since
+    // the last one; either way the sender now has the encodings to configure.
+    // Screen sharing also gets its maintain-resolution preference here.
+    void promise.then(() => this.updateVideoSendParameters(), (): undefined => undefined);
 
     return promise;
   }
 
+  /** Drop join-scoped rebuild/activation callbacks once SDP is established. */
+  public clearE2eJoinSecrets(): void {
+    if(this.options.type !== 'main') return;
+    this.options.e2eRebuildBlock = undefined;
+    this.options.e2eCommitRebuiltBlock = undefined;
+    this.options.e2eActivate = undefined;
+  }
+
+  /**
+   * Send ReceiverVideoConstraints shortly — the pinned tile or the set of video
+   * tiles changed. Debounced so a burst of changes is one message; without
+   * this, a pin waited for the next periodic resend (up to 5 s) before the SFU
+   * started forwarding the 720p layer.
+   */
+  public scheduleRemoteVideoConstraintsUpdate() {
+    if(this.updateConstraintsTimeout) {
+      return;
+    }
+
+    this.updateConstraintsTimeout = window.setTimeout(() => {
+      this.updateConstraintsTimeout = undefined;
+      this.maybeUpdateRemoteVideoConstraints();
+    }, REMOTE_VIDEO_CONSTRAINTS_DEBOUNCE_MS);
+  }
+
   public maybeUpdateRemoteVideoConstraints() {
-    if(this.dataChannel.readyState !== 'open') {
+    if(this.dataChannel?.readyState !== 'open') {
       return;
     }
 
@@ -393,32 +687,42 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
       onStageEndpoints: []
     };
 
-    for(const entry of this.description.entries) {
-      if(entry.direction !== 'recvonly' || entry.type !== 'video') {
-        continue;
+    const pinnedSource = this.groupCall?.pinnedSource;
+    const videoEntries = this.description.entries.filter((entry) => {
+      return entry.direction === 'recvonly' && entry.type === 'video';
+    });
+    // Anything pinned — our own camera or screen included — takes the stage and
+    // moves every other tile to the thumbnail column.
+    const hasPinned = pinnedSource !== undefined;
+    videoEntries.sort((a, b) => Number(b.source === pinnedSource) - Number(a.source === pinnedSource));
+    for(const entry of videoEntries.slice(0, MAX_REQUESTED_VIDEO_ENDPOINTS)) {
+      const {endpoint} = entry;
+      let maxHeight: number;
+      if(!hasPinned) {
+        maxHeight = GRID_VIDEO_MAX_HEIGHT;
+      } else if(entry.source === pinnedSource) {
+        maxHeight = PINNED_VIDEO_MAX_HEIGHT;
+        obj.onStageEndpoints.push(endpoint);
+      } else {
+        maxHeight = THUMBNAIL_VIDEO_MAX_HEIGHT;
       }
 
-      const {endpoint} = entry;
-      obj.onStageEndpoints.push(endpoint);
-      obj.constraints[endpoint] = {
-        minHeight: 180,
-        maxHeight: 720
-      };
+      obj.constraints[endpoint] = {minHeight: MIN_VIDEO_HEIGHT, maxHeight};
     }
 
     this.sendDataChannelData(obj);
 
-    if(!obj.onStageEndpoints.length) {
-      if(this.updateConstraintsInterval) {
-        clearInterval(this.updateConstraintsInterval);
-        this.updateConstraintsInterval = undefined;
-      }
+    if(!Object.keys(obj.constraints).length) {
+      this.clearUpdateConstraintsInterval();
     } else if(!this.updateConstraintsInterval) {
-      this.updateConstraintsInterval = window.setInterval(this.maybeUpdateRemoteVideoConstraints.bind(this), 5000);
+      this.updateConstraintsInterval = window.setInterval(
+        this.maybeUpdateRemoteVideoConstraints.bind(this),
+        REMOTE_VIDEO_CONSTRAINTS_REFRESH_MS
+      );
     }
   }
 
-  public addInputVideoStream(stream: MediaStream) {
+  public addInputVideoStream(stream: MediaStream): Promise<void> {
     // const {sources} = this;
     // if(sources?.video) {
     // const source = this.sources.video.source;
@@ -427,6 +731,16 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
     // }
 
     this.streamManager.addStream(stream, 'input');
+    return this.appendInputStreamWithE2e();
+  }
+
+  /**
+   * Re-attach the StreamManager's existing input tracks to a freshly-created
+   * presentation connection. Keeping the transform hook here makes initial
+   * screen sharing and presentation-only recovery follow the same critical
+   * createTransceiver -> transform -> replaceTrack ordering.
+   */
+  public appendInputStreamWithE2e(): Promise<void> {
     // Attach the e2e send transform to any sender created here, in the
     // createTransceiver→replaceTrack gap (the only window Chrome accepts it).
     // The MAIN connection's senders are already wired at join
@@ -436,7 +750,7 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
     // later with no such wiring — without it, screen-share video would go out
     // UNENCRYPTED and the SFU/peer couldn't decrypt it. attachE2eSendTransform
     // no-ops for legacy (non-e2e) calls and for already-transformed senders.
-    this.appendStreamToConference((sender) => {
+    return this.appendStreamToConference((sender) => {
       const kind = senderKind(this.connection, sender);
       // Screencast video uses its own e2e channel so its per-(sender, channel)
       // replay window doesn't contend with the main camera/audio. tde2e keys
@@ -446,6 +760,6 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
         E2E_SCREENCAST_CHANNEL_ID :
         E2E_MAIN_CHANNEL_ID;
       this.groupCall.attachE2eSendTransform(sender, kind, channelId);
-    }); // replace sender track
+    }, true); // replace sender track and expose browser failures to the transaction
   }
 }

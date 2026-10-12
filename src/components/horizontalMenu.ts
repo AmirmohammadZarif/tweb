@@ -8,6 +8,7 @@ import ListenerSetter from '@helpers/listenerSetter';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
 import liteMode from '@helpers/liteMode';
 import {ScrollableContextValue} from '@components/scrollable2';
+import attachTabList from '@helpers/dom/tabList';
 
 type OnChangeArgs = {
   element: HTMLElement;
@@ -61,6 +62,10 @@ export async function selectTarget({
     }
   }
 
+  if(!target) {
+    return false;
+  }
+
   if(scrollableX) {
     const containerEl = scrollableX.container;
     // Skip the scroll round-trip when there's no actual scrolling to do:
@@ -106,8 +111,15 @@ export async function selectTarget({
   if(prevId !== -1 && animate) {
     const selector = '.menu-horizontal-div-item-background';
     mutateCallback(() => {
-      const indicator = target.querySelector(selector)! as HTMLElement;
-      const currentIndicator = target.parentElement.children[prevId].querySelector(selector)! as HTMLElement;
+      const indicator = target.querySelector(selector) as HTMLElement;
+      const previous = target.parentElement.children[prevId];
+      const currentIndicator = previous?.querySelector(selector) as HTMLElement;
+
+      // the callback runs a frame later, by which point the row may have been rebuilt or the
+      // previous item removed — the stripe is decoration, so skip it rather than throw
+      if(!indicator || !currentIndicator) {
+        return;
+      }
 
       currentIndicator.classList.remove('animate');
       indicator.classList.remove('animate');
@@ -159,6 +171,9 @@ export function horizontalMenu(
   if(!tabs) {
     return _selectTab;
   }
+
+  const detachTabList = attachTabList(tabs, content);
+  listenerSetter?.addCleanup(detachTabList);
 
   const _selectTarget = (target: HTMLElement, id: number, animate = true) => {
     return selectTarget({

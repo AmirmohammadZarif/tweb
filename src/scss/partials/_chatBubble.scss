@@ -83,6 +83,15 @@
       // make avatar clickable
       z-index: 2;
       pointer-events: none;
+
+      &.avatar-for-reply-markup::before {
+        content: '';
+        display: grid;
+        flex: 0 0 auto;
+        grid-template-rows:
+          $reply-markup-margin-top
+          repeat(var(--reply-markup-row-count), $reply-markup-row-height);
+      }
     }
   }
 }
@@ -112,6 +121,60 @@
 
   .is-guest-chat-for {
     font-weight: var(--font-weight-normal);
+  }
+
+  .bubble-name-chip-container {
+    display: flex !important;
+    align-items: flex-start;
+    justify-content: flex-start;
+    max-width: 100%;
+  }
+
+  .ephemeral-badge-container {
+    margin: $message-padding-top $message-padding-horizontal 0;
+  }
+
+  .ephemeral-badge {
+    display: flex;
+    align-items: center;
+    gap: .25rem;
+    width: fit-content;
+    max-width: 100%;
+    padding: .125rem .375rem;
+    border-radius: .5rem;
+    color: var(--message-primary-color);
+    background-color: rgba(var(--message-primary-color-rgb), .12);
+    font-weight: var(--font-weight-normal);
+    font-size: var(--messages-secondary-text-size);
+    line-height: var(--messages-secondary-line-height);
+    overflow: hidden;
+    user-select: none;
+
+    &-icon {
+      flex: 0 0 auto;
+      font-size: .875rem;
+    }
+
+    &-peer {
+      display: inline;
+      color: inherit;
+      font-weight: var(--font-weight-bold);
+      cursor: pointer;
+    }
+  }
+
+  &.is-ephemeral.just-media,
+  &.is-welcome-first.just-media {
+    .ephemeral-badge-container.ephemeral-badge-standalone {
+      margin: 0;
+      background-color: transparent;
+    }
+
+    .ephemeral-badge {
+      color: #fff;
+      background-color: var(--message-highlighting-color);
+      max-width: 15rem;
+    }
   }
 
   &.is-sponsored {
@@ -258,14 +321,17 @@
     }
 
     &.is-highlighted,
-    &.is-selected {
+    &.is-selected,
+    &.is-active {
       &:after {
         top: calc(#{$bubble-overflow} + 30px);
       }
     }
   }
 
-  &.is-selected {
+  // * `is-active` is the context menu's target, `is-selected` is a selected message — same highlight
+  &.is-selected,
+  &.is-active {
     &:after {
       background-color: var(--message-highlighting-color);
     }
@@ -275,7 +341,8 @@
         animation: fade-in-opacity .2s linear forwards;
       }
 
-      &.backwards:after {
+      &.backwards:after,
+      &.is-active-backwards:after {
         animation: fade-in-backwards-opacity .2s linear forwards;
       }
     }
@@ -327,7 +394,9 @@
 
   & > &-select-checkbox {
     //bottom: .75rem; // * by avatar
-    bottom: .3125rem; // * by middle of one-line message
+    // * middle of a one-line bubble — which is also the middle of the avatar beside it (both are
+    // * the same height and sit on the same baseline), so every bubble takes the same offset
+    bottom: .1875rem;
     /* left: 0;
     top: 50%;
     transform: translateY(-50%); */
@@ -622,7 +691,9 @@
 
   .summarize {
     position: sticky;
-    top: .5rem;
+    // --chat-padding-top clears the topbar + floating plates so the sticky button
+    // isn't hidden behind them (same baseline as sticky .is-date labels).
+    top: calc(var(--chat-padding-top) + .5rem);
     // bottom: calc(var(--message-beside-button-size) + var(--message-beside-button-margin));
     // inset-inline-end: var(--message-beside-button-margin);
 
@@ -643,12 +714,6 @@
 
     &:after {
       bottom: -#{$bubble-overflow-big};
-    }
-
-    .bubbles-inner.is-chat &.is-in {
-      > .bubble-select-checkbox {
-        bottom: .1875rem;
-      }
     }
   }
 
@@ -941,14 +1006,18 @@
       top: .5rem;
     }
 
-    &.is-selected {
+    // * the selection drives its state with SetTransition (`forwards` while in, `animating` +
+    // * `backwards` while out), the context menu's target with its own pair of classes
+    &.is-selected,
+    &.is-active {
       border-radius: 0;
 
       .album-item-media {
         transform: scale(1);
       }
 
-      &.animating {
+      &.animating,
+      &.is-active-backwards {
         transition: border-radius var(--transition-standard-out);
 
         .album-item-media {
@@ -956,7 +1025,8 @@
         }
       }
 
-      &.forwards {
+      &.forwards,
+      &.is-active:not(.is-active-backwards) {
         transition: border-radius var(--transition-standard-in);
 
         .album-item-media {
@@ -972,7 +1042,7 @@
     }
   }
 
-  .anchor-url:not(.reply-markup-button),
+  .anchor-url:not(.reply-markup-button):not(.rich-button-link),
   .mention {
     @include hover() {
       text-decoration: underline !important;
@@ -1058,6 +1128,7 @@
     .floating-part {
       --primary-color: #fff;
       --primary-color-rgb: 255, 255, 255;
+      --link-plate-color: #{$link-plate-service-color};
       --ripple-color: rgba(var(--primary-color-rgb), .1);
       // padding: .375rem .5rem;
       border-radius: .25rem;
@@ -1166,80 +1237,16 @@
     margin-bottom: #{-$message-padding-top} !important;
   }
 
-  // &.must-have-name,
-  // &:not(.hide-name).is-group-first {
-  //   .message.mt-off {
-  //     margin-top: 0;
-  //   }
-  // }
-
-  // @include respond-to(handhelds) {
-  //   .document,
-  //   .audio {
-  //     --icon-size: 2.25rem;
-  //   }
-  // }
-
-  .audio {
-    $parent: ".audio";
-    #{$parent} {
-      &-title {
-        font-weight: var(--font-weight-bold);
-      }
-
-      &-ico {
-        font-size: 0;
-      }
-
-      &-toggle {
-        .part {
-          background-color: var(--message-icon-text-color);
-        }
-      }
-    }
-
-    // @include respond-to(handhelds) {
-    //   height: 2.375rem;
-    //   --icon-margin: .6875rem;
-
-    //   .audio-details {
-    //     margin-top: 2px;
-    //     margin-bottom: 0;
-    //   }
-
-    //   .audio-to-text-button {
-    //     margin-top: -.875rem;
-    //   }
-
-    //   .audio-subtitle {
-    //     margin-top: -1px;
-    //   }
-
-    //   /* &.corner-download .audio-download {
-    //     margin: 1.375rem 1.375rem 0;
-    //   } */
-    // }
-  }
-
   &.audio-message {
     --max-content-width: 335px;
 
     .audio {
       width: var(--max-content-width);
-      max-width: 100%;
     }
-
-    // @include respond-to(handhelds) {
-    //   --max-content-width: 280px;
-    // }
   }
 
   &.voice-message {
     --max-content-width: 364px;
-
-    // @include respond-to(handhelds) {
-    //   --max-content-width: 300px;
-    // }
 
     .document-message {
       max-width: fit-content;
@@ -1255,34 +1262,46 @@
   &.audio-message,
   &.voice-message,
   &.document-message {
-    // .message {
-    //   margin: 8px !important;
-    // }
-
-    // .time-inner {
-    //   margin-bottom: -3px !important;
-    // }
-
     .bubble-content > .name {
       margin-bottom: -.25rem;
     }
   }
 
   &.is-single-document {
-    .document,
-    .audio {
+    .document {
       margin-top: .5rem;
       margin-bottom: .5rem;
-    }
-
-    .document-message {
-      margin-top: -.125rem;
     }
 
     .document {
       .time-inner {
         margin-bottom: -3px;
       }
+    }
+  }
+
+  .audio {
+    --padding-left: 4rem;
+    // * offset the .message inner padding
+    margin: -.25rem -.5rem;
+    user-select: none; // * because it's inside of .message that has user-select: text;
+
+    &-title {
+      font-weight: var(--font-weight-bold);
+    }
+
+    &-ico {
+      font-size: 0;
+    }
+
+    &-animated-icon {
+      color: var(--message-icon-text-color) !important;
+    }
+
+    .time {
+      position: absolute;
+      bottom: 4px;
+      right: 8px;
     }
   }
 
@@ -1309,40 +1328,8 @@
     }
   }
 
-  &.contact-message,
   &.call-message {
     --min-content-width: 200px;
-  }
-
-  &.contact-message {
-    .contact {
-      display: flex;
-      padding: 2px 0;
-      cursor: pointer;
-      user-select: none;
-
-      &-avatar {
-        color: #fff;
-      }
-
-      &-details {
-        padding-left: 12px;
-        margin-top: 8px;
-        display: flex;
-        flex-direction: column;
-      }
-
-      &-name {
-        font-size: 1rem;
-        font-weight: var(--font-weight-bold);
-      }
-
-      &-number {
-        font-size: 14px;
-        line-height: 1.4;
-        color: var(--message-status-color);
-      }
-    }
   }
 
   &.document-message {
@@ -1352,7 +1339,12 @@
   &-call {
     cursor: pointer;
     padding: .125rem 0;
-    padding-left: 2.5625rem;
+    // The icon hangs off the end of the block, the way every official client
+    // draws it — tdesktop paints it at `paintw - historyCallIconPosition.x`
+    // (history_view_call.cpp:120), iOS at `boundingWidth - width - 8`
+    // (ChatMessageCallBubbleContentNode.swift:351).
+    padding-inline-start: .125rem;
+    padding-inline-end: 3.5625rem;
     display: flex;
     flex-direction: column;
     justify-content: center;
@@ -1361,8 +1353,12 @@
 
     &-icon {
       position: absolute;
-      left: .3125rem;
+      inset-inline-end: .3125rem;
+      inset-block: 0;
+      height: 1.5rem;
+      margin-block: auto;
       font-size: 1.5rem;
+      color: var(--primary-color);
     }
 
     &-title {
@@ -1391,9 +1387,25 @@
       margin-top: .0625rem;
       margin-left: -.1875rem;
       line-height: var(--messages-secondary-line-height);
+    }
 
-      &.is-reason:before {
-        margin-right: .0625rem;
+    &-status {
+      white-space: nowrap;
+    }
+
+    // Who was on the call — iOS puts their faces and a count on the status line
+    // (ChatMessageCallBubbleContentNode.swift:246-345), Android the same
+    // (ChatMessageCell.java:8896-8926). Insets are iOS' avatarsLeft/RightInset.
+    &-participants {
+      display: flex;
+      align-items: center;
+      flex: 0 0 auto;
+      margin-inline-start: .3125rem;
+
+      .stacked-avatars {
+        // The rings punch through to the bubble, not to the surface behind it.
+        --border-color: var(--message-background-color);
+        margin-inline-end: .3125rem;
       }
     }
   }
@@ -1456,7 +1468,8 @@
       }
 
       &.is-highlighted,
-      &.is-selected {
+      &.is-selected,
+      &.is-active {
         .document-wrapper {
           &:before {
             content: " ";
@@ -1485,7 +1498,8 @@
         }
       }
 
-      &.is-selected {
+      &.is-selected,
+      &.is-active {
         .document-selection {
           background-color: var(--message-highlighting-color);
         }
@@ -1496,7 +1510,8 @@
             animation: fade-in-opacity .2s linear forwards;
           }
 
-          &.backwards {
+          &.backwards,
+          &.is-active-backwards {
             .document-selection/* ,
             .document-wrapper:before */ {
               animation: fade-in-backwards-opacity .2s linear forwards;
@@ -1505,38 +1520,7 @@
         }
       }
 
-      .bubble-select-checkbox {
-        --margin-top: .25rem;
-        --margin-left: .125rem;
-        left: auto;
-        top: auto;
-        background: #fff;
-        border-radius: 50%;
-        margin-left: calc(var(--padding-left) * -1 + var(--icon-size) - var(--size) + var(--margin-left));
-        margin-top: calc(var(--icon-size) - var(--size) + var(--margin-top));
-
-        @include respond-to(handhelds) {
-          --size: 1.125rem;
-          // left: 20px;
-          // top: 25px;
-        }
-
-        &:before {
-          --inner-size: .125rem;
-          content: " ";
-          position: absolute;
-          width: calc(var(--size) - (var(--inner-size) * 2));
-          height: calc(var(--size) - (var(--inner-size) * 2));
-          left: var(--inner-size);
-          top: var(--inner-size);
-          border: 2px solid var(--secondary-color);
-          border-radius: inherit;
-        }
-      }
-
       &.is-first {
-        padding-top: .5rem;
-
         .document-selection {
           top: #{-$bubble-overflow}; // * padding inner + half padding outer
         }
@@ -1549,11 +1533,6 @@
 
       &.is-last {
         padding-bottom: $message-padding-bottom;
-
-        .document,
-        .audio {
-          margin-bottom: #{8px - $message-padding-bottom};
-        }
 
         .document-selection {
           bottom: #{-$bubble-overflow};
@@ -1625,26 +1604,11 @@
     // }
   }
 
-  .audio,
-  &.poll-message,
-  &.contact-message {
-    .time {
-      position: absolute;
-      right: 0;
-      bottom: 0;
-    }
-  }
-
   &.poll-message {
     .time {
+      position: absolute;
       right: 8px;
       bottom: 5px;
-    }
-  }
-
-  .audio {
-    .time {
-      bottom: -3px;
     }
   }
 
@@ -1965,7 +1929,8 @@
 
   // * mini player section end
 
-  .anchor-url {
+  // a rich message's link button is drawn as a button
+  .anchor-url:not(.rich-button-link) {
     text-decoration: underline;
   }
 
@@ -1993,13 +1958,24 @@
     font-size: var(--messages-secondary-text-size);
     line-height: calc(var(--messages-secondary-text-size) + .25rem);
     max-width: 100%;
-    overflow: hidden;
+    // cut off for the ellipsis, but not the ripple of a held name, whose plate reaches past its text
+    // (helpers/dom/linkPress.ts); `clip` makes no formatting context of its own, `flow-root` does
+    display: flow-root;
+    overflow: clip;
+    overflow-clip-margin: $link-plate-bleed;
     text-overflow: ellipsis;
     user-select: none;
 
     .badge-fake {
       display: inline-block;
       vertical-align: text-bottom;
+    }
+
+    // a name with icons is a flex row: it hugs them as a plain name hugs its text, so that what is
+    // pressed (the ripple of helpers/dom/linkPress.ts) and clicked is the name, not the whole line
+    > .peer-title.with-icons,
+    .name-first-line > .peer-title.with-icons {
+      width: fit-content;
     }
   }
 
@@ -2116,6 +2092,15 @@
     // align-items: center;
     max-width: inherit;
     overflow: inherit;
+    // the margin `.name` clips with (it is not inherited by itself)
+    overflow-clip-margin: inherit;
+
+    &-topic {
+      > .bubble-name-rank,
+      > .bubble-name-first + .bubble-name-boosts {
+        margin-inline-start: auto;
+      }
+    }
   }
 
   &-name {
@@ -2152,8 +2137,12 @@
         margin-bottom: $message-padding-top;
       }
 
-      .topic-name-button-container {
+      .bubble-name-chip-container {
         margin-bottom: 0;
+      }
+
+      &.is-reply .bubble-name-chip-container {
+        margin-bottom: .25rem;
       }
     }
   }
@@ -2164,7 +2153,7 @@
 
   &:not(.sticker):not(.emoji-big):not(.forwarded) {
     &.hide-name,
-    &:not(.is-group-first) {
+    &:not(.is-group-first):not(.must-have-name) {
       .reply {
         margin-top: $reply-padding-top;
       }
@@ -2208,7 +2197,7 @@
     border-radius: inherit;
   }
 
-  audio-element,
+  .audio,
   poll-element {
     white-space: normal; // * fix due to .message white-space prewrap
   }
@@ -2377,7 +2366,7 @@
 
   .name-with-reply {
     .name {
-      display: block;
+      display: flow-root;
       padding: 0 !important;
       margin: 0;
 
@@ -2389,6 +2378,10 @@
         .peer-title {
           font-weight: var(--font-weight-bold) !important;
         }
+      }
+
+      .bubble-name-chip-container:last-child {
+        margin-bottom: 0;
       }
     }
 
@@ -2406,58 +2399,12 @@
     }
   }
 
-  .topic-name-button {
-    --color: var(--message-primary-color);
-
-    &.has-avatar {
-      font-size: var(--messages-text-size);
-      height: 1.875rem;
-      padding-inline: 0 1.25rem;
-      gap: .375rem;
-
-      .topic-name-button-arrow {
-        position: absolute;
-        inset-inline-end: .125rem;
-        color: currentColor;
-        opacity: .4;
-        font-size: 1rem;
-      }
-
-      .topic-name-button-avatar {
-        position: relative;
-      }
-    }
-  }
-
-  .name .topic-name-button-container {
+  .name .bubble-name-chip-container {
     margin: .25rem 0;
   }
 
-  &.is-message-empty:not(.is-reply) .name .topic-name-button-container {
+  &.is-message-empty:not(.is-reply) .name .bubble-name-chip-container {
     margin-bottom: 0;
-  }
-
-  &:not(.is-group-first) .topic-name-button-container {
-    display: none !important;
-  }
-
-  .topic-name-button-container.floating-part {
-    padding-top: 0;
-    padding-bottom: 0;
-    font-size: var(--messages-secondary-text-size);
-
-    .topic-name-button {
-      --color: #fff;
-      padding: 0;
-
-      &:before {
-        content: none;
-      }
-    }
-
-    & + .floating-part {
-      margin-top: 1.75rem;
-    }
   }
 
   .audio-transcribed-text {
@@ -2469,22 +2416,27 @@
     }
 
     .audio-transcribing-dots {
-      position: relative;
-
-      &:before,
-      &:after {
-        content: "...";
-      }
-
-      &:before {
+      // Real dots instead of an animated `content`, which only a pseudo-element can do. They keep
+      // their width while hidden, so the text never shifts and nothing has to be reserved behind
+      // them; each has its own keyframes so they accumulate and reset together rather than blink
+      // out of step, which is what sharing one set with staggered delays would give.
+      &-dot {
         opacity: 0;
-      }
+        animation-duration: 1.5s;
+        animation-iteration-count: infinite;
+        animation-timing-function: steps(1, end);
 
-      &:after {
-        position: absolute;
-        right: 0;
-        left: 0;
-        animation: 1.5s linear audio-dots infinite;
+        &-1 {
+          animation-name: audio-dots-1;
+        }
+
+        &-2 {
+          animation-name: audio-dots-2;
+        }
+
+        &-3 {
+          animation-name: audio-dots-3;
+        }
       }
     }
   }
@@ -2808,16 +2760,14 @@
     pointer-events: none;
   }
 
+  // * a shared contact is pressed, not read: never selected, as before it became a preview
+  &.is-contact {
+    user-select: none;
+  }
+
   & + .time {
     display: block;
     float: unset;
-  }
-
-  &-background-canvas {
-    position: absolute;
-    top: 0;
-    inset-inline-end: 0;
-    pointer-events: none;
   }
 
   .audio-transcribed-text {
@@ -3032,18 +2982,97 @@
       @include text-overflow(false);
     }
 
+    // * The button reaches from the box's border line to its edge, past the content's padding, so a
+    // * press and its ripple take the whole width; the separator keeps to the text's width, as
+    // * tdesktop draws it (history_view_web_page.cpp, `inner.width()`). It is drawn inside the
+    // * padding, since the button's `overflow: hidden` would clip a border-box line
     &.is-button {
       margin-bottom: #{-$webpage-padding-vertical};
+      margin-inline: #{-$webpage-padding};
+      border-top: 0;
       line-height: $height;
       font-size: var(--messages-text-size);
       text-align: center;
       font-weight: var(--font-weight-bold);
       height: #{$height + $margin + $border};
-      padding: #{math.div($margin, 2)} .5rem 0;
+      padding: #{math.div($margin, 2) + $border} #{$webpage-padding + .5rem} 0;
       pointer-events: none;
-      width: 100%;
+      // * below a square thumbnail floating beside short text: a box that clips its overflow would
+      // * otherwise narrow itself to sit next to the float
+      clear: both;
+      @include text-overflow(true);
+
+      &:before {
+        content: "";
+        position: absolute;
+        top: 0;
+        inset-inline: $webpage-padding;
+        height: $border;
+        background-color: rgba(var(--primary-color-rgb, 0, 0, 0), .2);
+      }
+
+      // * where it stood before the button reached past the padding and lost its border
+      #{$parent}-footer-icon {
+        top: #{.125rem + $border};
+        right: #{$webpage-padding - .125rem};
+      }
+    }
+
+    // * The same button, split into buttons of their own (a shared contact's MESSAGE | ADD): each
+    // * takes the caption's padding, so the press and its ripple reach the line above. Columns of
+    // * `1fr` are as wide as the widest button, and make the box wide enough for all of them
+    &.is-split {
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: minmax(0, 1fr);
+      padding: #{$border} 0 0;
+    }
+
+    &-button {
+      padding: #{math.div($margin, 2)} .5rem 0;
+      pointer-events: auto;
+      cursor: pointer;
+      // * above the box's own ripple, which would take the press otherwise
+      position: relative;
+      z-index: 1;
+      // * a <button> with the a11y layer
+      border: 0;
+      background: none;
+      color: inherit;
+      font: inherit;
       @include text-overflow(true);
     }
+  }
+
+  // * a round picture at the start, with the name and text beside it (a shared contact)
+  // * the picture keeps to the top, as tdesktop draws it, however many lines the text runs to
+  &-with-thumb {
+    display: flex;
+    align-items: flex-start;
+    gap: .625rem;
+    padding: .125rem 0;
+
+    &-texts {
+      flex: 1 1 auto;
+      min-width: 0;
+
+      #{$parent}-name,
+      #{$parent}-text {
+        @include text-overflow(true);
+      }
+
+      // * a line each (a contact's phones, emails, organization), every one cut short on its own
+      #{$parent}-text {
+        white-space: pre;
+      }
+    }
+  }
+
+  // * the picture is part of the box's own control: a photo avatar would take the press for the
+  // * peer it shows, and open the chat where the box opens the vCard
+  &-thumb {
+    flex: 0 0 auto;
+    pointer-events: none;
   }
 }
 
@@ -3257,21 +3286,33 @@
   }
 }
 
-@keyframes audio-dots {
+@keyframes audio-dots-1 {
   0% {
-    content: "";
+    opacity: 0;
   }
 
-  33% {
-    content: ".";
+  25%, 100% {
+    opacity: 1;
+  }
+}
+
+@keyframes audio-dots-2 {
+  0% {
+    opacity: 0;
   }
 
-  66% {
-    content: "..";
+  50%, 100% {
+    opacity: 1;
+  }
+}
+
+@keyframes audio-dots-3 {
+  0% {
+    opacity: 0;
   }
 
-  100% {
-    content: "...";
+  75%, 100% {
+    opacity: 1;
   }
 }
 
@@ -3337,6 +3378,13 @@
     color: inherit;
   }
 
+  // * while selecting, a click anywhere on the pill must toggle it instead of firing the action
+  // * inside it (a gift button, a peer link, a story mention) — a date separator keeps its own
+  // * click, it opens the calendar rather than selecting anything
+  .bubbles.is-selecting &:not(.is-date) .bubble-content-wrapper {
+    pointer-events: none;
+  }
+
   .bubble-content {
     background-color: transparent;
     border-radius: .875rem;
@@ -3350,6 +3398,7 @@
 
 .bubble.service, .bubble.has-fake-service {
   .service-msg {
+    --link-plate-color: #{$link-plate-service-color};
     color: #fff;
     //background-color: rgba(0, 0, 0, .24);
     background-color: var(--message-highlighting-color);
@@ -3517,7 +3566,6 @@
   }
 
   .audio-subtitle,
-  .contact-number,
   .audio-time {
     color: var(--secondary-text-color) !important;
   }
@@ -3774,7 +3822,7 @@
 
 .reply-markup {
   width: 100%;
-  margin-top: .0625rem;
+  margin-top: $reply-markup-margin-top;
 
   .bubble:not(.is-group-last) & {
     margin-bottom: $bubble-margin;
@@ -3783,7 +3831,7 @@
   &-row {
     margin-top: $bubble-margin;
     overflow: hidden;
-    min-height: 2.5rem;
+    min-height: $reply-markup-row-min-height;
     display: flex;
     gap: $bubble-margin;
   }
@@ -3835,6 +3883,12 @@
 
     &.is-link .reply-markup-button-icon {
       transform: rotate(-45deg);
+    }
+
+    // inlineButtonTypeDisabled (layer 229) — shown, but inert
+    &.is-disabled {
+      opacity: .5;
+      pointer-events: none;
     }
 
     &-bg {
@@ -4024,184 +4078,10 @@
       margin-inline-end: .25rem;
       font-size: 1.25rem;
       vertical-align: bottom;
-      margin-left: -.1875rem;
-    }
-
-    &-bullet {
-      margin-inline-end: .3125rem;
-    }
-  }
-
-  &-group {
-    .empty-bubble-placeholder-list-item {
-      margin-top: .4375rem !important;
-    }
-  }
-
-  &-greeting {
-    &.wider {
-      .service-msg {
-        max-width: 272px;
-      }
-    }
-
-    .service-msg {
-      max-width: 232px;
-    }
-
-    .has-service-before {
-      margin-top: .5rem;
-      border-radius: .875rem !important;
-
-      .service-msg {
-        max-width: 252px !important;
-        padding: 0.28125rem 0.625rem !important;
-      }
-    }
-
-    .empty-bubble-placeholder-subtitle {
-      margin-top: .25rem !important;
-    }
-  }
-
-  &-topic {
-    .empty-bubble-placeholder-sticker {
-      --parent-size: 4rem;
-      width: var(--parent-size) !important;
-      height: var(--parent-size) !important;
-      margin-left: auto;
-      margin-right: auto;
-      font-size: var(--parent-size);
-      border-radius: 50%;
-
-      .topic-icon {
-        --size: var(--parent-size);
-      }
-    }
-
-    &-title {
-      font-weight: var(--font-weight-bold);
-      align-self: center;
-      font-size: var(--messages-text-size);
-      text-align: center;
-    }
-
-    &-subtitle {
-      margin: 0.25rem 1rem;
-      max-width: 160px;
-      text-align: center;
-    }
-  }
-
-  &-logs {
-    &-subtitle {
-      max-width: 240px;
-      text-align: center;
-    }
-  }
-
-  &-premiumRequired,
-  &-paidMessages {
-    .service-msg {
-      max-width: 200px;
-    }
-  }
-
-  &-premiumRequired,
-  &-paidMessages,
-  &-directChannelMessages,
-  &-logs {
-    .empty-bubble-placeholder-sticker {
-      width: 8rem !important;
-      height: 8rem !important;
-      margin-left: auto;
-      margin-right: auto;
-      font-size: 128px;
-      border-radius: 50%;
-      background-color: rgba(var(--message-highlighting-color-rgb), 0.8);
-    }
-
-    .bubble-service-button {
-      margin: 0 auto;
-    }
-
-    .empty-bubble-placeholder-stars {
-      display: inline-flex;
-      align-items: center;
-      vertical-align: -0.2em;
-      font-weight: 600;
-      // line-height: 1em;
-      height: 1em;
-    }
-    .empty-bubble-placeholder-star-icon {
-      font-size: 16px;
-    }
-  }
-
-  &-directChannelMessages,
-  &-logs {
-    .empty-bubble-placeholder-sticker {
-      font-size: 80px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-  }
-
-  &-sticker {
-    margin-top: .75rem !important;
-    margin-inline: auto;
-    position: relative;
-    width: 200px;
-    height: 200px;
-    cursor: pointer;
-  }
-}
-
-.empty-bubble-placeholder {
-  position: absolute;
-  top: 50%;
-  // transform: translateY(-50%);
-  left: 50%;
-  transform: translate(-50%, -50%);
-
-  @include animation-level(2) {
-    .bubble-content-wrapper {
-      transition: var(--bubble-transition-in);
-    }
-  }
-
-  .bubbles.has-groups &,
-  .bubbles.is-temporary-thread & {
-    pointer-events: none;
-
-    .bubble-content-wrapper {
-      transform: translateX(0) scale3d(.8, .8, 1);
-      //transform: scale(.8) translateX(0);
-      opacity: 0;
-    }
-  }
-
-  &-line {
-    color: #fff;
-
-    & + & {
-      margin-top: .5rem;
-    }
-  }
-
-  &-list {
-    display: flex;
-    flex-direction: column;
-    gap: .5rem;
-    align-self: center;
-    text-align: initial;
-
-    &-check {
-      margin-inline-end: .25rem;
-      font-size: 1.25rem;
-      vertical-align: bottom;
-      margin-left: -.1875rem;
+      // logical, not `margin-left`: the build lowers `margin-inline-end` into a
+      // higher-specificity `:lang()` rule that sets `margin-left` in RTL, which
+      // would swallow this optical nudge instead of mirroring it
+      margin-inline-start: -.1875rem;
     }
 
     &-bullet {

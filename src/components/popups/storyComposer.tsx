@@ -1,6 +1,7 @@
 import {createSignal, onCleanup, onMount, untrack, useContext, For, Show} from 'solid-js';
 import PopupElement, {createPopup, PopupContext} from '@components/popups/indexTsx';
 import CheckboxFieldTsx from '@components/checkboxFieldTsx';
+import Row from '@components/rowTsx';
 import InputField from '@components/inputField';
 import {toastNew} from '@components/toast';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
@@ -150,7 +151,7 @@ function StoryComposer(props: {peerId: PeerId, media: StoryMedia}) {
         <div class={styles.preview}>
           <Show
             when={props.media.isVideo}
-            fallback={<img class={styles.media} src={props.media.url} />}
+            fallback={<img class={styles.media} src={props.media.url} alt="" />}
           >
             <video class={styles.media} src={props.media.url} autoplay loop muted playsinline />
           </Show>
@@ -186,13 +187,16 @@ function StoryComposer(props: {peerId: PeerId, media: StoryMedia}) {
           </div>
         </Show>
 
-        <CheckboxFieldTsx
-          class={styles.checkbox}
-          text={isChannel ? 'Stories.Composer.KeepOnChannel' : 'Stories.Composer.KeepOnProfile'}
-          toggle
-          checked={pinned()}
-          onChange={setPinned}
-        />
+        <Row class={styles.checkbox}>
+          <Row.CheckboxFieldToggle>
+            <CheckboxFieldTsx
+              toggle
+              checked={pinned()}
+              onChange={setPinned}
+            />
+          </Row.CheckboxFieldToggle>
+          <Row.Title>{i18n(isChannel ? 'Stories.Composer.KeepOnChannel' : 'Stories.Composer.KeepOnProfile')}</Row.Title>
+        </Row>
       </PopupElement.Body>
       <PopupElement.Footer>
         <button

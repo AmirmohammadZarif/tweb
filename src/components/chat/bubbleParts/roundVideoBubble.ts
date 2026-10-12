@@ -9,7 +9,7 @@ import {i18n} from '@lib/langPack';
 import rootScope from '@lib/rootScope';
 import appMediaPlaybackController, {MediaSearchContext} from '@components/appMediaPlaybackController';
 import Icon from '@components/icon';
-import PopupPremium from '@components/popups/premium';
+import showPremiumPopup from '@components/popups/premium';
 import {hideToast, toastNew} from '@components/toast';
 import wrapDocument from '@components/wrappers/document';
 import {SpinnerElement} from '@components/spinner';
@@ -54,7 +54,7 @@ export function wrapRoundVideoBubble({
 
   const bubbleVideoClassNames = ['round', 'just-media'];
   const bubbleAudioClassNames = ['can-have-tail', 'voice-message'];
-  const selectorsToHideWhenCollapsed = ['.topic-name-button-container', '.reply', '.bubble-name-forwarded'];
+  const selectorsToHideWhenCollapsed = ['.bubble-name-chip-container', '.reply', '.bubble-name-forwarded'];
 
   const getBubblesContainer = () => bubble.closest('.bubbles');
 
@@ -206,7 +206,7 @@ export function wrapRoundVideoBubble({
         langPackKey: 'AudioAndVideoTranscription.PremiumAlert',
         langPackArguments: [anchorCallback(() => {
           hideToast();
-          PopupPremium.show({feature: 'voice_to_text'});
+          showPremiumPopup({feature: 'voice_to_text'});
         })]
       });
       return;

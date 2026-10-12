@@ -10,10 +10,13 @@ import appManagersManager from '@appManagers/appManagersManager';
 import listenMessagePort from '@helpers/listenMessagePort';
 import {logger} from '@lib/logger';
 import {getLogEntries, setLogBufferEnabled} from '@lib/debug/logsBuffer';
+import {readThreadMemory} from '@lib/debug/memoryStats';
+import {getMemoryWriterStats} from '@lib/files/memoryWriter';
 import toggleStorages from '@helpers/toggleStorages';
 import appTabsManager from '@appManagers/appTabsManager';
 import callbackify from '@helpers/callbackify';
 import Modes from '@config/modes';
+import {IS_POPUP_SANDBOX} from '@config/debug';
 import {IS_WORKER} from '@helpers/context';
 import {ActiveAccountNumber} from '@lib/accounts/types';
 import commonStateStorage from '@lib/commonStateStorage';
@@ -28,6 +31,8 @@ import {useAutoLock} from '@lib/mainWorker/useAutoLock';
 import pushSingleManager from '@appManagers/pushSingleManager';
 import {createBroadcastChannelWrapper} from '@lib/broadcastChannelWrapper';
 import {MainBroadcastChannelEvents, unversionedMainBroadcastChannelName} from '@config/broadcastChannel';
+import objectUrlRegistry from '@lib/mainWorker/objectUrlRegistry';
+import SharedObjectUrlCache, {getSharedObjectURLCacheStats, resetSharedObjectURLCaches} from '@lib/mainWorker/sharedObjectUrlCache';
 
 
 const log = logger('MTPROTO');
@@ -38,6 +43,14 @@ const log = logger('MTPROTO');
 // MTProtoMessagePort.MASTER_INSTANCE would be overwritten).
 const port = new MTProtoMessagePort<false>(false);
 
+const backgroundObjectURLCache = new SharedObjectUrlCache<string>({
+  getOwner: (owner) => owner,
+  maxBytes: 32 * 1024 * 1024,
+  maxURLs: 16,
+  onEvict: (owner, url) => {
+    port.invokeExceptSource('sharedObjectURLUpdated', {owner, previousUrl: url});
+  }
+});
 const mainBroadcastChannel = createBroadcastChannelWrapper<MainBroadcastChannelEvents>(unversionedMainBroadcastChannelName);
 
 let isLocked = true;
@@ -50,7 +63,10 @@ port.addMultipleEventsListeners({
   environment: (environment) => {
     setEnvironment(environment);
 
-    if(import.meta.env.VITE_MTPROTO_AUTO && Modes.multipleTransports) {
+    // Probes the base DC every 10 s until a WebSocket opens. The popup sandbox runs on fixtures
+    // with no session (this worker's URL carries the page's `?popups=1`): nothing there may reach
+    // Telegram, and nothing needs a transport.
+    if(import.meta.env.VITE_MTPROTO_AUTO && Modes.multipleTransports && !IS_POPUP_SANDBOX) {
       transportController.waitForWebSocket();
     }
   },
@@ -60,6 +76,78 @@ port.addMultipleEventsListeners({
   },
 
   getLogs: () => getLogEntries(),
+
+  getMemoryStats: async() => {
+    const urls = objectUrlRegistry.getStats();
+    const caches = getSharedObjectURLCacheStats();
+    const cacheStorage = CacheStorageController.getStats();
+
+    // * Summed over accounts: this thread is shared by all of them, and so is the footprint
+    const files = {
+      downloadPromises: 0,
+      uploadPromises: 0,
+      queuedPulls: 0,
+      activeDownloads: 0,
+      filePartReferences: 0,
+      refreshReferencePromises: 0
+    };
+    const net = {
+      networkers: 0,
+      sentMessages: 0,
+      sentMessageBodyBytes: 0,
+      pendingMessages: 0,
+      pendingAcks: 0,
+      sentResendReq: 0,
+      lastServerMessages: 0
+    };
+    const data = {
+      messageStorages: 0,
+      cachedMessages: 0,
+      historyStorages: 0,
+      threadHistoryStorages: 0,
+      searchStorages: 0
+    };
+
+    // * Never force creation from a diagnostic - report zeroes instead if they are not up yet
+    const managersByAccount = appManagersManager.areManagersCreated ?
+      await appManagersManager.getManagersByAccount() :
+      {} as Awaited<ReturnType<typeof appManagersManager.getManagersByAccount>>;
+    for(const accountNumber in managersByAccount) {
+      const managers = managersByAccount[+accountNumber as ActiveAccountNumber];
+      const fileStats = managers.apiFileManager.getMemoryStats();
+      for(const key in fileStats) {
+        files[key as keyof typeof fileStats] += fileStats[key as keyof typeof fileStats];
+      }
+
+      const netStats = managers.apiManager.getMemoryStats();
+      for(const key in netStats) {
+        net[key as keyof typeof netStats] += netStats[key as keyof typeof netStats];
+      }
+
+      const dataStats = managers.appMessagesManager.getMemoryStats();
+      for(const key in dataStats) {
+        data[key as keyof typeof dataStats] += dataStats[key as keyof typeof dataStats];
+      }
+    }
+
+    // * Process-wide, not per account - summing it over accounts would multiply it by their count
+    const writers = getMemoryWriterStats();
+    return readThreadMemory('mtproto', {
+      accounts: Object.keys(managersByAccount).length,
+      downloadBuffers: writers.writers,
+      downloadBufferBytes: writers.bytes,
+      ...urls,
+      cappedCaches: caches.caches,
+      cappedCacheEntries: caches.entries,
+      cappedCacheBytes: caches.bytes,
+      cacheStorages: cacheStorage.storages,
+      cacheStorageInFlight: cacheStorage.inFlightOperations,
+      cacheStorageInFlightBytes: cacheStorage.inFlightSaveBytes,
+      ...files,
+      ...net,
+      ...data
+    });
+  },
 
   setLogBufferEnabled: (enabled) => setLogBufferEnabled(enabled),
 
@@ -134,8 +222,24 @@ port.addMultipleEventsListeners({
     port.invokeVoid('receivedServiceMessagePort', undefined, source);
   },
 
-  createObjectURL: (blob) => {
-    return URL.createObjectURL(blob);
+  updateObjectURLPins: (updates, source) => {
+    objectUrlRegistry.updateObjectURLPins(updates, source);
+  },
+
+  createSharedObjectURL: ({blob, owner}) => {
+    return backgroundObjectURLCache.getOrCreate(owner, blob);
+  },
+
+  // * Only worker-minted URLs (or non-blob strings) may be adopted here: a
+  // * blob URL minted by a tab dies with that tab while the registry would
+  // * keep serving it to the others.
+  setSharedObjectURL: ({url, owner}, source) => {
+    const {previousUrl} = backgroundObjectURLCache.adopt(owner, url);
+    port.invokeExceptSource('sharedObjectURLUpdated', {owner, previousUrl, url}, source);
+  },
+
+  releaseSharedObjectURL: ({url, owner}) => {
+    backgroundObjectURLCache.delete(owner, url);
   },
 
   setInterval: (timeout) => {
@@ -156,7 +260,11 @@ port.addMultipleEventsListeners({
 
   toggleUsingPasscode: async(payload, source) => {
     DeferredIsUsingPasscode.resolveDeferred(payload.isUsingPasscode);
-    EncryptionKeyStore.save(payload.encryptionKey);
+    // * when disabling, the old key stays until everything is decrypted - a store nobody has opened
+    // * yet still has to be read with it
+    if(payload.isUsingPasscode) {
+      EncryptionKeyStore.save(payload.encryptionKey);
+    }
 
     await Promise.all([
       AppStorage.toggleEncryptedForAll(payload.isUsingPasscode),
@@ -164,6 +272,10 @@ port.addMultipleEventsListeners({
         sessionStorage.encryptEncryptable() :
         sessionStorage.decryptEncryptable()
     ]);
+
+    if(!payload.isUsingPasscode) {
+      EncryptionKeyStore.save(null);
+    }
 
     pushSingleManager.registerAgain();
 
@@ -174,6 +286,13 @@ port.addMultipleEventsListeners({
 
   changePasscode: async({toStore, encryptionKey}, source) => {
     await commonStateStorage.set({passcode: toStore});
+
+    // * the storages have to be read while the old key is still around, the ones that were never
+    // * opened would otherwise stay encrypted with it and become unreadable
+    await Promise.all([
+      AppStorage.loadEncryptedForAll(),
+      sessionStorage.loadEncryptable()
+    ]);
 
     EncryptionKeyStore.save(encryptionKey);
     await Promise.all([
@@ -272,7 +391,7 @@ let isFirst = true;
 
 function resetNotificationsCount() {
   commonStateStorage.set({
-    notificationsCount: {}
+    pendingNotifications: {}
   });
 }
 
@@ -296,6 +415,7 @@ appTabsManager.onTabStateChange = () => {
 };
 
 const onTabConnect = (source: MessageEventSource) => {
+  objectUrlRegistry.registerSource(source);
   appTabsManager.addTab(source);
   if(isFirst) {
     isFirst = false;
@@ -313,6 +433,7 @@ const onTabConnect = (source: MessageEventSource) => {
 };
 
 const onTabDisconnect = (source: MessageEventSource) => {
+  objectUrlRegistry.releaseSource(source);
   appTabsManager.deleteTab(source);
   autoLockControls.removeTab(source);
 };
@@ -337,6 +458,8 @@ export function connectInProcessTab(p: MessagePort) {
 
 
 function selfTerminate() {
+  resetSharedObjectURLCaches();
+  objectUrlRegistry.dispose();
   if(typeof(SharedWorkerGlobalScope) !== 'undefined') {
     self.close();
   }

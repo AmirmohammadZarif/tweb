@@ -90,6 +90,9 @@ export type DatePickerPopupOptions = {
   // sending popup adds a "Repeat" row here). Kept as a thunk so the JSX is
   // evaluated lazily inside the popup's Solid context.
   bodyAfter?: () => JSX.Element,
+  // Slot for caller-provided controls in the header, rendered BEFORE the
+  // date picker's own navigation controls.
+  headerActions?: () => JSX.Element,
   // Slot for caller-provided extra footer buttons, rendered AFTER the primary
   // confirm button (e.g. "Send when online" secondary button).
   footerAfter?: () => JSX.Element,
@@ -211,6 +214,8 @@ export default function showDatePickerPopup(opts: DatePickerPopupOptions): void 
     if(opts.withTime) {
       hoursInputField = new InputField({plainText: true});
       minutesInputField = new InputField({plainText: true});
+      hoursInputField.input.setAttribute('aria-label', I18n.format('AccDescr.Hours', true));
+      minutesInputField.input.setAttribute('aria-label', I18n.format('AccDescr.Minutes', true));
       hoursInputField.setValueSilently(hoursValue());
       minutesInputField.setValueSilently(minutesValue());
 
@@ -778,17 +783,23 @@ export default function showDatePickerPopup(opts: DatePickerPopupOptions): void 
             <div class="date-picker-month-title">{monthTitleEl()}</div>
           </PopupElement.Title>
           <div class="date-picker-controls">
+            <Show when={opts.headerActions}>
+              {opts.headerActions()}
+            </Show>
             <Show when={showMultiSelectToggle}>
               <ButtonIconTsx
                 icon="select"
                 class={classNames('date-picker-multiselect', 'primary', multiSelectActive() && 'is-active')}
                 noRipple
+                aria-label={I18n.format('Message.Context.Select', true)}
+                aria-pressed={multiSelectActive()}
                 onClick={toggleMultiSelect}
               />
             </Show>
             <ButtonIconTsx
               icon="up"
               class={classNames('date-picker-prev', 'primary')}
+              aria-label={I18n.format('AccDescr.PreviousMonth', true)}
               noRipple
               disabled={isPrevDisabled()}
               onClick={onPrev}
@@ -796,6 +807,7 @@ export default function showDatePickerPopup(opts: DatePickerPopupOptions): void 
             <ButtonIconTsx
               icon="down"
               class={classNames('date-picker-next', 'primary')}
+              aria-label={I18n.format('AccDescr.NextMonth', true)}
               noRipple
               disabled={isNextDisabled()}
               onClick={onNext}
@@ -808,7 +820,6 @@ export default function showDatePickerPopup(opts: DatePickerPopupOptions): void 
           ref={(el) => scrollableHostRef = el}
           contextRef={(ctx) => scrollableContextRef = ctx}
           onScroll={onScroll}
-          withBorders="both"
         >
           <div class="date-picker-months" style={{height: totalHeight + 'px'}}>
             <For each={visibleSections()}>{(section) => (

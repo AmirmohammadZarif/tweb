@@ -4,7 +4,7 @@ import {ResizableLayerProps, TextLayerInfo, TextRenderingInfoLine} from '@compon
 import {fontInfoMap, getContrastColor} from '@components/mediaEditor/utils';
 import createElementFromMarkup from '@helpers/createElementFromMarkup';
 import track from '@helpers/solid/track';
-import {i18n} from '@lib/langPack';
+import I18n, {i18n} from '@lib/langPack';
 import {batch, createEffect, createMemo, on, onCleanup, onMount} from 'solid-js';
 import {modifyMutable, reconcile} from 'solid-js/store';
 
@@ -170,10 +170,15 @@ export default function TextLayerContent(props: ResizableLayerProps) {
         '--align-items': flexAlignMap[props.layer.textInfo.alignment]
       }}
     >
+      {/* * translate="no": the typed text is read back out of this element and baked into the image */}
       <div
         ref={contentEditable}
         class="media-editor__text-layer-layout"
         contenteditable
+        role="textbox"
+        aria-multiline={true}
+        aria-label={I18n.format('MediaEditor.TypeSomething', true)}
+        translate="no"
         onInput={() => updateBackground()}
         onFocus={onFocus}
       >

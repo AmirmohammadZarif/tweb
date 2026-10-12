@@ -39,6 +39,38 @@
     }
   }
 
+  // A floating forum/community remains mounted while its own management tabs
+  // are open. Move it out of the hit-testing layer so the selected slider tab
+  // receives both pointer and keyboard interaction.
+  &.has-real-tabs .topics-container.is-floating {
+    transform: translateX(calc(100% * var(--reflect)));
+    pointer-events: none;
+  }
+
+  // * while chats are being selected the sidebar wears a header of its own (DialogsSelection):
+  // * a `sidebar-header` like any other, laid over the usual one and faded in, so nothing in that
+  // * one has to know about the selection
+  .chatlist-selection-header {
+    position: absolute;
+    top: 0;
+    inset-inline: 0;
+    z-index: 4;
+    background-color: var(--surface-color);
+    opacity: 0;
+    pointer-events: none;
+
+    @include animation-level(2) {
+      transition: opacity .2s ease-in-out;
+    }
+
+    // * `forwards` is what `SetTransition` flips at once in either direction - the class of the
+    // * state itself is only taken off once the fade it started has run out
+    &.is-visible.forwards {
+      opacity: 1;
+      pointer-events: all;
+    }
+  }
+
   .main-search-sidebar-header {
     transition: background-color var(--transition-standard-in), opacity var(--transition-standard-in);
     opacity: 1;
@@ -296,7 +328,9 @@
     position: absolute;
     top: 0;
     inset-inline: 0;
-    z-index: 2;
+    // above anything the list itself lifts (a row being dragged, the checkbox of a selected one):
+    // the list scrolls under this panel, so nothing in it belongs on top
+    z-index: 3;
     // Children (pending suggestion, gradient, folder tabs) flow naturally — adding a panel above
     // the tabs just stacks instead of overlapping.
   }
@@ -418,6 +452,7 @@
       padding-top: var(--chatlist-overlay-height, 0);
 
       .has-pending-suggestion &,
+      .has-unconfirmed-authorization &,
       .has-horizontal-folders & {
         border-top: none !important;
       }
@@ -471,6 +506,10 @@
       } */
       &:not(.is-hidden) {
         transform: translateZ(0);
+
+        :where(.a11y) & {
+          visibility: visible;
+        }
       }
     }
 
@@ -782,6 +821,25 @@
   .btn-control {
     margin-bottom: 1rem;
   }
+
+  // * a folder's colour, while the tags are shown, sits where the grip is until the grip shows up:
+  // * Android swaps the one for the other too. At once - the grip comes in on a transition of its
+  // * own, and one fading out under the other only muddles the two
+  .chat-folder-color {
+    position: absolute;
+    top: 50%;
+    inset-inline-end: 1.125rem;
+    transform: translateY(-50%);
+    pointer-events: none;
+  }
+
+  .row-sortable {
+    @include hover() {
+      .chat-folder-color {
+        opacity: 0;
+      }
+    }
+  }
 }
 
 .two-step-verification {
@@ -861,8 +919,8 @@
       height: 160px;
       margin: 1rem auto 1.3125rem;
 
-      .rlottie,
-      .rlottie-vector {
+      .lottie,
+      .lottie-vector {
         inset-inline-start: .625rem;
       }
     }
@@ -922,28 +980,23 @@
   }
 }
 
-.active-sessions-container {
-  .row {
-    // margin-top: 0;
-    // padding-top: 1rem;
-    // padding-bottom: .9375rem;
+/* A session / connected-website row: bold name, small muted date, one-line rest. */
+.session-row {
+  .row-title {
+    font-weight: var(--font-weight-bold);
+  }
 
-    &-title {
-      font-weight: var(--font-weight-bold);
-    }
+  .row-title-right {
+    font-size: var(--font-size-12);
+    color: var(--secondary-text-color);
+    line-height: var(--line-height-12);
+  }
 
-    &-title-right {
-      font-size: var(--font-size-12);
-      color: var(--secondary-text-color);
-      line-height: var(--line-height-12);
-    }
-
-    &-midtitle,
-    &-subtitle {
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
+  .row-midtitle,
+  .row-subtitle {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 }
 
@@ -1065,6 +1118,24 @@
         }
       }
 
+      // The tile is a `role="button"` and does take the global focus ring, but
+      // its media child is positioned and paints over an outline, so nothing of
+      // it is ever seen. This overlay already sits above that child to draw the
+      // selection border — reuse it, so the corner radii and the stacking are
+      // the ones the grid already has, and add a line just inside it. The line
+      // is what separates "focused" from "selected", and it reads against any
+      // wallpaper because it is drawn in the surface colour rather than in
+      // another tint of the border's own.
+      :where(.a11y) &:focus-visible {
+        outline: none;
+
+        &:after {
+          opacity: 1;
+          border-color: var(--focus-ring-color);
+          box-shadow: inset 0 0 0 var(--focus-ring-width) var(--surface-color);
+        }
+      }
+
       &-media {
         transition: transform .2s ease-in-out;
         transform: scale(1);
@@ -1181,6 +1252,13 @@
       opacity: 0;
       pointer-events: none;
     }
+
+    // * the bot's button takes the pointer back from the row it sits in, and is a tab stop of its
+    // * own: it gives up both with the row, and is gone once the row has faded out
+    .dialog-subtitle-badge-bot-app {
+      visibility: hidden;
+      pointer-events: none;
+    }
   }
 
   .folders-tabs-scrollable {
@@ -1196,6 +1274,10 @@
       .sidebar-header__title {
         opacity: 1;
       }
+
+      .dialog-subtitle-badge-bot-app {
+        visibility: visible;
+      }
     }
 
     .folders-tabs-scrollable {
@@ -1210,6 +1292,11 @@
       .input-search,
       .sidebar-header__title {
         transition: opacity var(--transition-standard-in);
+      }
+
+      // * kept until the row has faded out - and back at once when it fades in again
+      .dialog-subtitle-badge-bot-app {
+        transition: visibility var(--transition-standard-in);
       }
     }
 

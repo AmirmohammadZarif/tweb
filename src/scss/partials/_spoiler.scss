@@ -1,3 +1,5 @@
+@use "../shared" as *;
+
 .spoiler {
   --anim: .4s ease;
   // position: relative; // ! idk what it was for
@@ -85,6 +87,7 @@
   width: 100%;
   height: 100%;
   pointer-events: none;
+  overflow: hidden; // the canvas is taller than the message (pushOverlayState): no scroll for it
   
   &__canvas {
     width: 100%;
@@ -95,15 +98,16 @@
     &--hidden {
       opacity: 0;
     }
+
+    // drawn by the spoiler worker (MessageSpoilerOverlay.pushOverlayState)
+    &--committed-size {
+      @include offscreen-canvas-committed-size;
+    }
   }
 }
 
 .bluff-spoiler {
-  // The mask is a group effect: applied here once, it masks all the letters' boxes.
-  // mask-image is set inline by BluffSpoilerController
-  mask-size: 240px 120px;
-  mask-repeat: repeat;
-
+  position: relative;
   opacity: 0;
   transition: opacity 0.2s;
 
@@ -119,6 +123,14 @@
     display: inline-block;
     width: 0.75em;
     white-space: pre;
-    background-color: currentColor;
+    color: transparent;
+  }
+
+  &-canvas {
+    position: absolute;
+    left: 0;
+    top: 0;
+    display: block;
+    pointer-events: none;
   }
 }

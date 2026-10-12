@@ -1,7 +1,7 @@
 import lastItem from '@helpers/array/lastItem';
 import track from '@helpers/solid/track';
 import {MediaSize} from '@helpers/mediaSize';
-import {MessageEntity} from '@layer';
+import {MessageEntity, MessageMedia} from '@layer';
 import {oneDayInSeconds} from '@lib/constants';
 import {Accessor, createComputed, createContext, createResource, untrack, useContext} from 'solid-js';
 import {createStore, SetStoreFunction, Store} from 'solid-js/store';
@@ -35,6 +35,9 @@ export type CreatePollStore = {
   allowRevoting: boolean;
   shuffleOptions: boolean;
   hasCorrectAnswer: boolean;
+  restrictToSubscribers: boolean;
+  limitByCountry: boolean;
+  countriesIso2: string[];
   durationLimited: boolean;
 
   timeLimit?: TimeLimit;
@@ -95,19 +98,34 @@ export type AttachedSticker = {
   docId: DocId;
 };
 
+export type AttachedLink = {
+  type: 'link';
+  url: string;
+  preview?: MessageMedia.messageMediaWebPage;
+};
+
 /**
  * Finalized attached media — what gets sent to the server. Excludes the
  * transient `Pending` state used while a video is being rendered locally.
  */
-export type FinalizedAttachedMedia = AttachedPhoto | AttachedVideo | AttachedSticker;
+export type FinalizedAttachedMedia = AttachedPhoto | AttachedVideo | AttachedSticker | AttachedLink;
 
 export type AttachedMedia = FinalizedAttachedMedia | Pending;
 
-export type SupportedMediaType = 'photo' | 'video' | 'gif' | 'sticker';
+export type SupportedMediaType = 'photo' | 'video' | 'gif' | 'sticker' | 'link';
 
 export type CreatePollContextExtra = {
   isBroadcast: Accessor<boolean>;
   supportedMediaTypes: Accessor<SupportedMediaType[]>;
+  /** set when a bot keyboard asked for a poll: a quiz (`true`) or a regular one, and nothing else */
+  quiz?: boolean;
+};
+
+/** What turning a poll into a quiz changes besides itself: a quiz takes no added options and no revotes. */
+export const QUIZ_POLL_SETTINGS: Pick<CreatePollStore, 'hasCorrectAnswer' | 'allowAddingOptions' | 'allowRevoting'> = {
+  hasCorrectAnswer: true,
+  allowAddingOptions: false,
+  allowRevoting: false
 };
 
 export type CreatePollContextValue = CreatePollContextExtra & {
@@ -146,11 +164,15 @@ export const createPollStoreContextValue = (extra: CreatePollContextExtra): Crea
     allowRevoting: true,
     shuffleOptions: true,
     hasCorrectAnswer: false,
+    restrictToSubscribers: false,
+    limitByCountry: false,
+    countriesIso2: [],
     durationLimited: false,
     timeLimit: {type: 'duration', duration: oneDayInSeconds},
     explanation: '',
     explanationEntities: [],
-    hideResults: false
+    hideResults: false,
+    ...(extra.quiz ? QUIZ_POLL_SETTINGS : {})
   });
 
   const {maxOptions} = useCreatePollLimits();

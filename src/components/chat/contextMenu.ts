@@ -1,32 +1,34 @@
 import type {MyDocument} from '@appManagers/appDocsManager';
 import type Chat from '@components/chat/chat';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
+import Modes from '@config/modes';
 import ButtonMenu, {ButtonMenuItemOptions, ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
-import PopupDeleteMessages from '@components/popups/deleteMessages';
+import showDeleteMessagesPopup from '@components/popups/deleteMessages';
 import showForwardPopup from '@components/popups/forward';
-import PopupPinMessage from '@components/popups/unpinMessage';
+import showPinMessagePopup from '@components/popups/unpinMessage';
 import {copyTextToClipboard} from '@helpers/clipboard';
-import PopupSendNow from '@components/popups/sendNow';
+import showSendNowPopup from '@components/popups/sendNow';
 import {toastNew} from '@components/toast';
 import I18n, {i18n, LangPackKey} from '@lib/langPack';
 import findUpClassName from '@helpers/dom/findUpClassName';
+import getSelectionElementFromTarget from '@components/chat/getSelectionElementFromTarget';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import {attachClickEvent, simulateClickEvent} from '@helpers/dom/clickEvent';
 import isSelectionEmpty from '@helpers/dom/isSelectionEmpty';
-import {Message, Poll, Chat as MTChat, MessageMedia, InputStickerSet, StickerSet, Document, Reaction, Photo, SponsoredMessage, TextWithEntities, TodoItem, TodoCompletion, MessageReplyHeader, PollAnswer} from '@layer';
+import {Message, Poll, Chat as MTChat, MessageEntity, MessageMedia, InputStickerSet, StickerSet, Document, Reaction, Photo, SponsoredMessage, TextWithEntities, TodoItem, TodoCompletion, MessageReplyHeader, PollAnswer} from '@layer';
 import assumeType from '@helpers/assumeType';
-import PopupSponsored from '@components/popups/sponsored';
+import showSponsoredPopup from '@components/popups/sponsored';
 import ListenerSetter from '@helpers/listenerSetter';
 import {getMiddleware} from '@helpers/middleware';
 import PeerTitle from '@components/peerTitle';
 import StackedAvatars from '@components/stackedAvatars';
 import {IS_APPLE, IS_MOBILE} from '@environment/userAgent';
-import PopupReactedList from '@components/popups/reactedList';
+import showReactedListPopup from '@components/popups/reactedList';
 import {ChatReactionsMenu, REACTION_CONTAINER_SIZE} from '@components/chat/reactionsMenu';
 import getPeerId from '@appManagers/utils/peers/getPeerId';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
 import {AppManagers} from '@lib/managers';
-import positionMenu, {MenuPositionPadding} from '@helpers/positionMenu';
+import positionMenu, {MenuPositionPadding, positionFloatingMenu} from '@helpers/positionMenu';
 import {getAppWindow, getOverlayRoot} from '@helpers/appWindow';
 import contextMenuController from '@helpers/contextMenuController';
 import {attachContextMenuListener} from '@helpers/dom/attachContextMenuListener';
@@ -34,44 +36,44 @@ import filterAsync from '@helpers/array/filterAsync';
 import appDownloadManager, {DownloadBlob} from '@lib/appDownloadManager';
 import {SERVICE_PEER_ID} from '@appManagers/constants';
 import {MessagesStorageKey, MyMessage} from '@appManagers/appMessagesManager';
-import filterUnique from '@helpers/array/filterUnique';
 import replaceContent from '@helpers/dom/replaceContent';
 import wrapEmojiText, {wrapEmojiTextWithEntities} from '@lib/richTextProcessor/wrapEmojiText';
 import deferredPromise, {CancellablePromise} from '@helpers/cancellablePromise';
 import showStickersPopup from '@components/popups/stickers';
 import getMediaFromMessage from '@appManagers/utils/messages/getMediaFromMessage';
 import canSaveMessageMedia from '@appManagers/utils/messages/canSaveMessageMedia';
+import {addToProfileMusic, getSavedMusicDocument, removeFromProfileMusic} from '@components/savedMusicActions';
 import getGroupedText from '@appManagers/utils/messages/getGroupedText';
-import PopupElement from '@components/popups';
 import confirmationPopup, {PopupConfirmationOptions} from '@components/confirmationPopup';
 import Icon from '@components/icon';
 import cloneDOMRect from '@helpers/dom/cloneDOMRect';
-import PopupPremium from '@components/popups/premium';
+import showPremiumPopup from '@components/popups/premium';
 import {ChatInputReplyTo} from '@components/chat/input';
-import {makeFullMid, TEST_BUBBLES_DELETION} from '@components/chat/bubbles';
+import {makeFullMid} from '@components/chat/bubbles';
 import AppStatisticsTab from '@components/sidebarRight/tabs/statistics';
 import {ChatType} from './chatType';
+import {canEditMessageMediaWithEditor, getEditMediaLangKey} from './editMessageMedia';
 import {formatFullSentTime} from '@helpers/date';
-import PopupToggleReadDate from '@components/popups/toggleReadDate';
+import showToggleReadDatePopup from '@components/popups/toggleReadDate';
 import rootScope from '@lib/rootScope';
 import ReactionElement from '@components/chat/reaction';
+import ReactionsElement from '@components/chat/reactions';
+import createReactionContextMenu from '@components/chat/reactionContextMenu';
 import InputField from '@components/inputField';
 import getMainGroupedMessage from '@appManagers/utils/messages/getMainGroupedMessage';
 import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
 import getRichSelection from '@helpers/dom/getRichSelection';
 import detectLanguageForTranslation from '@helpers/detectLanguageForTranslation';
-import wrapRichText from '@lib/richTextProcessor/wrapRichText';
-import documentFragmentToHTML from '@helpers/dom/documentFragmentToHTML';
+import {getMessageSourceText} from '@stores/peerLanguage';
 import {showAdReport, showMessageReport} from '@components/popups/reportAd';
 import showAboutAdPopup from '@components/popups/aboutAd';
-import getRichValueWithCaret from '@helpers/dom/getRichValueWithCaret';
+import attachPlainMessageEditor from '@components/chat/inputEditor/plainField';
 import deepEqual from '@helpers/object/deepEqual';
-import wrapDraftText from '@lib/richTextProcessor/wrapDraftText';
-import PopupStarReaction from '@components/popups/starReaction';
+import showStarReactionPopup from '@components/popups/starReaction';
 import getUniqueCustomEmojisFromMessage from '@appManagers/utils/messages/getUniqueCustomEmojisFromMessage';
 import getPeerTitle from '@components/wrappers/getPeerTitle';
 import {getFullDate} from '@helpers/date/getFullDate';
-import PaidMessagesInterceptor, {PAYMENT_REJECTED} from '@components/chat/paidMessagesInterceptor';
+import {PAYMENT_REJECTED} from '@components/chat/paidMessagesInterceptor';
 import {MySponsoredPeer} from '@appManagers/appChatsManager';
 import showChecklistPopup from '@components/popups/checklist';
 import createSubmenuTrigger, {CreateSubmenuArgs} from '@components/createSubmenuTrigger';
@@ -92,12 +94,23 @@ import {shouldShufflePollOptions, shufflePollOptions} from './bubbleParts/pollMe
 import {truncateTextWithEntities} from '@lib/richTextProcessor/truncateTextWithEntities';
 import {pollOptionToLink} from './bubbleParts/pollMessageContent/pollToOptionLink';
 import createCrmTaskFromText from '@lib/crm/createTask';
+import {getPollVoteRestrictionPeerId} from '@appManagers/utils/polls/pollVoteRestriction';
+import {getPollVoteRestrictionText} from './bubbleParts/pollMessageContent/pollVoteRestriction';
+import {canViewPollStatistics as canViewPollStatisticsForMessage} from './bubbleParts/pollMessageContent/pollStatistics';
+import {canCopyMediaToClipboard} from '@helpers/copyMediaToClipboard';
+import copyMessageMediaWithFeedback from '@components/copyMessageMediaWithFeedback';
+import isEphemeralMessage from '@appManagers/utils/messages/isEphemeralMessage';
+import isAnchoredEphemeralMessage from '@appManagers/utils/messages/isAnchoredEphemeralMessage';
+import canReplyToEphemeralMessage from '@appManagers/utils/messages/canReplyToEphemeralMessage';
+import {flattenRichMessageSummary} from '@lib/richMessage';
 
 type ChatContextMenuButton = ButtonMenuItemOptions & {
   verify: () => boolean | Promise<boolean>,
   notDirect?: () => boolean,
   withSelection?: true,
   isSponsored?: true,
+  // offered on a welcome message too (layer 229): its section only edits, copies and deletes
+  welcome?: true,
   localName?: 'views' | 'emojis' | 'sponsorInfo' | 'sponsorAdditionalInfo'
 };
 
@@ -122,7 +135,7 @@ export function getSponsoredMessageButtons(options: {
       icon: 'info',
       text: 'Chat.Message.Sponsored.What',
       onClick: () => {
-        PopupElement.createPopup(PopupSponsored);
+        showSponsoredPopup();
       },
       verify: () => extraVerify() && !canReport,
       isSponsored: true
@@ -138,7 +151,7 @@ export function getSponsoredMessageButtons(options: {
       icon: 'hand',
       text: 'HideAd',
       onClick: () => {
-        PopupPremium.show({feature: 'no_ads'});
+        showPremiumPopup({feature: 'no_ads'});
       },
       verify: () => extraVerify() && !canReport,
       isSponsored: true
@@ -152,7 +165,7 @@ export function getSponsoredMessageButtons(options: {
       icon: 'crossround',
       text: 'RemoveAds',
       onClick: () => {
-        PopupPremium.show({feature: 'no_ads'});
+        showPremiumPopup({feature: 'no_ads'});
       },
       verify: () => extraVerify() && !!canReport,
       isSponsored: true
@@ -223,6 +236,7 @@ export default class ChatContextMenu {
   private selectedMessagesText: PartialByKeys<Awaited<ReturnType<ChatContextMenu['getSelectedMessagesText']>>, 'html'>;
   private selectedMessages: MyMessage[];
   private avatarPeerId: number;
+  private copyMediaButton: ChatContextMenuButton;
 
   private isLegacy: boolean;
   private messagePeerId: number;
@@ -244,6 +258,44 @@ export default class ChatContextMenu {
     this.attachListenerSetter.removeAll();
 
     if(IS_TOUCH_SUPPORTED/*  && false */) {
+      // Reaction taps are handled by the inner bubbles delegate, which stops
+      // the synthetic mousedown before it reaches this container. Listen to
+      // touchstart in capture phase so a real hold can still open the same
+      // reaction-specific menu without changing the normal tap behavior.
+      attachContextMenuListener({
+        element,
+        callback: (e) => {
+          // A hardware keyboard on a touch-capable device uses the same
+          // synthetic contextmenu path as desktop, without a touchend to wait for.
+          if(Modes.a11y && e.type === 'contextmenu' && !e.isTrusted) {
+            if(!this.chat.selection.isSelecting) this.onContextMenu(e);
+            return;
+          }
+          if(
+            !this.chat.selection.isSelecting &&
+            (e.target as HTMLElement).closest('reaction-element')
+          ) {
+            this.onContextMenu(e);
+            const options = {
+              capture: true,
+              once: true
+            };
+            const listenerSetter = this.attachListenerSetter;
+            function onTouchEnd(e: TouchEvent) {
+              listenerSetter.removeManual(element, 'touchcancel', onTouchCancel, options);
+              cancelEvent(e);
+            }
+            function onTouchCancel() {
+              listenerSetter.removeManual(element, 'touchend', onTouchEnd, options);
+            }
+            listenerSetter.add(element)('touchend', onTouchEnd, options);
+            listenerSetter.add(element)('touchcancel', onTouchCancel, options);
+          }
+        },
+        listenerSetter: this.attachListenerSetter,
+        listenerOptions: {capture: true}
+      });
+
       attachClickEvent(element, (e) => {
         if(this.chat.selection.isSelecting) {
           return;
@@ -256,7 +308,7 @@ export default class ChatContextMenu {
           '.peer-title',
           '.reply',
           '.document',
-          'audio-element',
+          '.audio',
           // 'avatar-element',
           'a',
           '.bubble-beside-button',
@@ -310,11 +362,25 @@ export default class ChatContextMenu {
         }
       }
     });
+
+    this.attachListenerSetter.add(rootScope)('ephemeral_history_delete', ({peerId, msgs}) => {
+      if(peerId !== this.chat.peerId) {
+        return;
+      }
+
+      if(this.mid && msgs.has(this.mid)) {
+        contextMenuController.close();
+        return;
+      }
+
+      if(this.groupedMessages?.some((message) => msgs.has(message.mid))) {
+        contextMenuController.close();
+      }
+    });
   }
 
   public onContextMenu = (e: MouseEvent | Touch | TouchEvent) => {
     if(this.chat.type === ChatType.Static) return;
-
 
     let bubble: HTMLElement, contentWrapper: HTMLElement, avatar: HTMLElement;
 
@@ -350,11 +416,33 @@ export default class ChatContextMenu {
 
     const paidReactionElement = (e.target as HTMLElement).closest('.reaction.is-paid');
     if(paidReactionElement) {
-      PopupElement.createPopup(PopupStarReaction, bubble.dataset.peerId.toPeerId(), mid, this.chat);
+      showStarReactionPopup(bubble.dataset.peerId.toPeerId(), mid, this.chat);
       return;
     }
 
-    const tagReactionElement = findUpClassName(e.target, 'reaction-tag');
+    const reactionElement = (e.target as HTMLElement).closest('reaction-element') as ReactionElement;
+    const tagReactionElement = reactionElement?.classList.contains('reaction-tag') ? reactionElement : undefined;
+    if(
+      reactionElement &&
+      !tagReactionElement &&
+      !this.chat.selection.isSelecting &&
+      !findUpClassName(e.target, 'tooltip')
+    ) {
+      const reactionsElement = reactionElement.parentElement as ReactionsElement;
+      if(reactionsElement?.getContext) {
+        const context = reactionsElement.getContext();
+        const reaction = reactionElement.reactionCount.reaction;
+        const canOpenReactionMenu =
+          reaction._ === 'reactionCustomEmoji' ||
+          !!context.reactions?.pFlags.can_see_list ||
+          context.peerId.isUser();
+        if(canOpenReactionMenu) {
+          void this.openReactionContextMenu(reactionElement, reactionsElement);
+          return;
+        }
+      }
+    }
+
     let checklistItemId: number;
     const checklistItemElement = (e.target as HTMLElement).closest('[data-checklist-item-id]');
     if(checklistItemElement) {
@@ -384,7 +472,7 @@ export default class ChatContextMenu {
       this.reactionElement = tagReactionElement as ReactionElement;
 
       if(this.isTag && !rootScope.premium) {
-        PopupPremium.show({feature: 'saved_tags'});
+        showPremiumPopup({feature: 'saved_tags'});
         return;
       }
 
@@ -460,7 +548,6 @@ export default class ChatContextMenu {
       }
     };
 
-
     const prepareForLog = async() => {
       const log = this.chat.bubbles.logsByBubble.get(bubble);
       try {
@@ -497,6 +584,10 @@ export default class ChatContextMenu {
 
       const cleanupHighlight = this.highlightPollAnswer();
 
+      // * the menu belongs to a message, not to an avatar — highlight it the way it gets selected
+      const activeElement = bubble && getSelectionElementFromTarget(e.target);
+      activeElement && this.chat.bubbles.toggleActiveBubble(activeElement, true);
+
       // if(reactionsMenu) {
       //   reactionsMenu.widthContainer.style.top = element.style.top;
       //   reactionsMenu.widthContainer.style.left = element.style.left;
@@ -508,6 +599,7 @@ export default class ChatContextMenu {
       contextMenuController.openBtnMenu(element, () => {
         reactionsCallbacks?.onClose();
         cleanupHighlight?.();
+        activeElement && this.chat.bubbles.toggleActiveBubble(activeElement, false);
 
         this.mid = 0;
         this.peerId = undefined;
@@ -519,13 +611,96 @@ export default class ChatContextMenu {
         setTimeout(() => {
           destroy();
         }, 300);
-      });
+      }, Modes.a11y ? (e.target as HTMLElement).closest<HTMLElement>('[tabindex], button, a[href]') || bubble : undefined);
 
       reactionsCallbacks?.onAfterInit();
     };
 
     openMenu();
   };
+
+  private async openReactionContextMenu(
+    reactionElement: ReactionElement,
+    reactionsElement: ReactionsElement
+  ) {
+    this.cleanup();
+    const middleware = this.middleware.get();
+    const reactionListenerSetter = new ListenerSetter();
+    const context = reactionsElement.getContext();
+    const appDocument = getAppWindow().document;
+    let pending = true;
+    const cancelPending = () => {
+      if(pending && middleware()) {
+        this.middleware.clean();
+      }
+    };
+    const removePendingListeners = () => {
+      appDocument.removeEventListener('pointerdown', cancelPending, true);
+      appDocument.removeEventListener('keydown', cancelPending, true);
+    };
+    appDocument.addEventListener('pointerdown', cancelPending, {capture: true, once: true});
+    appDocument.addEventListener('keydown', cancelPending, {capture: true, once: true});
+    middleware.onClean(removePendingListeners);
+    reactionListenerSetter.add(rootScope)('history_delete', ({peerId, msgs}) => {
+      if(peerId !== context.peerId || !msgs.has(context.mid)) {
+        return;
+      }
+
+      if(pending) {
+        this.middleware.clean();
+      } else {
+        contextMenuController.close();
+      }
+    });
+
+    let result: Awaited<ReturnType<typeof createReactionContextMenu>>;
+    try {
+      result = await createReactionContextMenu({
+        chat: this.chat,
+        managers: this.managers,
+        reactionElement,
+        reactionsElement,
+        middleware,
+        listenerSetter: reactionListenerSetter
+      });
+    } catch(err) {
+      reactionListenerSetter.removeAll();
+      if(middleware()) {
+        this.middleware.clean();
+      }
+      return;
+    } finally {
+      pending = false;
+      removePendingListeners();
+    }
+
+    if(!middleware() || !result || contextMenuController.isOpened()) {
+      result?.destroy();
+      reactionListenerSetter.removeAll();
+      return;
+    }
+
+    const {element, destroy} = result;
+    this.element = element;
+    element.id = 'reaction-contextmenu';
+    getOverlayRoot().append(element);
+
+    const bubble = reactionElement.closest('.bubble');
+    const alignment = bubble?.classList.contains('is-in') ? 'start' : 'end';
+    positionFloatingMenu(
+      reactionElement.getBoundingClientRect(),
+      element,
+      `top-${alignment}`,
+      [0, 8]
+    );
+
+    contextMenuController.openBtnMenu(element, () => {
+      this.element = undefined;
+      reactionListenerSetter.removeAll();
+      this.middleware.clean();
+      setTimeout(destroy, 300);
+    }, reactionElement);
+  }
 
   private highlightPollAnswer() {
     if(!this.pollAnswer || !this.bubble) return;
@@ -556,6 +731,10 @@ export default class ChatContextMenu {
       let good: boolean;
 
       if((this.isSponsored && !button.isSponsored) || (!this.isSponsored && button.isSponsored)) {
+        return false;
+      }
+
+      if(this.chat.type === ChatType.Welcome && !button.welcome) {
         return false;
       }
 
@@ -717,12 +896,36 @@ export default class ChatContextMenu {
     };
 
     const self = this;
+    const pollVoteRestrictionsButton: ChatContextMenuButton = {
+      onClick: noop,
+      keepOpen: true,
+      secondary: true,
+      separatorDown: true,
+      className: 'is-static',
+      verify: async() => {
+        const textElement = await this.getPollVoteRestrictionsText();
+        if(!textElement) return false;
 
-    this.buttons = [{
+        pollVoteRestrictionsButton.textElement = textElement;
+        return true;
+      }
+    };
+
+    this.buttons = [pollVoteRestrictionsButton, {
+      // an anchored ephemeral message looks like any other, so the menu says first whose version
+      // it is — above the choice to revert it (desktop's `InsertPollMenuLabel`, Android's hint)
+      regularText: i18n('Ephemeral.AnchoredAbout'),
+      className: 'ephemeral-context-about',
+      secondary: true,
+      separatorDown: true,
+      // a label, not an action: keyboard focus starts at the first thing to do
+      onClick: undefined,
+      verify: () => isAnchoredEphemeralMessage(this.message)
+    }, {
       // secondary: true,
       onClick: () => {
         if(this.canViewReadTime === false) {
-          PopupElement.createPopup(PopupToggleReadDate, this.peerId, 'readTime');
+          showToggleReadDatePopup(this.peerId, 'readTime');
         }
       },
       verify: () => this.peerId.isUser() && this.managers.appMessagesManager.canViewMessageReadParticipants(this.message),
@@ -799,6 +1002,8 @@ export default class ChatContextMenu {
       text: 'Quote',
       onClick: this.onQuoteClick,
       verify: async() => /* await this.chat.canSend() && */
+        !isEphemeralMessage(this.message) &&
+        !isAnchoredEphemeralMessage(this.message) &&
         !this.message.pFlags.is_outgoing &&
         !!this.chat.input.messageInput &&
         !!(this.message as Message.message).message &&
@@ -817,6 +1022,8 @@ export default class ChatContextMenu {
       // Read-only: the composer is hidden, so replying is a dead end.
       verify: async() => !this.isLegacy &&
         !useIsCrmReadOnly()() &&
+        !(isEphemeralMessage(this.message) && !canReplyToEphemeralMessage(this.message)) &&
+        !isAnchoredEphemeralMessage(this.message) &&
         // await this.chat.canSend() &&
         !this.message.pFlags.is_outgoing &&
         !!this.chat.input.messageInput &&
@@ -835,7 +1042,8 @@ export default class ChatContextMenu {
         });
       },
       verify: () => {
-        if(this.chat.threadId) return false;
+        // what an anchored message shows is not the post its replies belong to (desktop)
+        if(this.chat.threadId || isAnchoredEphemeralMessage(this.message)) return false;
         const replies = (this.message as Message.message)?.replies;
         return !!(replies && !replies.pFlags.comments && replies.replies);
       }
@@ -868,10 +1076,18 @@ export default class ChatContextMenu {
     }, {
       icon: 'edit',
       text: 'Edit',
+      welcome: true,
       onClick: this.onEditClick,
       verify: async() => (await this.managers.appMessagesManager.canEditMessage(this.message, 'text')) &&
         !!this.chat.input.messageInput ||
         (this.message._ === 'message' && this.message.pFlags?.out && this.message.suggested_post && !this.message.suggested_post.pFlags?.accepted && !this.message.suggested_post.pFlags?.rejected)
+    }, {
+      icon: 'brush',
+      text: getEditMediaLangKey(this.message as Message.message),
+      onClick: this.onEditMediaClick,
+      verify: async() => canEditMessageMediaWithEditor(this.message as Message.message) &&
+        !!this.chat.input.messageInput &&
+        await this.managers.appMessagesManager.canEditMessage(this.message, 'text')
     }, {
       icon: 'plusround',
       text: 'ChecklistAddTasks',
@@ -890,9 +1106,10 @@ export default class ChatContextMenu {
     }, {
       icon: 'copy',
       text: 'Copy',
+      welcome: true,
       onClick: this.onCopyClick,
-      verify: () => !this.noForwards &&
-        !!(this.message as Message.message).message &&
+      verify: () => this.canCopyText() &&
+        !!this.selectedMessagesText &&
         !this.isTextSelected &&
         (!this.isAnchorTarget || (this.message as Message.message).message !== this.target.innerText)
     }, {
@@ -916,8 +1133,23 @@ export default class ChatContextMenu {
     }, {
       icon: 'copy',
       text: 'Chat.CopySelectedText',
+      welcome: true,
       onClick: this.onCopyClick,
-      verify: () => !this.noForwards && !!(this.message as Message.message).message && this.isTextSelected
+      verify: () => this.canCopyText() &&
+        !!((this.message as Message.message).message || (this.message as Message.message).rich_message) &&
+        this.isTextSelected
+    }, this.copyMediaButton = {
+      icon: 'copy',
+      text: 'MediaViewer.Context.Copy',
+      welcome: true,
+      onClick: this.onCopyMediaClick,
+      verify: () => ChatContextMenu.canCopyMedia(
+        this.message,
+        this.target,
+        this.contentNoForwards,
+        this.chat.container
+      ),
+      keepOpen: true
     }, {
       icon: 'search',
       text: 'Chat.SearchSelected',
@@ -925,13 +1157,17 @@ export default class ChatContextMenu {
         const selection = getAppWindow().getSelection();
         this.chat.initSearch({query: selection.toString()});
       },
-      verify: () => !!(this.message as Message.message).message && this.isTextSelected
+      verify: () => !!((this.message as Message.message).message || (this.message as Message.message).rich_message) &&
+        this.isTextSelected
     }, {
       icon: 'copy',
       text: 'Message.Context.Selection.Copy',
       onClick: this.onCopyClick,
       verify: async() => {
-        if(!this.isSelected || this.noForwards) {
+        if(
+          !this.isSelected ||
+          this.noForwards
+        ) {
           return false;
         }
 
@@ -939,7 +1175,7 @@ export default class ChatContextMenu {
           const storageKey: MessagesStorageKey = `${peerId}_${this.chat.type === ChatType.Scheduled ? 'scheduled' : 'history'}`;
           for(const mid of mids) {
             const message = (await this.managers.appMessagesManager.getMessageFromStorage(storageKey, mid)) as Message.message;
-            if(!!message.message) {
+            if(!!(message.message || message.rich_message)) {
               return true;
             }
           }
@@ -952,12 +1188,14 @@ export default class ChatContextMenu {
     }, {
       icon: 'copy',
       text: this.isEmailTarget ? 'Text.Context.Copy.Email' : 'CopyLink',
+      welcome: true,
       onClick: this.onCopyAnchorLinkClick,
       verify: () => this.isAnchorTarget,
       withSelection: true
     }, {
       icon: 'copy',
       text: 'Text.Context.Copy.Username',
+      welcome: true,
       onClick: () => {
         copyTextToClipboard(this.target.textContent);
       },
@@ -966,6 +1204,7 @@ export default class ChatContextMenu {
     }, {
       icon: 'copy',
       text: 'Text.Context.Copy.Hashtag',
+      welcome: true,
       onClick: () => {
         copyTextToClipboard(this.target.textContent);
       },
@@ -982,7 +1221,7 @@ export default class ChatContextMenu {
         const isTextSelected = this.isTextSelected;
 
         if(!this.chat.peerTranslation.canTranslate(true)) {
-          PopupPremium.show({feature: 'translations'});
+          showPremiumPopup({feature: 'translations'});
         } else {
           let textWithEntities: TextWithEntities;
           if(isTextSelected) {
@@ -1007,12 +1246,19 @@ export default class ChatContextMenu {
       icon: 'link',
       text: 'MessageContext.CopyMessageLink1',
       onClick: this.onCopyLinkClick,
-      verify: async() => !this.isLegacy && await this.managers.appPeersManager.isChannel(this.peerId) && !this.chat.isMonoforum && !this.message.pFlags.is_outgoing
+      verify: async() => !isEphemeralMessage(this.message) &&
+        !isAnchoredEphemeralMessage(this.message) &&
+        !this.isLegacy &&
+        await this.managers.appPeersManager.isChannel(this.peerId) &&
+        !this.chat.isMonoforum &&
+        !this.message.pFlags.is_outgoing
     }, {
       icon: 'pin',
       text: 'Message.Context.Pin',
       onClick: this.onPinClick,
-      verify: async() => !this.isLegacy &&
+      verify: async() => !isEphemeralMessage(this.message) &&
+        !isAnchoredEphemeralMessage(this.message) &&
+        !this.isLegacy &&
         !useIsCrmReadOnly()() &&
         !this.chat.isMonoforum &&
         !this.message.pFlags.is_outgoing &&
@@ -1026,14 +1272,36 @@ export default class ChatContextMenu {
       text: 'Message.Context.Unpin',
       onClick: this.onUnpinClick,
       verify: async() => !useIsCrmReadOnly()() &&
+        !isEphemeralMessage(this.message) &&
+        !isAnchoredEphemeralMessage(this.message) &&
         (this.message as Message.message).pFlags.pinned &&
         await this.managers.appPeersManager.canPinMessage(this.message.peerId) &&
         !useIsFrozen()
     }, {
       icon: 'download',
       text: 'MediaViewer.Context.Download',
-      onClick: () => ChatContextMenu.onDownloadClick(this.message, this.noForwards, this.chat.container),
-      verify: () => ChatContextMenu.canDownload(this.message, this.target, this.noForwards, this.chat.container)
+      welcome: true,
+      onClick: () => ChatContextMenu.onDownloadClick(
+        this.message,
+        this.contentNoForwards,
+        this.chat.container
+      ),
+      verify: () => ChatContextMenu.canDownload(
+        this.message,
+        this.target,
+        this.contentNoForwards,
+        this.chat.container
+      )
+    }, {
+      icon: 'note_filled',
+      text: 'SavedMusic.AddToProfile',
+      onClick: () => addToProfileMusic(this.getSavedMusicDocId()),
+      verify: () => this.verifySavedMusic(false)
+    }, {
+      icon: 'delete',
+      text: 'SavedMusic.RemoveFromProfile',
+      onClick: () => removeFromProfileMusic(this.getSavedMusicDocId()),
+      verify: () => this.verifySavedMusic(true)
     }, {
       icon: 'checkretract',
       text: 'Chat.Poll.Unvote',
@@ -1058,18 +1326,22 @@ export default class ChatContextMenu {
       }/* ,
       cancelEvent: true */
     }, {
-      icon: 'statistics',
+      icon: 'statistics_chart',
       text: 'ViewStatistics',
       onClick: this.onStatisticsClick,
-      verify: async() => await this.managers.appPeersManager.isBroadcast(this.messagePeerId) &&
-        await this.managers.appProfileManager.canViewStatistics(this.messagePeerId) &&
-        !this.message.pFlags.is_outgoing
+      verify: this.canViewMessageStatistics
+    }, {
+      icon: 'statistics_chart',
+      text: 'PollStats.View',
+      onClick: this.onPollStatisticsClick,
+      verify: async() => this.canViewPollStatistics() && !await this.canViewMessageStatistics()
     }, {
       icon: 'forward',
       text: 'Forward',
       onClick: this.onForwardClick, // let forward the message if it's outgoing but not ours (like a changelog)
       // Read-only: forwarding is a send into whichever chat it targets.
       verify: () => !useIsCrmReadOnly()() &&
+        !isAnchoredEphemeralMessage(this.message) &&
         !this.noForwards &&
         this.chat.type !== ChatType.Scheduled &&
         (!this.message.pFlags.is_outgoing || this.message.fromId === SERVICE_PEER_ID) &&
@@ -1087,26 +1359,45 @@ export default class ChatContextMenu {
     }, {
       icon: 'download',
       text: 'Message.Context.Selection.Download',
-      onClick: () => ChatContextMenu.onDownloadClick(this.selectedMessages, this.noForwards, this.chat.container),
-      verify: () => this.selectedMessages && ChatContextMenu.canDownload(this.selectedMessages, undefined, this.noForwards, this.chat.container),
+      onClick: () => ChatContextMenu.onDownloadClick(
+        this.selectedMessages,
+        this.noForwards,
+        this.chat.container
+      ),
+      verify: () => this.selectedMessages && ChatContextMenu.canDownload(
+        this.selectedMessages,
+        undefined,
+        this.noForwards,
+        this.chat.container
+      ),
       withSelection: true
     }, {
       icon: 'flag',
       text: 'ReportChat',
       onClick: () => {
-        showMessageReport(this.messagePeerId, [this.mid]);
+        const {selection} = this.chat;
+        const selectedMids = selection.isSelecting && this.isSelected ? selection.selectedMids.get(this.messagePeerId) : undefined;
+        showMessageReport(
+          this.messagePeerId,
+          selectedMids?.size ? [...selectedMids] : [this.mid],
+          selectedMids?.size ? () => selection.cancelSelection() : undefined
+        );
       },
       verify: () => !this.message.pFlags.out &&
         this.message._ === 'message' &&
         !this.message.pFlags.is_outgoing &&
-        this.managers.appPeersManager.isChannel(this.messagePeerId),
+        (
+          isEphemeralMessage(this.message) || isAnchoredEphemeralMessage(this.message) ?
+            !this.chat.selection.isSelecting :
+            this.managers.appPeersManager.isChannel(this.messagePeerId)
+        ),
       notDirect: () => true,
       withSelection: true
     }, {
       icon: 'select',
       text: 'Message.Context.Select',
       onClick: this.onSelectClick,
-      verify: () => !(this.message as Message.messageService).action && !this.isSelected && this.isSelectable,
+      verify: () => !this.isSelected && this.isSelectable,
       notDirect: () => true,
       withSelection: true
     }, {
@@ -1123,12 +1414,13 @@ export default class ChatContextMenu {
             peerId: this.viewerPeerId
           });
         } else if(this.canOpenReactedList) {
-          PopupElement.createPopup(PopupReactedList, this.message as Message.message);
+          showReactedListPopup(this.message as Message.message);
         } else {
           return false;
         }
       },
       verify: () => !this.peerId.isUser() &&
+        !isEphemeralMessage(this.message) &&
         (!!(this.message as Message.message).reactions?.recent_reactions?.length || this.managers.appMessagesManager.canViewMessageReadParticipants(this.message)),
       notDirect: () => true,
       localName: 'views'
@@ -1151,14 +1443,44 @@ export default class ChatContextMenu {
         });
         return content;
       },
+      welcome: true,
       onClick: this.onDeleteClick,
-      verify: async() => this.managers.appMessagesManager.canDeleteMessage(this.message)
+      verify: async() => !isAnchoredEphemeralMessage(this.message) &&
+        this.managers.appMessagesManager.canDeleteMessage(this.message)
+    }, {
+      // an anchored ephemeral message is not deleted — dismissing it gives the reader back the
+      // message the bot was standing in front of
+      // what it does goes on a second line of the item itself, as in Android and desktop
+      icon: 'rotate_left',
+      className: 'danger with-subtitle',
+      get regularText() {
+        const container = document.createElement('span');
+        container.classList.add('ephemeral-context-revert');
+        const about = i18n('Ephemeral.Revert.About');
+        about.classList.add('ephemeral-context-revert-about');
+        container.append(i18n('Ephemeral.Revert'), about);
+        return container;
+      },
+      onClick: () => {
+        const {peerId, mid} = this.message;
+        this.managers.appMessagesManager.deleteEphemeralMessage(peerId, mid);
+      },
+      verify: () => isAnchoredEphemeralMessage(this.message)
+    }, {
+      regularText: i18n('Ephemeral.About'),
+      className: 'ephemeral-context-about',
+      separator: true,
+      secondary: true,
+      onClick: noop,
+      verify: () => isEphemeralMessage(this.message)
     }, {
       icon: 'delete',
       className: 'danger',
       text: 'Message.Context.Selection.Delete',
       onClick: this.onDeleteClick,
-      verify: () => this.isSelected && !this.chat.selection.selectionDeleteBtn.hasAttribute('disabled'),
+      verify: () => !!this.chat.selection.selectionDeleteBtn &&
+        this.isSelected &&
+        !this.chat.selection.selectionDeleteBtn.hasAttribute('disabled'),
       notDirect: () => true,
       withSelection: true
     },
@@ -1304,6 +1626,22 @@ export default class ChatContextMenu {
     })
   }
 
+  private getSavedMusicDocId() {
+    return getSavedMusicDocument(
+      this.message,
+      this.contentNoForwards
+    )?.id;
+  }
+
+  private async verifySavedMusic(inProfile: boolean) {
+    const docId = this.getSavedMusicDocId();
+    if(!docId || useIsFrozen()) {
+      return false;
+    }
+
+    return await this.managers.appSavedMusicManager.isInProfile(docId) === inProfile;
+  }
+
   public static canDownload(
     message: MyMessage | MyMessage[],
     withTarget?: HTMLElement,
@@ -1345,11 +1683,23 @@ export default class ChatContextMenu {
     }
 
     if(container && (message as Message.message).restriction_reason && isSensitive((message as Message.message).restriction_reason)) {
-      const item = container.querySelector(`[data-mid="${message.mid}"]`);
-      return item && !hasSensitiveSpoiler(item as HTMLElement);
+      const item = container.querySelector(
+        `[data-peer-id="${message.peerId}"][data-mid="${message.mid}"]`
+      ) || container.querySelector(`[data-mid="${message.mid}"]:not([data-peer-id])`);
+      return isGoodType && hasTarget && !!item && !hasSensitiveSpoiler(item as HTMLElement);
     }
 
     return isGoodType && hasTarget;
+  }
+
+  public static canCopyMedia(
+    message: MyMessage,
+    withTarget?: HTMLElement,
+    noForwards?: boolean,
+    container?: HTMLElement
+  ) {
+    return ChatContextMenu.canDownload(message, withTarget, noForwards, container) &&
+      canCopyMediaToClipboard(getMediaFromMessage(message, true));
   }
 
   private getMessageWithText() {
@@ -1529,6 +1879,9 @@ export default class ChatContextMenu {
       !this.message.pFlags.is_outgoing &&
       !(this.message._ === 'message' && this.message.pFlags.is_scheduled) &&
       !this.message.pFlags.local &&
+      !isEphemeralMessage(this.message) &&
+      // a welcome template's id is no message's id: nothing to react to (desktop's `canReact`)
+      !(this.message as Message.message).pFlags.welcome_template &&
       !this.reactionElement
     ) {
       const reactions = this.message.reactions;
@@ -1549,12 +1902,12 @@ export default class ChatContextMenu {
           }
 
           if(reaction._ === 'reactionPaid') {
-            PopupElement.createPopup(PopupStarReaction, reactionsMessage.peerId, reactionsMessage.mid, this.chat);
+            showStarReactionPopup(reactionsMessage.peerId, reactionsMessage.mid, this.chat);
             return;
           }
 
           if(!rootScope.premium && tags) {
-            PopupPremium.show({feature: 'saved_tags'});
+            showPremiumPopup({feature: 'saved_tags'});
             return;
           }
 
@@ -1699,8 +2052,15 @@ export default class ChatContextMenu {
     }
 
     // sort by send time so the copied text follows the chronological order, not the selection order (#357)
-    const messages = (rawMessages.filter((message) => message?.message) as Message.message[])
+    const messages = (rawMessages.filter((message) => {
+      const richMessage = (message as Message.message)?.rich_message;
+      return message?.message || richMessage;
+    }) as Message.message[])
     .sort((a, b) => a.date - b.date || a.mid - b.mid);
+    if(!messages.length) {
+      return;
+    }
+
     const meta = messages.length > 1 ? await Promise.all(messages.map(async(message) => {
       const peerTitle = await getPeerTitle({
         peerId: message.fromId,
@@ -1718,6 +2078,11 @@ export default class ChatContextMenu {
     })) : [];
 
     return prepareTextWithEntitiesForCopying(messages.map((message) => {
+      if(message.rich_message) {
+        const {text, entities} = flattenRichMessageSummary(message.rich_message);
+        return {text, entities};
+      }
+
       return {
         text: message.message,
         entities: (message as Message.message).totalEntities || message.entities
@@ -1729,7 +2094,7 @@ export default class ChatContextMenu {
     if(this.chat.selection.isSelecting) {
       simulateClickEvent(this.chat.selection.selectionSendNowBtn);
     } else {
-      PopupElement.createPopup(PopupSendNow, this.peerId, await this.chat.getMidsByMid(this.messagePeerId, this.mid));
+      showSendNowPopup(this.peerId, await this.chat.getMidsByMid(this.messagePeerId, this.mid));
     }
   };
 
@@ -1788,6 +2153,11 @@ export default class ChatContextMenu {
     this.chat.input.initMessageEditing(this.isTargetAGroupedItem ? this.mid : message.mid);
   };
 
+  private onEditMediaClick = () => {
+    // the clicked album item, not the caption holder — its media is what was aimed at
+    this.chat.input.initMessageMediaEditing(this.message.mid);
+  };
+
   private onEditFactCheckClick = async() => {
     const {mainMessage: message} = this;
     const factCheck = (message as Message.message).factcheck;
@@ -1811,10 +2181,12 @@ export default class ChatContextMenu {
       canHaveFormatting: ['bold', 'italic', 'link']
     });
 
+    const editor = attachPlainMessageEditor(inputField.input);
     if(factCheck) {
-      inputField.setValueSilently(wrapDraftText(factCheck.text.text, {entities: factCheck.text.entities}));
+      inputField.setValueSilently(factCheck.text);
     }
 
+    let text: string, entities: MessageEntity[];
     try {
       await confirmationPopup({
         titleLangKey: 'FactCheckDialog',
@@ -1822,11 +2194,13 @@ export default class ChatContextMenu {
         button: buttonOptions,
         confirmShortcutIsSendShortcut: true
       });
+      ({value: text, entities} = editor.getRichValue(true));
     } catch(err) {
       return;
+    } finally {
+      editor.destroy();
     }
 
-    const {value: text, entities} = getRichValueWithCaret(inputField.input, true, false);
     const newTextWithEntities: TextWithEntities = text ? {_: 'textWithEntities', text, entities} : undefined;
     if(factCheck && deepEqual(factCheck.text, newTextWithEntities)) {
       return;
@@ -1843,6 +2217,31 @@ export default class ChatContextMenu {
     });
   };
 
+  /**
+   * Whether the message's content may not be copied or saved: the chat's protection and the
+   * message's own noforwards, as desktop's `hasCopyRestriction` — which is what `canForward`
+   * already checks, ephemeral messages included (layer 229 made them forwardable). Two kinds
+   * differ: a welcome template is the admins' own whatever the chat protects, and an anchored
+   * message is never forwardable (what it shows is not its own) while its content is protected
+   * like any other.
+   */
+  private get contentNoForwards() {
+    const message = this.message as Message.message;
+    if(message?.pFlags?.welcome_template) {
+      return false;
+    }
+
+    if(isAnchoredEphemeralMessage(message)) {
+      return !!message.pFlags.noforwards || this.chat.noForwards;
+    }
+
+    return this.noForwards;
+  }
+
+  private canCopyText() {
+    return !this.contentNoForwards;
+  }
+
   private onCopyClick = async() => {
     if(isSelectionEmpty()) {
       const {text, html} = this.selectedMessagesText;
@@ -1851,6 +2250,13 @@ export default class ChatContextMenu {
       getAppWindow().document.execCommand('copy');
       // cancelSelection();
     }
+  };
+
+  private onCopyMediaClick = () => {
+    copyMessageMediaWithFeedback({
+      message: this.message,
+      button: this.copyMediaButton
+    });
   };
 
   private onCopyAnchorLinkClick = () => {
@@ -1867,11 +2273,11 @@ export default class ChatContextMenu {
   };
 
   private onPinClick = () => {
-    PopupElement.createPopup(PopupPinMessage, this.messagePeerId, this.mid);
+    showPinMessagePopup(this.messagePeerId, this.mid);
   };
 
   private onUnpinClick = () => {
-    PopupElement.createPopup(PopupPinMessage, this.messagePeerId, this.mid, true);
+    showPinMessagePopup(this.messagePeerId, this.mid, true);
   };
 
   private onRetractVote = () => {
@@ -1884,7 +2290,7 @@ export default class ChatContextMenu {
 
   private onAddTaskClick = async() => {
     if(!rootScope.premium) {
-      PopupPremium.show();
+      showPremiumPopup();
       return;
     }
 
@@ -1908,7 +2314,7 @@ export default class ChatContextMenu {
   };
 
   private onSelectClick = () => {
-    this.chat.selection.toggleByElement(findUpClassName(this.target, 'grouped-item') || findUpClassName(this.target, 'bubble'));
+    this.chat.selection.toggleByElement(getSelectionElementFromTarget(this.target));
   };
 
   private onClearSelectionClick = () => {
@@ -1927,8 +2333,7 @@ export default class ChatContextMenu {
     //   return this.chat.bubbles.deleteMessagesByIds(await this.chat.getMidsByMid(mid), true);
     // }
 
-    PopupElement.createPopup(
-      PopupDeleteMessages,
+    showDeleteMessagesPopup(
       peerId,
       this.isTargetAGroupedItem ? [mid] : await this.chat.getMidsByMid(peerId, mid),
       this.chat.type
@@ -1982,6 +2387,62 @@ export default class ChatContextMenu {
 
   private onStatisticsClick = () => {
     this.chat.topbar.appSidebarRight.createTab(AppStatisticsTab).open(this.messagePeerId.toChatId(), this.mid);
+    this.chat.topbar.appSidebarRight.toggleSidebar(true);
+  };
+
+  private canViewMessageStatistics = async() => {
+    // neither an ephemeral message nor one standing in for a post has the post's numbers (desktop)
+    return !isEphemeralMessage(this.message) &&
+      !isAnchoredEphemeralMessage(this.message) &&
+      await this.managers.appPeersManager.isBroadcast(this.messagePeerId) &&
+      await this.managers.appProfileManager.canViewStatistics(this.messagePeerId) &&
+      !this.message.pFlags.is_outgoing;
+  };
+
+  private getPollVoteRestrictionsText = async() => {
+    const media = this.message?._ === 'message' && this.message.media;
+    if(!media || media._ !== 'messageMediaPoll' || media.poll.pFlags.closed) return;
+
+    const poll = media.poll;
+    const result = document.createElement('span');
+    const appendRestriction = (restriction: ReturnType<typeof getPollVoteRestrictionText>) => {
+      if(result.childNodes.length) result.append('\n');
+      result.append(i18n(restriction.langPackKey, restriction.langPackArguments));
+    };
+
+    if(poll.pFlags.subscribers_only) {
+      const sourcePeerId = getPollVoteRestrictionPeerId(this.message);
+      const isBroadcast = sourcePeerId.isAnyChat() && await this.managers.appPeersManager.isBroadcast(sourcePeerId);
+      const peerName = isBroadcast ? await getPeerTitle({
+        peerId: sourcePeerId,
+        plainText: true,
+        managers: this.managers,
+        useManagers: true
+      }) : undefined;
+
+      appendRestriction(getPollVoteRestrictionText(
+        poll,
+        peerName ? 'subscribersOnly' : 'subscribersJoinedTooRecently',
+        peerName
+      ));
+    }
+
+    if(poll.countries_iso2?.length) {
+      appendRestriction(getPollVoteRestrictionText(poll, 'countries'));
+    }
+
+    return result.childNodes.length ? result : undefined;
+  };
+
+  private canViewPollStatistics = () => {
+    return canViewPollStatisticsForMessage(
+      this.message,
+      ![ChatType.Logs, ChatType.Static, ChatType.Scheduled].includes(this.chat.type)
+    );
+  };
+
+  private onPollStatisticsClick = () => {
+    this.chat.topbar.appSidebarRight.createTab(AppStatisticsTab).open(this.messagePeerId, this.mid, undefined, 'poll');
     this.chat.topbar.appSidebarRight.toggleSidebar(true);
   };
 
@@ -2113,7 +2574,11 @@ export default class ChatContextMenu {
       return detectLanguageForTranslation(text);
     }
 
-    return detectLanguageForTranslation((this.message as Message.message).message);
+    // Deliberately wider than desktop, which gates this entry on the plain `message` field and
+    // therefore never offers it for a rich message (history_inner_widget: `originalText()` is
+    // empty there). Here a rich message is translatable from the menu too, so detect the
+    // language from what the message actually shows.
+    return detectLanguageForTranslation(getMessageSourceText(this.message as Message.message));
   }
 
   private async getPollTextWithEntities(message: MyMessage) {

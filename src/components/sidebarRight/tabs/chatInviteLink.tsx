@@ -11,9 +11,10 @@ import {i18n} from '@lib/langPack';
 import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
 import AppSelectPeers from '@components/appSelectPeers';
 import {StarsAmount} from '@components/popups/stars';
-import Row from '@components/row';
-import SettingSection from '@components/settingSection';
-import {UsernameRow} from '@components/usernamesSection';
+import Row from '@components/rowTsx';
+import Section from '@components/section';
+import {wrapSolidComponent} from '@helpers/solid/wrapSolidComponent';
+import UsernameRow from '@components/usernameRow';
 import {ChatInviteLink, getImportersLoader} from './chatInviteLinkShared';
 import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
 import {usePromiseCollector} from '@components/solidJsTabs/promiseCollector';
@@ -34,12 +35,6 @@ const ChatInviteLinkTab: Component = () => {
     {
       const isExpiring = chatInvite.expire_date && chatInvite.expire_date > tsNow(true);
       const isUsageLimit = chatInvite.usage_limit && chatInvite.usage_limit <= (chatInvite.usage || 0);
-      const section = new SettingSection({
-        name: 'InviteLink',
-        caption: isUsageLimit ? 'LinkIsExpiredLimitReached' : (isExpiring ? 'InviteLinks.ExpiresCaption' : (chatInvite.expire_date ? 'LinkIsExpired' : undefined)),
-        captionArgs: isExpiring ? [formatFullSentTime(chatInvite.expire_date)] : undefined
-      });
-
       const inviteLink = new ChatInviteLink({
         buttons: menuButtons,
         listenerSetter: tab.listenerSetter,
@@ -49,16 +44,20 @@ const ChatInviteLinkTab: Component = () => {
 
       inviteLink.setChatInvite(chatInvite);
 
-      section.content.append(inviteLink.container);
-      tab.scrollable.append(section.container);
+      tab.scrollable.append(wrapSolidComponent(() => (
+        <Section
+          name="InviteLink"
+          caption={isUsageLimit ? 'LinkIsExpiredLimitReached' : (isExpiring ? 'InviteLinks.ExpiresCaption' : (chatInvite.expire_date ? 'LinkIsExpired' : undefined))}
+          captionArgs={isExpiring ? [formatFullSentTime(chatInvite.expire_date)] : undefined}
+        >
+          {inviteLink.container}
+        </Section>
+      ), tab.middlewareHelper.get()));
     }
 
     {
-      const section = new SettingSection({name: 'LinkCreatedeBy'});
-
       const div = document.createElement('div');
       div.classList.add('chatlist-container');
-      section.content.append(div);
 
       const list = appDialogsManager.createChatList({new: true});
       div.append(list);
@@ -81,61 +80,44 @@ const ChatInviteLinkTab: Component = () => {
       }, {listenerSetter: tab.listenerSetter});
 
       dom.lastMessageSpan.append(formatFullSentTime(chatInvite.date));
-      tab.scrollable.append(section.container);
+
+      tab.scrollable.append(wrapSolidComponent(() => (
+        <Section name="LinkCreatedeBy">
+          {div}
+        </Section>
+      ), tab.middlewareHelper.get()));
     }
 
     if(chatInvite.subscription_pricing) {
-      const section = new SettingSection({name: 'InviteLink.Observe.Fee'});
-
-      const row = new UsernameRow(true, 'link_paid', 'green');
-
       const stars = chatInvite.subscription_pricing.amount;
       const usage = chatInvite.usage ?? 0;
       const title = i18n('InviteLink.Observe.Fee.Title', [StarsAmount({stars}) as HTMLElement, usage]);
       const subtitle = i18n('InviteLink.Observe.Fee.Subtitle', ['$' + (usage * +stars * 0.02).toFixed(2)]);
-      row.title.append(title);
-      row.subtitle.append(subtitle);
-
-      section.content.append(row.container);
-
-      tab.scrollable.append(section.container);
+      tab.scrollable.append(wrapSolidComponent(() => (
+        <Section name="InviteLink.Observe.Fee">
+          <UsernameRow
+            isLink
+            icon="link_paid"
+            color="green"
+            title={title}
+            subtitle={subtitle}
+          />
+        </Section>
+      ), tab.middlewareHelper.get()));
     }
 
     if(chatInvite.usage_limit && !chatInvite.usage && (!chatInvite.expire_date || chatInvite.expire_date > tsNow(true))) {
-      const section = new SettingSection({});
-      const row = new Row({
-        title: i18n('PeopleCanJoinViaLinkCount', [chatInvite.usage_limit])
-      });
-      section.content.append(row.container);
-      tab.scrollable.append(section.container);
+      tab.scrollable.append(wrapSolidComponent(() => (
+        <Section>
+          <Row>
+            <Row.Title>{i18n('PeopleCanJoinViaLinkCount', [chatInvite.usage_limit])}</Row.Title>
+          </Row>
+        </Section>
+      ), tab.middlewareHelper.get()));
     }
 
     const promises: Promise<any>[] = [];
     if(chatInvite.requested) {
-      const section = new SettingSection({
-        name: 'JoinRequests',
-        nameArgs: [chatInvite.requested]
-      });
-      // const row = new Row({
-      //   titleLangKey: isBroadcast ? 'SubscribeRequests' : 'MemberRequests',
-      //   clickable: async() => {
-      //     const tab = this.slider.createTab(AppChatRequestsTab);
-      //     tab.eventListener.addEventListener('finish', (changed) => {
-      //       const newLength = chatInvite.requested - changed;
-      //       if(newLength) {
-      //         row.subtitle.textContent = '' + newLength;
-      //       } else {
-      //         section.container.remove();
-      //       }
-      //     });
-      //     await tab.open(chatId, chatInvite.link);
-      //     // this.slider.removeTabFromHistory(this);
-      //   },
-      //   icon: 'adduser',
-      //   listenerSetter: this.listenerSetter,
-      //   subtitle: '' + chatInvite.requested
-      // });
-      // section.content.append(row.container);
       const {importersMap, load} = getImportersLoader({
         chatId,
         managers: tab.managers,
@@ -167,8 +149,12 @@ const ChatInviteLinkTab: Component = () => {
       };
 
       const chatlist = appDialogsManager.createChatList();
-      section.content.append(chatlist);
-      tab.scrollable.append(section.container);
+      const section = wrapSolidComponent(() => (
+        <Section name="JoinRequests" nameArgs={[chatInvite.requested]}>
+          {chatlist}
+        </Section>
+      ), tab.middlewareHelper.get());
+      tab.scrollable.append(section);
 
       let target: HTMLElement;
       const toggleRequest = async(add: boolean) => {
@@ -186,7 +172,7 @@ const ChatInviteLinkTab: Component = () => {
 
           if(!--chatInvite.requested) {
             delete chatInvite.requested;
-            section.container.remove();
+            section.remove();
           }
 
           onUpdate?.(chatInvite);

@@ -11,8 +11,9 @@ import usePremium from '@stores/premium';
 import ButtonMenuToggle from '@components/buttonMenuToggle';
 import Icon from '@components/icon';
 import showPickUserPopup from '@components/popups/pickUser';
-import PopupPremium from '@components/popups/premium';
-import Row from '@components/row';
+import showPremiumPopup from '@components/popups/premium';
+import RowTsx from '@components/rowTsx';
+import {wrapSolidComponent} from '@helpers/solid/wrapSolidComponent';
 import Chat from '@components/chat/chat';
 import ChatTopbar from '@components/chat/topbar';
 import {useAppSettings} from '@stores/appSettings';
@@ -38,20 +39,25 @@ export function pickLanguage<T extends boolean>(
   const popup = showPickUserPopup({
     peerType: ['custom'],
     renderResultsFunc: (iso2s) => {
+      const middleware = popup.selector.middlewareHelperLoader.get();
       iso2s.forEach((iso2) => {
         const [name, translated] = map.get(iso2 as any as string);
-        const row = new Row({
-          title: translated,
-          subtitle: name,
-          clickable: true,
-          havePadding: multi
-        });
+        const checkbox = multi ? popup.selector.checkbox(popup.selector.selected.has(iso2)) : undefined;
+        const row = wrapSolidComponent(() => (
+          <RowTsx
+            ref={(element) => {
+              element.dataset.peerId = String(iso2);
+            }}
+            clickable
+            havePadding={multi}
+          >
+            {checkbox}
+            <RowTsx.Title>{translated}</RowTsx.Title>
+            <RowTsx.Subtitle>{name}</RowTsx.Subtitle>
+          </RowTsx>
+        ), middleware);
 
-        if(multi) {
-          row.container.append(popup.selector.checkbox(popup.selector.selected.has(iso2)));
-        }
-        row.container.dataset.peerId = '' + iso2;
-        popup.selector.list.append(row.container);
+        popup.selector.list.append(row);
       });
     },
     placeholder: 'Search',
@@ -76,7 +82,10 @@ export function pickLanguage<T extends boolean>(
     }
   });
 
-  if(selected) {
+  // Only in multi-select: `addInitial` in single-select mode counts as a user
+  // pick and instantly resolves + closes the popup, and the `add` override is
+  // dead anyway (chips are rendered by the selector only when multi is on).
+  if(multi && selected) {
     const _add = popup.selector.add.bind(popup.selector);
     popup.selector.add = ({key, scroll}) => {
       const ret = _add({
@@ -122,6 +131,7 @@ function TranslationPlateBody(props: {
   const listenerSetter = new ListenerSetter();
   const menu = ButtonMenuToggle({
     direction: 'bottom-left',
+    buttonOptions: {ariaLabel: 'MultiAccount.More'},
     buttons: [{
       icon: 'premium_translate',
       text: 'Chat.Translate.Menu.To',
@@ -162,7 +172,7 @@ function TranslationPlateBody(props: {
         onClick={() => {
           const translation = peerTranslation();
           if(!translation.canTranslate()) {
-            PopupPremium.show({feature: 'translations'});
+            showPremiumPopup({feature: 'translations'});
             return;
           }
           translation.toggle(!translation.enabled());

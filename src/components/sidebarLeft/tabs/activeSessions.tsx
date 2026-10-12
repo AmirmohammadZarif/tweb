@@ -1,221 +1,445 @@
-import {Component, onCleanup, onMount} from 'solid-js';
-import {getOverlayRoot} from '@helpers/appWindow';
-import Button from '@components/button';
+import {Component, createMemo, createSignal, For, onCleanup, onMount, Show} from 'solid-js';
+import Button from '@components/buttonTsx';
 import InputField from '@components/inputField';
-import Row from '@components/row';
-import {Authorization} from '@layer';
-import {formatDateAccordingToTodayNew} from '@helpers/date';
-import {ButtonMenuSync} from '@components/buttonMenu';
-import PopupPeer from '@components/popups/peer';
-import findUpClassName from '@helpers/dom/findUpClassName';
-import {attachClickEvent} from '@helpers/dom/clickEvent';
-import toggleDisability from '@helpers/dom/toggleDisability';
-import findAndSplice from '@helpers/array/findAndSplice';
-import {attachContextMenuListener} from '@helpers/dom/attachContextMenuListener';
-import positionMenu from '@helpers/positionMenu';
-import contextMenuController from '@helpers/contextMenuController';
-import SettingSection from '@components/settingSection';
-import PopupElement from '@components/popups';
-import {toastNew} from '@components/toast';
-import sessionStorage from '@lib/sessionStorage';
+import PeerTitle from '@components/peerTitle';
+import Section from '@components/section';
+import InlineSelect from '@components/sidebarLeft/tabs/passcodeLock/inlineSelect';
 import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
-import type {AppActiveSessionsTab} from '@components/solidJsTabs/tabs';
+import {
+  AppConnectedBotSessionTab,
+  AppSessionTab,
+  type AppActiveSessionsTab
+} from '@components/solidJsTabs/tabs';
+import {wrapFormattedDuration} from '@components/wrappers/wrapDuration';
+import {formatDateAccordingToTodayNew} from '@helpers/date';
+import {DurationType} from '@helpers/formatDuration';
+import anchorCallback from '@helpers/dom/anchorCallback';
+import getAuthorizationErrorLangKey from '@helpers/getAuthorizationErrorLangKey';
+import getSessionPlatformIcon from '@helpers/sessionPlatformIcon';
+import {Authorization, ConnectedBot} from '@layer';
+import {useHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
+import sessionStorage from '@lib/sessionStorage';
+import {useIsCrmLoggedIn} from '@stores/crmRole';
+
+const TERMINATE_CONNECTED_BOT_KEY = 'ChatAutomation.TerminateConnectedBot';
+/** tdesktop's `kMaxDeviceModelLength`. */
+const MAX_DEVICE_MODEL_LENGTH = 32;
+/** tdesktop's `kShortPollTimeout` — the sessions list has no update to listen to. */
+const REFRESH_INTERVAL = 60e3;
+/** The periods tdesktop offers for `account.setAuthorizationTTL`, in days. */
+const TTL_OPTIONS = [
+  {days: 7, duration: 1, type: DurationType.Weeks},
+  {days: 30, duration: 1, type: DurationType.Months},
+  {days: 90, duration: 3, type: DurationType.Months},
+  {days: 180, duration: 6, type: DurationType.Months},
+  {days: 365, duration: 1, type: DurationType.Years}
+].map((option) => ({
+  value: option.days,
+  label: () => wrapFormattedDuration([option])
+}));
+
+const isSameHash = (a: Authorization.authorization, b: Authorization.authorization) => {
+  return '' + a.hash === '' + b.hash;
+};
+
+/** A server is free to hold a period this list doesn't offer (183 days, say). */
+const nearestTTLOption = (days: number) => TTL_OPTIONS.reduce((nearest, option) => {
+  return Math.abs(days - option.value) < Math.abs(days - nearest.value) ? option : nearest;
+}, TTL_OPTIONS[0]).value;
 
 const ActiveSessions: Component = () => {
   const [tab] = useSuperTab<typeof AppActiveSessionsTab>();
+  const {
+    rootScope,
+    Row,
+    i18n,
+    confirmationPopup,
+    toastNew,
+    useAppSettings,
+    AvatarNewTsx,
+    PeerTitleTsx
+  } = useHotReloadGuard();
+  const [appSettings, setAppSettings] = useAppSettings();
 
-  let menuElement: HTMLElement;
+  const [authorizations, setAuthorizations] = createSignal(tab.payload.authorizations || []);
+  const [connectedBot, setConnectedBot] = createSignal(tab.payload.connectedBot);
+  const [ttlDays, setTtlDays] = createSignal(tab.payload.ttlDays || 0);
+
+  // A renamed device only reaches the server on the next initConnection, so
+  // show the local name right away — as tdesktop does.
+  const currentSession = createMemo(() => {
+    const authorization = authorizations().find((authorization) => authorization.pFlags.current);
+    const customDeviceModel = appSettings.customDeviceModel;
+    if(!authorization || !customDeviceModel) return authorization;
+
+    return {...authorization, device_model: customDeviceModel};
+  });
+
+  // Sessions that entered the right code but never the password have no access
+  // to the account; tdesktop keeps them in their own section.
+  const incompleteSessions = createMemo(() => authorizations().filter((authorization) => {
+    return !authorization.pFlags.current && !!authorization.pFlags.password_pending;
+  }));
+  const otherSessions = createMemo(() => authorizations().filter((authorization) => {
+    return !authorization.pFlags.current && !authorization.pFlags.password_pending;
+  }));
+  const hasOtherSessions = () => !!otherSessions().length ||
+    !!incompleteSessions().length ||
+    !!connectedBot();
+
+  const refresh = () => {
+    return tab.managers.appAccountManager.getAuthorizations().then((result) => {
+      setAuthorizations(result.authorizations as Authorization.authorization[]);
+      setTtlDays(result.authorization_ttl_days || 0);
+    }, () => {});
+  };
+
+  tab.listenerSetter.add(rootScope)('chat_automation_update', (bot) => {
+    setConnectedBot(bot);
+  });
+
+  // A new login neither dispatches a sessions event nor arrives as an update we
+  // could apply, so poll like tdesktop and refresh eagerly on what we do hear.
+  tab.listenerSetter.add(rootScope)('unconfirmed_authorizations_update', () => {
+    refresh();
+  });
 
   onMount(() => {
-    tab.container.classList.add('active-sessions-container');
-
-    const Session = (auth: Authorization.authorization) => {
-      const row = new Row({
-        title: [auth.app_name, auth.app_version].join(' '),
-        subtitle: [auth.ip, auth.country].filter(Boolean).join(' - '),
-        clickable: true,
-        titleRight: auth.pFlags.current ? undefined : formatDateAccordingToTodayNew(new Date(Math.max(auth.date_active, auth.date_created) * 1000))
-      });
-
-      row.container.dataset.hash = '' + auth.hash;
-
-      row.midtitle.textContent = [auth.device_model, auth.system_version || auth.platform].filter(Boolean).join(', ');
-
-      return row;
-    };
-
-    const authorizations = tab.payload.authorizations.slice();
-
-    const onError = (err: ApiError) => {
-      if(err.type === 'FRESH_RESET_AUTHORISATION_FORBIDDEN') {
-        toastNew({langPackKey: 'RecentSessions.Error.FreshReset'});
-      }
-    };
-
-    {
-      const section = new SettingSection({
-        name: 'CurrentSession',
-        caption: 'ClearOtherSessionsHelp'
-      });
-
-      const auth = findAndSplice(authorizations, (auth) => auth.pFlags.current);
-      const session = Session(auth);
-
-      section.content.append(session.container);
-
-      // CRM: editable agent label for THIS device. Saving re-runs
-      // initConnection (via setAgentName + a fresh getAuthorizations call), so
-      // the current — already logged-in — session's app version is retagged
-      // server-side and becomes visible on every one of the operator's devices.
-      {
-        const labelInput = new InputField({
-          labelText: 'Agent name (tags this session)',
-          plainText: true,
-          name: 'agent-name',
-          autocomplete: 'off',
-          maxLength: 64
-        });
-
-        sessionStorage.get('agent_name').then((name) => {
-          if(name) labelInput.setValueSilently(name);
-        });
-
-        const btnSave = Button('btn-primary btn-transparent primary', {icon: 'check', text: 'Save'});
-        attachClickEvent(btnSave, () => {
-          const toggle = toggleDisability([btnSave], true);
-          const name = labelInput.value.trim();
-
-          (async() => {
-            await sessionStorage.set({agent_name: name || undefined});
-            await tab.managers.networkerFactory.setAgentName(name);
-            // Forces initConnection to be re-sent (connectionInited was reset),
-            // then returns the freshly-recorded session info.
-            const auths = await tab.managers.appAccountManager.getAuthorizations();
-            const cur = auths.authorizations.find((a) => a.pFlags?.current);
-            if(cur) {
-              session.title.textContent = [cur.app_name, cur.app_version].join(' ');
-            }
-          })().then(() => {
-            toastNew({langPackKey: 'Saved'});
-          }).catch((err) => {
-            console.error('save agent label error:', err);
-          }).finally(() => {
-            toggle();
-          });
-        }, {listenerSetter: tab.listenerSetter});
-
-        section.content.append(labelInput.container, btnSave);
-      }
-
-      if(authorizations.length) {
-        const btnTerminate = Button('btn-primary btn-transparent danger', {icon: 'stop', text: 'TerminateAllSessions'});
-        attachClickEvent(btnTerminate, (e) => {
-          PopupElement.createPopup(PopupPeer, 'revoke-session', {
-            buttons: [{
-              langKey: 'Terminate',
-              isDanger: true,
-              callback: () => {
-                const toggle = toggleDisability([btnTerminate], true);
-                tab.managers.apiManager.invokeApi('auth.resetAuthorizations').then((value) => {
-                  btnTerminate.remove();
-                  otherSection.container.remove();
-                }, onError).finally(() => {
-                  toggle();
-                });
-              }
-            }],
-            titleLangKey: 'AreYouSureSessionsTitle',
-            descriptionLangKey: 'AreYouSureSessions'
-          }).show();
-        }, {listenerSetter: tab.listenerSetter});
-
-        section.content.append(btnTerminate);
-      }
-
-      tab.scrollable.append(section.container);
+    if(tab.payload.ttlDays === undefined) {
+      refresh();
     }
 
-    if(!authorizations.length) {
+    const interval = setInterval(refresh, REFRESH_INTERVAL);
+    onCleanup(() => clearInterval(interval));
+  });
+
+  const onError = (err: ApiError) => {
+    toastNew({langPackKey: getAuthorizationErrorLangKey(err)});
+  };
+
+  const confirmTerminate = () => confirmationPopup({
+    titleLangKey: 'AreYouSureSessionTitle',
+    descriptionLangKey: 'TerminateSessionText',
+    button: {
+      langKey: 'Terminate',
+      isDanger: true
+    }
+  });
+
+  const terminateSession = async(authorization: Authorization.authorization) => {
+    try {
+      await confirmTerminate();
+    } catch(err) {
+      return false;
+    }
+
+    try {
+      const terminated = await tab.managers.appAccountManager.resetAuthorization(authorization.hash);
+      if(terminated) {
+        // not identity: a refresh in between swaps every entry for a fresh one
+        setAuthorizations((list) => list.filter((item) => !isSameHash(item, authorization)));
+      }
+
+      return terminated;
+    } catch(err) {
+      onError(err as ApiError);
+      return false;
+    }
+  };
+
+  const terminateConnectedBot = async(bot: ConnectedBot.connectedBot) => {
+    try {
+      await confirmTerminate();
+    } catch(err) {
       return;
     }
 
-    const otherSection = new SettingSection({
-      name: 'OtherSessions',
-      caption: 'SessionsListInfo'
-    });
+    // The row disappears through `chat_automation_update`.
+    tab.managers.appBusinessManager.updateConnectedBot({
+      previousBotId: bot.bot_id as UserId
+    }).catch(onError);
+  };
 
-    authorizations.forEach((auth) => {
-      otherSection.content.append(Session(auth).container);
-    });
+  const terminateAll = async() => {
+    const bot = connectedBot();
+    const options = {
+      titleLangKey: 'AreYouSureSessionsTitle',
+      descriptionLangKey: 'AreYouSureSessions',
+      button: {
+        langKey: 'Terminate',
+        isDanger: true
+      }
+    } as const;
 
-    tab.scrollable.append(otherSection.container);
-
-    let target: HTMLElement;
-    const onTerminateClick = () => {
-      const hash = target.dataset.hash;
-
-      PopupElement.createPopup(PopupPeer, 'revoke-session', {
-        buttons: [{
-          langKey: 'Terminate',
-          isDanger: true,
-          callback: () => {
-            tab.managers.appAccountManager.resetAuthorization(hash)
-            .then((value) => {
-              if(value) {
-                target.remove();
-              }
-            }, onError);
+    let alsoTerminateBot = false;
+    try {
+      if(bot) {
+        alsoTerminateBot = await confirmationPopup({
+          ...options,
+          checkbox: {
+            text: TERMINATE_CONNECTED_BOT_KEY,
+            textArgs: [new PeerTitle({
+              peerId: (bot.bot_id as UserId).toPeerId(false),
+              username: true
+            }).element]
           }
-        }],
-        titleLangKey: 'AreYouSureSessionTitle',
-        descriptionLangKey: 'TerminateSessionText'
-      }).show();
-    };
+        });
+      } else {
+        await confirmationPopup(options);
+      }
+    } catch(err) {
+      return;
+    }
 
-    const element = menuElement = ButtonMenuSync({
-      buttons: [{
-        icon: 'stop',
-        text: 'Terminate',
-        onClick: onTerminateClick
-      }]
-    });
-    element.id = 'active-sessions-contextmenu';
-    element.classList.add('contextmenu');
-
-    getOverlayRoot().append(element);
-
-    attachContextMenuListener({
-      element: tab.scrollable.container,
-      callback: (e) => {
-        target = findUpClassName(e.target, 'row');
-        if(!target || target.dataset.hash === '0') {
-          return;
-        }
-
-        if(!('touches' in e)) e.preventDefault(); // cross-realm-safe mouse check (Document PiP window)
-        if(!('touches' in e)) e.cancelBubble = true;
-
-        positionMenu(e, element);
-        contextMenuController.openBtnMenu(element);
-      },
-      listenerSetter: tab.listenerSetter
-    });
-
-    attachClickEvent(tab.scrollable.container, (e) => {
-      target = findUpClassName(e.target, 'row');
-      if(!target || target.dataset.hash === '0') {
+    try {
+      const terminated = await tab.managers.appAccountManager.resetAuthorizations();
+      if(!terminated) {
+        toastNew({langPackKey: 'Error.AnError'});
         return;
       }
 
-      onTerminateClick();
-    }, {listenerSetter: tab.listenerSetter});
+      setAuthorizations((list) => list.filter((authorization) => authorization.pFlags.current));
+
+      if(alsoTerminateBot) {
+        await tab.managers.appBusinessManager.updateConnectedBot({
+          previousBotId: bot.bot_id as UserId
+        });
+      }
+    } catch(err) {
+      onError(err as ApiError);
+    }
+  };
+
+  const renameDevice = async() => {
+    const inputField = new InputField({
+      maxLength: MAX_DEVICE_MODEL_LENGTH,
+      label: 'AuthSessions.DeviceName'
+    });
+    inputField.value = appSettings.customDeviceModel || '';
+
+    try {
+      await confirmationPopup({
+        titleLangKey: 'AuthSessions.RenameDevice',
+        inputField,
+        button: {langKey: 'Save'}
+      });
+    } catch(err) {
+      return;
+    }
+
+    // networkerFactory picks this up and re-inits the connection with the new name
+    setAppSettings('customDeviceModel', inputField.value.trim());
+  };
+
+  const renameAnchor = () => {
+    const anchor = anchorCallback(renameDevice);
+    anchor.append(i18n('AuthSessions.RenameDevice'));
+    return anchor;
+  };
+
+  const setTTL = async(days: number) => {
+    const previous = ttlDays();
+    setTtlDays(days);
+
+    try {
+      await tab.managers.appAccountManager.setAuthorizationTTL(days);
+    } catch(err) {
+      setTtlDays(previous);
+      toastNew({langPackKey: 'Error.AnError'});
+    }
+  };
+
+  const openSession = (authorization: Authorization.authorization) => {
+    tab.slider.createTab(AppSessionTab).open({
+      authorization,
+      onTerminate: authorization.pFlags.current ? undefined : () => terminateSession(authorization),
+      onSettingsChanged: (updated) => setAuthorizations((list) => {
+        return list.map((item) => isSameHash(item, updated) ? {...item, pFlags: updated.pFlags} : item);
+      })
+    });
+  };
+
+  const terminateMenu = (onClick: () => void) => ({
+    buttons: [{
+      icon: 'stop' as Icon,
+      text: 'Terminate' as const,
+      danger: true,
+      onClick
+    }]
   });
 
-  onCleanup(() => {
-    menuElement?.remove();
-  });
+  const TTLRow = () => {
+    const [rowEl, setRowEl] = createSignal<HTMLElement>();
+    const [isOpen, setIsOpen] = createSignal(false);
+    const selected = createMemo(() => nearestTTLOption(ttlDays()));
 
-  return null;
+    return (
+      <Row ref={setRowEl} clickable={() => setIsOpen(true)}>
+        <Row.Title>{i18n('AuthSessions.TerminateIfAwayFor')}</Row.Title>
+        <Row.RightContent>
+          <InlineSelect
+            value={selected()}
+            isOpen={isOpen()}
+            onClose={() => setIsOpen(false)}
+            options={TTL_OPTIONS}
+            onChange={(days: number) => {
+              setIsOpen(false);
+              if(days !== selected()) setTTL(days);
+            }}
+            parent={rowEl()}
+          />
+        </Row.RightContent>
+      </Row>
+    );
+  };
+
+  const SessionRow = (props: {authorization: Authorization.authorization}) => {
+    const authorization = () => props.authorization;
+    const isCurrent = () => !!authorization().pFlags.current;
+    const lastActive = () => formatDateAccordingToTodayNew(
+      new Date(Math.max(authorization().date_active, authorization().date_created) * 1000)
+    );
+
+    return (
+      <Row
+        class="session-row"
+        clickable={() => openSession(authorization())}
+        role="button"
+        tabIndex={0}
+        contextMenu={isCurrent() ? undefined : terminateMenu(() => {
+          terminateSession(authorization());
+        })}
+      >
+        <Row.Icon icon={getSessionPlatformIcon(authorization())} />
+        <Row.Title titleRight={isCurrent() ? undefined : lastActive()}>
+          {[authorization().app_name, authorization().app_version].filter(Boolean).join(' ')}
+        </Row.Title>
+        <Row.Midtitle>
+          {[authorization().device_model, authorization().system_version || authorization().platform].filter(Boolean).join(', ')}
+        </Row.Midtitle>
+        <Row.Subtitle>
+          {[authorization().ip, authorization().country].filter(Boolean).join(' - ')}
+        </Row.Subtitle>
+      </Row>
+    );
+  };
+
+  const ConnectedBotRow = (props: {connectedBot: ConnectedBot.connectedBot}) => {
+    const bot = () => props.connectedBot;
+    const peerId = () => (bot().bot_id as UserId).toPeerId(false);
+
+    return (
+      <Row
+        class="session-row"
+        clickable={() => tab.slider.createTab(AppConnectedBotSessionTab).open({connectedBot: bot()})}
+        role="button"
+        tabIndex={0}
+        contextMenu={terminateMenu(() => {
+          terminateConnectedBot(bot());
+        })}
+      >
+        <Row.Media size="40">
+          <AvatarNewTsx peerId={peerId()} size={40} />
+        </Row.Media>
+        <Row.Title titleRight={bot().date ? formatDateAccordingToTodayNew(new Date(bot().date * 1000)) : undefined}>
+          <PeerTitleTsx peerId={peerId()} />
+        </Row.Title>
+        <Row.Midtitle>
+          {[bot().device, bot().location].filter(Boolean).join(', ')}
+        </Row.Midtitle>
+        <Row.Subtitle>{i18n('ChatAutomation.Session')}</Row.Subtitle>
+      </Row>
+    );
+  };
+
+  // CRM: editable agent label for THIS device, shown with a CRM session only. Saving re-runs initConnection
+  // (via setAgentName + a fresh getAuthorizations call), so the current —
+  // already logged-in — session's app version is retagged server-side and
+  // becomes visible on every one of the operator's devices.
+  const AgentNameSection = () => {
+    const labelInput = new InputField({
+      labelText: 'Agent name (tags this session)',
+      plainText: true,
+      name: 'agent-name',
+      autocomplete: 'off',
+      maxLength: 64
+    });
+
+    sessionStorage.get('agent_name').then((name) => {
+      if(name) labelInput.setValueSilently(name);
+    });
+
+    const save = async() => {
+      const name = labelInput.value.trim();
+      try {
+        await sessionStorage.set({agent_name: name || undefined});
+        await tab.managers.networkerFactory.setAgentName(name);
+        // Forces initConnection to be re-sent (connectionInited was reset),
+        // then picks up the freshly-recorded session info.
+        await refresh();
+        toastNew({langPackKey: 'Saved'});
+      } catch(err) {
+        console.error('save agent label error:', err);
+      }
+    };
+
+    return (
+      <>
+        {labelInput.container}
+        <Button class="btn-primary btn-transparent primary" icon="check" text="Save" onClick={save} />
+      </>
+    );
+  };
+
+  return (
+    <>
+      <Section
+        name="CurrentSession"
+        nameRight={renameAnchor()}
+        caption={hasOtherSessions() ? 'ClearOtherSessionsHelp' : undefined}
+      >
+        <Show when={currentSession()}>
+          {(authorization) => <SessionRow authorization={authorization()} />}
+        </Show>
+        <Show when={useIsCrmLoggedIn()()}>
+          <AgentNameSection />
+        </Show>
+        <Show when={hasOtherSessions()}>
+          <Button
+            class="btn-primary btn-transparent danger"
+            icon="stop"
+            text="TerminateAllSessions"
+            onClick={terminateAll}
+          />
+        </Show>
+      </Section>
+
+      <Show when={incompleteSessions().length}>
+        <Section name="AuthSessions.IncompleteAttempts" caption="AuthSessions.IncompleteAttemptsInfo">
+          <For each={incompleteSessions()}>
+            {(authorization) => <SessionRow authorization={authorization} />}
+          </For>
+        </Section>
+      </Show>
+
+      <Show when={otherSessions().length || connectedBot()}>
+        <Section name="OtherSessions" caption="SessionsListInfo">
+          <Show when={connectedBot()}>
+            {(bot) => <ConnectedBotRow connectedBot={bot()} />}
+          </Show>
+          <For each={otherSessions()}>
+            {(authorization) => <SessionRow authorization={authorization} />}
+          </For>
+        </Section>
+      </Show>
+
+      <Show when={ttlDays()}>
+        <Section name="AuthSessions.TerminateIfAwayTitle">
+          <TTLRow />
+        </Section>
+      </Show>
+    </>
+  );
 };
 
 export default ActiveSessions;

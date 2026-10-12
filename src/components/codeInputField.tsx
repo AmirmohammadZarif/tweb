@@ -1,4 +1,5 @@
 import styles from '@components/codeInputField.module.scss';
+import I18n, {LangPackKey} from '@lib/langPack';
 import classNames from '@helpers/string/classNames';
 import {children, createRoot, createSignal, Index, Ref, Show, Signal} from 'solid-js';
 import {subscribeOn} from '@helpers/solid/subscribeOn';
@@ -16,7 +17,8 @@ export default class CodeInputFieldCompat {
     length: number
     onChange?: (code: string) => void
     onFill?: (code: string) => void,
-    class?: string
+    class?: string,
+    label?: LangPackKey
   }) {
     this.errorSignal = createSignal(false);
     this.disabledSignal = createSignal(false);
@@ -66,6 +68,8 @@ export function CodeInputField(props: {
   onFill?: (code: string) => void
   error?: boolean
   disabled?: boolean
+  /** Accessible name — the boxes are the only visible affordance, there is no visible label. */
+  label?: LangPackKey
 }) {
   const [value, setValue] = props.valueSignal ?? createSignal('');
   const [activeIndexStart, setActiveIndexStart] = createSignal(-1);
@@ -198,6 +202,7 @@ export function CodeInputField(props: {
           (props.ref as any)?.(el);
         }}
         class={styles.input}
+        aria-label={I18n.format(props.label || 'AccDescr.LoginCode', true)}
         inputmode="numeric"
         autocomplete="one-time-code"
         required
@@ -229,7 +234,7 @@ export function CodeInputField(props: {
           let finalValue = rawValue
           const oldValue = value()
           const selectionSize = Math.abs(
-            (previousSelection.start ?? 0) - (previousSelection.end ?? 0),
+            (previousSelection.start ?? 0) - (previousSelection.end ?? 0)
           )
 
           if((previousSelection.inserting || selectionSize === oldValue.length)) {
@@ -248,7 +253,7 @@ export function CodeInputField(props: {
             if(hasInvalidChars) {
               e.currentTarget.setSelectionRange(
                 previousSelection.start ?? 0,
-                previousSelection.end ?? 0,
+                previousSelection.end ?? 0
               )
             }
             return

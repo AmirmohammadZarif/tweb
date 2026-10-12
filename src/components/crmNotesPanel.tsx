@@ -1,6 +1,7 @@
 import {createEffect, createSignal, For, on, onCleanup, Show} from 'solid-js';
 import Button from '@components/buttonTsx';
 import CheckboxFieldTsx from '@components/checkboxFieldTsx';
+import Row from '@components/rowTsx';
 import {IconTsx} from '@components/iconTsx';
 import Scrollable from '@components/scrollable2';
 import confirmationPopup from '@components/confirmationPopup';
@@ -266,12 +267,16 @@ export default function CrmNotesPanel(props: {
             onKeyDown={(e) => onEditKeyDown(e, note)}
           />
           <div class="crm-notes-item-edit-actions">
-            <CheckboxFieldTsx
-              toggle
-              text="Crm.Note.ShareAllDepartments"
-              checked={isCrmNoteShared(note)}
-              onChange={(checked) => toggleShared(note, checked)}
-            />
+            <Row>
+              <Row.CheckboxFieldToggle>
+                <CheckboxFieldTsx
+                  toggle
+                  checked={isCrmNoteShared(note)}
+                  onChange={(checked) => toggleShared(note, checked)}
+                />
+              </Row.CheckboxFieldToggle>
+              <Row.Title>{i18n('Crm.Note.ShareAllDepartments')}</Row.Title>
+            </Row>
             <div class="crm-notes-item-edit-buttons">
               <Button
                 class="btn-primary btn-transparent primary"
@@ -318,13 +323,16 @@ export default function CrmNotesPanel(props: {
             onInput={(e) => setText(e.currentTarget.value)}
             onKeyDown={onComposeKeyDown}
           />
-          <CheckboxFieldTsx
-            class="crm-notes-share"
-            toggle
-            text="Crm.Note.ShareAllDepartments"
-            checked={shareAll()}
-            onChange={setShareAll}
-          />
+          <Row class="crm-notes-share">
+            <Row.CheckboxFieldToggle>
+              <CheckboxFieldTsx
+                toggle
+                checked={shareAll()}
+                onChange={setShareAll}
+              />
+            </Row.CheckboxFieldToggle>
+            <Row.Title>{i18n('Crm.Note.ShareAllDepartments')}</Row.Title>
+          </Row>
           <Button
             class="btn-primary btn-color-primary crm-notes-submit"
             disabled={busy() || !text().trim()}

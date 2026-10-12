@@ -4,6 +4,10 @@
 @font-face {
   font-family: 'Numbers Rounded';
   src: url('#{$fonts-path}/Numbers-Rounded.woff2') format('woff2');
+  // The single face answers the whole range on purpose: the digits are drawn at the same
+  // weight `--font-weight-bold` asks for, so `var(--font-rounded)` never gets a browser's
+  // faked bold on top of them. Same trick as Roboto's 600 alias in `fonts/_roboto.scss`.
+  font-weight: 100 900;
   unicode-range: U+0030-0039, U+002B, U+002D;
 }
 
@@ -63,10 +67,6 @@
   --input-transition: .2s ease-out;
   --input-placeholder-transition: .15s ease-out;
   --reaction-paid-transition: .2s ease-in-out;
-  --sticker-viewer-open-transition-in: .2s var(--transition-standard-easing);
-  --sticker-viewer-open-transition-out: .2s var(--transition-standard-easing);
-  // --sticker-viewer-switch-transition: .2s cubic-bezier(.07,1.21,.56,1.2);
-  --sticker-viewer-switch-transition: .2s cubic-bezier(.12,1.1,.56,1.2);
   --popup-transition-function: cubic-bezier(.4, 0, .2, 1);
   // --popup-transition-time: .15s;
   --popup-transition-time: .15s;
@@ -124,6 +124,8 @@
   --section-box-shadow-big: 0px 1px 8px 0px var(--section-box-shadow-big-color);
   --column-box-shadow: 0px 0px 4px 0px var(--column-box-shadow-color);
   --font-regular: "Roboto", -apple-system, apple color emoji, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+  --font-serif: "Roboto Serif", Georgia, "Times New Roman", serif;
+  --font-heading: "Merriweather", "Roboto Serif", Georgia, "Times New Roman", serif;
   --font-monospace: 'Roboto Mono', monospace;
   --font-rounded: -ui-rounded, "Numbers Rounded", "Roboto", "Helvetica Neue", sans-serif;
   --font-weight-bold: 500;
@@ -177,9 +179,6 @@
 
   --peer-avatar-saved-top: var(--light-filled-saved-color);
   --peer-avatar-saved-bottom: var(--saved-color);
-
-  --peer-color: var(--primary-color);
-  --peer-color-rgb: var(--primary-color-rgb);
 
   --avatar-color-story-unread-from: #34c76f;
   --avatar-color-story-unread-to: #3da1fd;
@@ -256,16 +255,20 @@
   --monospace-text-color: var(--danger-color);
   --backdrop-opacity: .85;
   --menu-background-color: rgba(var(--surface-color-rgb), var(--backdrop-opacity));
-  --rlottie-vector-fill: rgba(0, 0, 0, #{$hover-alpha});
+  --lottie-vector-fill: rgba(0, 0, 0, #{$hover-alpha});
   --limit-line-empty-background: #F1F3F5;
   --old-input-background-color: #F1F3F5;
   --premium-color: #9275ff;
 
-  --gc-background-color: #212121;
-  --gc-button-leave-color: rgba(255, 89, 90, .3);
-  --gc-button-unmuted-color: rgba(1, 200, 80, .2);
-  --gc-button-muted-color: rgba(60, 135, 247, .2);
-  --gc-button-hand-color: rgba(223, 68, 184, .2);
+  // a popup's background (--background-color at night): the participants' section stands out of it
+  // as a popup's sections do
+  --gc-background-color: #181818;
+  // What the old translucent tints looked like on the panel, nearly opaque: without a backdrop blur
+  // the translucent ones vanished over a video.
+  --gc-button-leave-color: rgba(100, 50, 50, .92);
+  --gc-button-unmuted-color: rgba(27, 66, 42, .92);
+  --gc-button-muted-color: rgba(38, 53, 76, .92);
+  --gc-button-hand-color: rgba(71, 40, 63, .92);
   --gc-button-unmuted-fill-color: #195530;
   --gc-button-muted-fill-color: #3C87F7;
   --gc-green-color: #195530;
@@ -279,8 +282,31 @@
   --gc-red-text-color: #ff595a;
 
   --gc-right-column-width: 26.25rem;
+  --gc-tile-background: #2c2c2e;
+  // the microphone button's gradients, from its top-right corner to its bottom-left one — the waves
+  // round it are drawn in them too (microphoneBlobs.ts)
+  --gc-microphone-unmuted-from: #00A3B4;
+  --gc-microphone-unmuted-to: #00CB47;
+  --gc-microphone-muted-from: #4EABF8;
+  --gc-microphone-muted-to: #3478F6;
+  --gc-microphone-hand-from: #DF44B8;
+  --gc-microphone-hand-to: #3851EB;
+
+  // a message's secondary color, at the root as well as on .chat: message content shown outside a
+  // chat (an Instant View page) is shaded with it too, so it looks the same there. The .chat one
+  // stays, for a chat's own theme (see the var() note below)
+  --message-status-color: var(--secondary-text-color);
 
   // * Day theme end
+}
+
+// * A var() is substituted where the property is declared, so these follow the theme only if
+// * re-declared on every element that carries one — a chat with its own theme included
+:root,
+.night,
+.chat {
+  --peer-color: var(--primary-color);
+  --peer-color-rgb: var(--primary-color-rgb);
 }
 
 .night {
@@ -308,9 +334,10 @@
   --spoiler-draft-background-color: #484848;
   --monospace-text-color: var(--primary-text-color);
   --menu-background-color: rgba(var(--surface-color-rgb), .75);
-  --rlottie-vector-fill: var(--light-secondary-text-color);
+  --lottie-vector-fill: var(--light-secondary-text-color);
   --limit-line-empty-background: var(--light-filled-secondary-text-color);
   --old-input-background-color: var(--background-color);
+  --message-status-color: var(--secondary-color);
 
   // * Night theme end
 }
@@ -479,6 +506,11 @@ body.deactivated-backwards {
 
 a {
   color: var(--link-color);
+}
+
+// a name that is a link (PeerTitle `link`) keeps the colour of where it is, as a name does
+a.peer-title {
+  color: inherit;
 }
 
 .link-color {
@@ -795,6 +827,12 @@ b {
 }
 
 .avatar-edit {
+  // AvatarEdit's container is a <button>: undo the inline-block and the UA chrome it brings,
+  // or `margin: auto` stops centering it
+  display: block;
+  padding: 0;
+  border: none;
+  background: none;
   position: relative;
   border-radius: 50%;
   cursor: pointer;
@@ -802,6 +840,12 @@ b {
 
   &.is-forum {
     border-radius: var(--avatar-border-radius-forum);
+  }
+
+  // the placeholder avatar is positioned over the whole circle and hides the global ring, which is
+  // drawn inside the edge — draw it just outside instead
+  :root:where(.a11y) &:focus-visible {
+    outline-offset: var(--focus-ring-width);
   }
 
   &-canvas {
@@ -970,6 +1014,10 @@ not screen and (                min-resolution: 2dppx) {
   outline: none;
   cursor: text;
   white-space: pre-wrap;
+  // * Blink/WebKit set this on editables in their UA stylesheet, Gecko doesn't:
+  // * without it an unbreakable run (a long digit sequence, a word) overflows the
+  // * field in Firefox instead of wrapping (bugs.telegram.org/c/63932)
+  overflow-wrap: break-word;
 
   .custom-emoji {
     display: inline-block;
@@ -1008,7 +1056,7 @@ not screen and (                min-resolution: 2dppx) {
     margin-inline-end: 0;
   } */
 
-  /* > img, > .rlottie {
+  /* > img, > .lottie {
     position: absolute;
     left: 0;
     top: 0;
@@ -1211,7 +1259,7 @@ middle-ellipsis-element {
   }
 }
 
-.rlottie {
+.lottie {
   &,
   &-vector {
     left: 0;
@@ -1231,7 +1279,7 @@ middle-ellipsis-element {
   }
 
   &-vector {
-    fill: var(--rlottie-vector-fill);
+    fill: var(--lottie-vector-fill);
   }
 
   &.fade-in {
@@ -1524,18 +1572,6 @@ hr {
   }
 }
 
-.quick-reaction-title {
-  display: flex;
-  align-items: center;
-}
-
-.quick-reaction-sticker {
-  width: 32px !important;
-  height: 32px !important;
-  position: relative !important;
-  margin: 0 .5rem 0 0 !important;
-}
-
 .verified-icon {
   &-svg {
     width: 1rem;
@@ -1779,6 +1815,11 @@ hr {
     height: 100%;
     border-radius: inherit;
   }
+
+  &-thumbnail-preview {
+    filter: blur(20px);
+    transform: scale(1.08);
+  }
 }
 
 .accordion {
@@ -1808,7 +1849,7 @@ hr {
 
   &-right-button {
     min-width: 3.875rem;
-    height: 3rem;
+    height: 100%;
     border-radius: $border-radius-medium;
     display: flex;
     align-items: center;
@@ -1830,6 +1871,10 @@ hr {
     .accordion-counter {
       font-size: var(--font-size-13);
       margin-inline-start: .0625rem;
+    }
+
+    &.row-right {
+      margin-inline-end: -1rem;
     }
   }
 
@@ -1972,6 +2017,10 @@ hr {
   &-left {
     margin-inline-end: .125rem;
   }
+
+  &-right {
+    margin-inline-start: .125rem;
+  }
 }
 
 .icon-reflect {
@@ -1980,6 +2029,7 @@ hr {
 }
 
 .code {
+  --code-content-padding: .25rem .625rem;
   --font-size: var(--messages-secondary-text-size);
   display: block;
   margin: .25rem 0;
@@ -1987,7 +2037,7 @@ hr {
   font-size: var(--font-size);
 
   &-header {
-    background-color: rgba(var(--primary-color-rgb), .2);
+    background-color: transparent;
     color: var(--primary-color);
     font-family: var(--font-regular);
     font-weight: var(--font-weight-bold);
@@ -1997,6 +2047,7 @@ hr {
     cursor: pointer;
     line-height: 1;
     padding: .0625rem .625rem;
+    user-select: none;
 
     // .night & {
     //   background-color: rgba(0, 0, 0, .2);
@@ -2008,14 +2059,18 @@ hr {
     }
 
     &-button {
-      font-size: calc(var(--font-size) + 4px);
+      align-items: center;
+      color: inherit;
+      display: inline-flex;
+      flex: 0 0 20px;
+      font-size: 16px;
+      height: 20px;
+      justify-content: center;
+      line-height: 1;
       pointer-events: all;
       border-radius: 50%;
-      padding: .25rem;
-
-      @include hover() {
-        background-color: rgba(var(--primary-color-rgb), .16);
-      }
+      padding: 0;
+      width: 20px;
     }
 
     &-toggle-wrap {
@@ -2030,7 +2085,7 @@ hr {
 
   &-code {
     display: block;
-    padding: .25rem .625rem;
+    padding: var(--code-content-padding);
   }
 
   &.is-scrollable &-code {
@@ -2076,18 +2131,25 @@ hr {
   align-items: center;
   justify-content: center;
   position: relative;
-  opacity: .4;
-  gap: .5rem;
+  gap: .625rem;
   flex: 0 0 auto;
+  align-self: center;
+  width: 70%;
   padding: 0 .25rem;
+  // The label reads as part of the rule, not as body copy — the stripes take
+  // the same colour through `currentColor`.
+  color: var(--secondary-text-color);
+  margin-inline: auto;
 
   &-stripe {
     display: block;
-    height: .0625rem;
+    height: .5px;
+    // Tinted from the text around it rather than `--border-color`, which is
+    // darker than a popup's own background and leaves the line invisible.
     background-color: currentColor;
     flex: 1 1 auto;
     border-radius: 1px;
-    opacity: .5;
+    opacity: .2;
   }
 }
 
@@ -2096,7 +2158,7 @@ hr {
   position: absolute;
   // top: 3.5rem;
   top: 3.25rem;
-  width: calc(100% - 4.5rem - 1rem);
+  width: calc(100% - 5.5rem);
   pointer-events: none;
   opacity: 0;
 
@@ -2114,10 +2176,8 @@ hr {
     }
 
     .row-icon {
-      top: .75rem !important;
+      top: calc((56px - 30px) / 2) !important;
       transform: none !important;
-      font-size: 2rem !important;
-      margin-inline-start: -.3125rem;
     }
 
     &.is-expanded {
@@ -2172,10 +2232,6 @@ hr {
   }
 
   &-counter {
-    border-radius: 5px;
-    padding: 1px 6px;
-    background-color: rgba(var(--primary-color-rgb), .2);
-    font-size: var(--font-size-12);
     margin-inline-start: .5rem;
   }
 

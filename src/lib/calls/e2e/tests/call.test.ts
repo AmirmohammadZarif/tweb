@@ -15,15 +15,17 @@ import {
 import {
   bytesToHex,
   computeSharedSecret,
+  concatBytes,
   ed25519GenerateKeyPair,
   ed25519SkToCurve25519,
   ensureCryptoReady,
   hmacSha512,
+  int32LeToBytes,
   randomBytes,
   sha256
 } from '../crypto';
 import {PrivateKey, PublicKey} from '../keys';
-import {encryptData, encryptHeader} from '../messageEncryption';
+import {decryptData, encryptData, encryptHeader} from '../messageEncryption';
 import {SharedKey} from '../tlTypes';
 
 beforeAll(() => ensureCryptoReady());
@@ -159,6 +161,82 @@ describe('encryptPacket / decryptPacket', () => {
     expect(bytesToHex(decoded.epochHash)).toBe(bytesToHex(epoch.epochHash));
   });
 
+  // Pins the wire format part by part, each recomputed with the plain
+  // primitives (header_b slots with encryptHeader from the raw epoch key, not
+  // the header key encryptPacket caches on the epoch), at sizes on both sides
+  // of the aes-js / Web Crypto split.
+  it('lays a frame out as the wire format says — every part recomputable from the spec', async() => {
+    const MAGIC_CALL_PACKET = int32LeToBytes(0x40a6bee9);
+    const MAGIC_CALL_PACKET_LARGE_MSG_ID = int32LeToBytes(0x1ce56c2d);
+    const key = PrivateKey.fromSeed(new Uint8Array(32).fill(15));
+    const userId = BigInt('9');
+    const participants = [{userId, publicKey: key.publicKey()}];
+    const epochs = [await makeEpoch(1, participants), await makeEpoch(2, participants), await makeEpoch(3, participants)];
+    const oneTimeSecret = randomBytes(32);
+    const seqno = 0xfffffffe;
+
+    for(const [size, prefixLength] of [[0, 0], [100, 0], [4000, 10], [20000, 1]]) {
+      const data = randomBytes(size);
+      const packet = await encryptPacket({
+        channelId: 7,
+        data,
+        unencryptedPrefixLength: prefixLength,
+        epochs,
+        privateKey: key,
+        seqno,
+        oneTimeSecret
+      });
+
+      let offset = 0;
+      const take = (length: number) => packet.subarray(offset, offset += length);
+      const prefix = take(prefixLength);
+      const headerA = take(4 + 32 * epochs.length);
+      const headerB = take(32 * epochs.length);
+      const encryptedPacket = packet.subarray(offset, packet.length - 4);
+      const encryptedPayload = encryptedPacket.subarray(0, encryptedPacket.length - 64);
+      const signature = encryptedPacket.subarray(encryptedPacket.length - 64);
+
+      expect(bytesToHex(prefix)).toBe(bytesToHex(data.subarray(0, prefixLength)));
+      expect(bytesToHex(headerA)).toBe(bytesToHex(concatBytes(int32LeToBytes(epochs.length), ...epochs.map((e) => e.epochHash))));
+      expect(bytesToHex(packet.subarray(packet.length - 4))).toBe(bytesToHex(int32LeToBytes(prefixLength)));
+
+      const {output: payload, largeMsgId} = await decryptData(
+        encryptedPayload,
+        oneTimeSecret,
+        concatBytes(MAGIC_CALL_PACKET, headerA, prefix)
+      );
+      expect(bytesToHex(payload)).toBe(bytesToHex(concatBytes(int32LeToBytes(7), int32LeToBytes(seqno), data.subarray(prefixLength))));
+      // Ed25519 is deterministic: the same message signs to the same bytes.
+      expect(bytesToHex(signature)).toBe(bytesToHex(key.sign(concatBytes(MAGIC_CALL_PACKET_LARGE_MSG_ID, largeMsgId))));
+      for(let i = 0; i < epochs.length; i++) {
+        const expected = await encryptHeader(oneTimeSecret, encryptedPacket, epochs[i].groupSharedKey);
+        expect(bytesToHex(headerB.subarray(32 * i, 32 * i + 32))).toBe(bytesToHex(expected));
+      }
+    }
+  });
+
+  it('derives an epoch\'s header key once, for every frame after the first', async() => {
+    const key = PrivateKey.fromSeed(new Uint8Array(32).fill(16));
+    const userId = BigInt('10');
+    const epoch = await makeEpoch(0, [{userId, publicKey: key.publicKey()}]);
+    const frame = (seqno: number) => encryptPacket({
+      channelId: 0,
+      data: new Uint8Array([1, 2, 3]),
+      unencryptedPrefixLength: 0,
+      epochs: [epoch],
+      privateKey: key,
+      seqno
+    });
+
+    expect(epoch.headerKey).toBeUndefined();
+    const first = await frame(1);
+    const headerKey = epoch.headerKey;
+    expect(headerKey).toBeDefined();
+    await frame(2);
+    await decryptPacket({packet: first, fromUserId: userId, epochs: [epoch]});
+    expect(epoch.headerKey).toBe(headerKey);
+  });
+
   it('multi-epoch packet decodes with either epoch', async() => {
     const aliceKey = PrivateKey.fromSeed(new Uint8Array(32).fill(11));
     const aliceUserId = BigInt('5000');
@@ -258,6 +336,74 @@ describe('encryptPacket / decryptPacket', () => {
     await expect(
       decryptPacket({packet, fromUserId: aliceUserId, epochs: [wrongEpoch]})
     ).rejects.toThrow(/no matching/);
+  });
+});
+
+// tdlib CallEncryption::check_not_seen / mark_as_seen: a 1024-wide window per
+// (sender, channel) that rejects duplicates and anything older than the window.
+describe('ReplayState', () => {
+  const pub = (fill: number) => PrivateKey.fromSeed(new Uint8Array(32).fill(fill)).publicKey();
+  const windowOf = (replay: ReplayState, sender: PublicKey, channelId: number) =>
+    (replay as unknown as {windows: Map<string, {seen: Set<number>; max: number}>})
+    .windows.get(`${bytesToHex(sender.bytes)}:${channelId}`);
+
+  it('rejects a duplicate seqno — per sender and channel', () => {
+    const alice = pub(0x51), bob = pub(0x52);
+    const replay = new ReplayState();
+    replay.checkAndMark(alice, 0, 42);
+    expect(() => replay.checkAndMark(alice, 0, 42)).toThrow(/already seen/);
+    expect(() => replay.checkAndMark(alice, 1, 42)).not.toThrow();
+    expect(() => replay.checkAndMark(bob, 0, 42)).not.toThrow();
+  });
+
+  it('rejects a seqno older than the window', () => {
+    const alice = pub(0x53);
+    const replay = new ReplayState();
+    replay.checkAndMark(alice, 0, 5000);
+    expect(() => replay.checkAndMark(alice, 0, 5000 - 1024)).toThrow(/older than window/);
+    expect(() => replay.checkAndMark(alice, 0, 5000 - 1023)).not.toThrow();
+  });
+
+  it('accepts in-window reordering and still catches every seqno the second time', () => {
+    const alice = pub(0x54);
+    const replay = new ReplayState();
+    for(const seqno of [100, 105, 103, 101, 104, 102]) {
+      expect(() => replay.checkAndMark(alice, 0, seqno)).not.toThrow();
+    }
+    for(const seqno of [100, 103, 105]) {
+      expect(() => replay.checkAndMark(alice, 0, seqno)).toThrow(/already seen/);
+    }
+  });
+
+  it('slides forward holding at most 1024 seqnos, and drops everything on a jump past the window', () => {
+    const alice = pub(0x55);
+    const replay = new ReplayState();
+    for(let seqno = 1; seqno <= 3000; seqno++) replay.checkAndMark(alice, 0, seqno);
+    const window = windowOf(replay, alice, 0)!;
+    expect(window.seen.size).toBe(1024);
+    expect(window.max).toBe(3000);
+    // What the window slid past is "too old", never "not yet seen".
+    expect(() => replay.checkAndMark(alice, 0, 3000 - 1024)).toThrow(/older than window/);
+    expect(() => replay.checkAndMark(alice, 0, 3000 - 1023)).toThrow(/already seen/);
+
+    replay.checkAndMark(alice, 0, 100000);
+    expect(window.seen.size).toBe(1);
+    expect(() => replay.checkAndMark(alice, 0, 3000)).toThrow(/older than window/);
+    expect(() => replay.checkAndMark(alice, 0, 99999)).not.toThrow();
+  });
+
+  it('retainSenders drops every window of a sender that is no longer active', () => {
+    const alice = pub(0x56), bob = pub(0x57);
+    const replay = new ReplayState();
+    replay.checkAndMark(alice, 0, 1);
+    replay.checkAndMark(alice, 7, 1);
+    replay.checkAndMark(bob, 0, 1);
+
+    replay.retainSenders(new Set([bytesToHex(alice.bytes)]));
+
+    expect(replay.has(alice, 0)).toBe(true);
+    expect(replay.has(alice, 7)).toBe(true);
+    expect(replay.has(bob, 0)).toBe(false);
   });
 });
 

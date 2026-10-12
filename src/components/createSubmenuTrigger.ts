@@ -3,7 +3,7 @@ import {getMiddleware, Middleware, MiddlewareHelper} from '@helpers/middleware';
 import noop from '@helpers/noop';
 import pause from '@helpers/schedulers/pause';
 import {i18n} from '@lib/langPack';
-import {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
+import {ButtonMenuItemOptionsVerifiable, isButtonMenuItemDisabled} from '@components/buttonMenu';
 import attachFloatingButtonMenu, {FloatingButtonMenuDirection} from '@components/floatingButtonMenu';
 import Icon from '@components/icon';
 
@@ -14,32 +14,43 @@ export type CreateSubmenuArgs = {
   middleware: Middleware;
 };
 
-type CreateSubmenuTriggerArgs = {
-  options: Pick<ButtonMenuItemOptionsVerifiable, 'text' | 'regularText' | 'icon' | 'verify' | 'separator' | 'separatorDown' | 'onClose'>;
+// `T` carries the menu-specific fields its owner puts on every one of its buttons
+// (DialogsContextMenu's community mode, and the like) straight through to the result
+type CreateSubmenuTriggerArgs<T> = {
+  options: Pick<ButtonMenuItemOptionsVerifiable, 'text' | 'regularText' | 'icon' | 'verify' | 'separator' | 'separatorDown' | 'onClose'> & T;
   createSubmenu: (args: CreateSubmenuArgs) => MaybePromise<HTMLElement>;
   direction?: FloatingButtonMenuDirection;
 };
 
-export default function createSubmenuTrigger({
+export default function createSubmenuTrigger<T = {}>({
   options,
   createSubmenu,
   direction = 'right-start'
-}: CreateSubmenuTriggerArgs) {
+}: CreateSubmenuTriggerArgs<T>) {
   let
     isDisabled = false,
-    currentMiddleware: MiddlewareHelper
+    currentMiddleware: MiddlewareHelper,
+    detachTriggerListeners: () => void
   ;
 
   const onOpen = () => {
     if(!menuBtnOptions.element) return;
+    // Menu item nodes are reused by several context-menu implementations.
+    // Re-opening must replace the prior hover/keyboard listeners instead of
+    // stacking another async submenu creator on the same trigger.
+    detachTriggerListeners?.();
+    currentMiddleware?.destroy();
     currentMiddleware = getMiddleware();
 
-    menuBtnOptions.element.addEventListener(CLICK_EVENT_NAME, (e) => {
+    const stopPropagation = (e: Event) => {
       e.stopPropagation();
-    }, true);
+    };
+    menuBtnOptions.element.addEventListener(CLICK_EVENT_NAME, stopPropagation, true);
     menuBtnOptions.element.classList.add('submenu-trigger');
+    menuBtnOptions.element.setAttribute('aria-haspopup', 'menu');
+    menuBtnOptions.element.setAttribute('aria-expanded', 'false');
 
-    attachFloatingButtonMenu({
+    const detachFloatingMenu = attachFloatingButtonMenu({
       element: menuBtnOptions.element,
       direction,
       createMenu: async() => {
@@ -49,10 +60,14 @@ export default function createSubmenuTrigger({
       },
       offset: [-5, -5],
       level: 2,
-      triggerEvent: 'mouseenter',
-      canOpen: () => !isDisabled,
+      triggerEvent: ['mouseenter', CLICK_EVENT_NAME],
+      canOpen: () => !isDisabled && !isButtonMenuItemDisabled(menuBtnOptions.element),
       onClose: onClose
     });
+    detachTriggerListeners = () => {
+      menuBtnOptions.element?.removeEventListener(CLICK_EVENT_NAME, stopPropagation, true);
+      detachFloatingMenu();
+    };
   };
 
   const onClose = async() => {
@@ -63,8 +78,9 @@ export default function createSubmenuTrigger({
     isDisabled = false;
   };
 
-  const menuBtnOptions: ButtonMenuItemOptionsVerifiable = {
+  const menuBtnOptions: ButtonMenuItemOptionsVerifiable & T = {
     ...options,
+    keepOpen: true,
 
     // * fix langpack
     get regularText() {
@@ -79,6 +95,12 @@ export default function createSubmenuTrigger({
     onClick: noop,
     onOpen,
     onClose,
+    dispose: () => {
+      detachTriggerListeners?.();
+      detachTriggerListeners = undefined;
+      currentMiddleware?.destroy();
+      currentMiddleware = undefined;
+    },
     id: submenuHelperIdSeed++
   };
 

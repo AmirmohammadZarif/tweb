@@ -1,18 +1,21 @@
-import {Component} from 'solid-js';
+import {Component, createSignal} from 'solid-js';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
+import Modes from '@config/modes';
 import toggleDisability from '@helpers/dom/toggleDisability';
 import {makeMediaSize} from '@helpers/mediaSize';
 import copy from '@helpers/object/copy';
 import deepEqual from '@helpers/object/deepEqual';
 import {ForumTopic} from '@layer';
 import {GENERAL_TOPIC_ID, TOPIC_COLORS} from '@appManagers/constants';
+import I18n, {i18n} from '@lib/langPack';
 import getAbbreviation from '@lib/richTextProcessor/getAbbreviation';
 import ButtonIcon from '@components/buttonIcon';
-import CheckboxField from '@components/checkboxField';
+import CheckboxFieldTsx from '@components/checkboxFieldTsx';
 import EmojiTab from '@components/emoticonsDropdown/tabs/emoji';
 import InputField from '@components/inputField';
-import Row from '@components/row';
-import SettingSection from '@components/settingSection';
+import Row from '@components/rowTsx';
+import Section from '@components/section';
+import {wrapSolidComponent} from '@helpers/solid/wrapSolidComponent';
 import {wrapTopicIcon} from '@components/wrappers/messageActionTextNewUnsafe';
 import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
 import {usePromiseCollector} from '@components/solidJsTabs/promiseCollector';
@@ -140,12 +143,13 @@ const EditTopic: Component = () => {
     }
 
     {
-      const section = new SettingSection({
-        name: isGeneral ? 'CreateGeneralTopicTitle' : 'CreateTopicTitle'
-      });
-
       iconDiv = document.createElement('div');
       iconDiv.classList.add('edit-topic-icon-container');
+      if(!threadId) {
+        iconDiv.setAttribute('role', 'button');
+        if(Modes.a11y) iconDiv.tabIndex = 0;
+        iconDiv.setAttribute('aria-label', I18n.format('AccDescr.ChangeTopicColor', true));
+      }
 
       !threadId && attachClickEvent(iconDiv, () => {
         if(topic.icon_emoji_id) {
@@ -175,7 +179,7 @@ const EditTopic: Component = () => {
         nameInputField.setOriginalValue(topic.title, true);
       }
 
-      confirmBtn = ButtonIcon('check btn-confirm blue hide', {noRipple: true});
+      confirmBtn = ButtonIcon('check btn-confirm blue hide', {noRipple: true, ariaLabel: 'Save'});
       tab.header.append(confirmBtn);
 
       attachClickEvent(confirmBtn, () => {
@@ -218,16 +222,25 @@ const EditTopic: Component = () => {
 
       inputWrapper.append(nameInputField.container);
 
-      section.content.append(iconDiv, inputWrapper);
-
-      tab.scrollable.append(section.container);
+      tab.scrollable.append(wrapSolidComponent(() => (
+        <Section name={isGeneral ? 'CreateGeneralTopicTitle' : 'CreateTopicTitle'}>
+          {iconDiv}
+          {inputWrapper}
+        </Section>
+      ), tab.middlewareHelper.get()));
     }
 
     const promises: Promise<any>[] = [];
 
     if(!isGeneral) {
-      const section = new SettingSection({});
-      section.container.classList.add('edit-topic-emoticons-container');
+      let sectionContent!: HTMLElement;
+      const section = wrapSolidComponent(() => (
+        <Section
+          class="edit-topic-emoticons-container"
+          contentProps={{ref: (element) => sectionContent = element}}
+        />
+      ), tab.middlewareHelper.get());
+
       const emojiTab = new EmojiTab({
         managers: tab.managers,
         isStandalone: true,
@@ -274,33 +287,38 @@ const EditTopic: Component = () => {
 
       promises.push(promise);
 
-      section.content.replaceWith(emojiTab.container);
-      tab.scrollable.append(section.container);
+      // the emoji picker takes the content element's place, exactly as it did before
+      sectionContent.replaceWith(emojiTab.container);
+      tab.scrollable.append(section);
     } else {
-      const section = new SettingSection({caption: 'EditTopicHideInfo'});
+      const hiddenSignal = createSignal(!(topic as ForumTopic.forumTopic).pFlags.hidden);
+      const [busy, setBusy] = createSignal(false);
+      const section = wrapSolidComponent(() => (
+        <Section caption="EditTopicHideInfo">
+          <Row disabled={busy()}>
+            <Row.CheckboxFieldToggle>
+              <CheckboxFieldTsx
+                disabled={busy()}
+                signal={hiddenSignal}
+                toggle
+                onChange={(checked) => {
+                  const promise = tab.managers.appMessagesManager.editForumTopic({
+                    peerId,
+                    topicId: threadId,
+                    hidden: !checked
+                  });
 
-      const checkboxField = new CheckboxField({
-        checked: !(topic as ForumTopic.forumTopic).pFlags.hidden,
-        text: 'EditTopicHide'
-      });
+                  setBusy(true);
+                  promise.finally(() => setBusy(false));
+                }}
+              />
+            </Row.CheckboxFieldToggle>
+            <Row.Title>{i18n('EditTopicHide')}</Row.Title>
+          </Row>
+        </Section>
+      ), tab.middlewareHelper.get());
 
-      tab.listenerSetter.add(checkboxField.input)('change', () => {
-        const promise = tab.managers.appMessagesManager.editForumTopic({
-          peerId,
-          topicId: threadId,
-          hidden: !checkboxField.checked
-        });
-
-        row.disableWithPromise(promise);
-      });
-
-      const row = new Row({
-        checkboxField
-      });
-
-      section.content.append(row.container);
-
-      tab.scrollable.append(section.container);
+      tab.scrollable.append(section);
     }
 
     await Promise.all(promises);

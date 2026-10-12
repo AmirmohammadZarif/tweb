@@ -4,7 +4,10 @@ import {animateImageToTarget} from '@helpers/animateImageToTarget';
 import type {CancellablePromise} from '@helpers/cancellablePromise';
 import {createImageAndURLFromBlob} from '@helpers/createImageAndURLFromBlob';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
+import Button from '@components/button';
+import Modes from '@config/modes';
 import {getFileAndOpenEditor} from '@helpers/getFileAndOpenEditor';
+import {revokeObjectURL} from '@helpers/objectUrl';
 import type {InputFile, Photo} from '@layer';
 import type {AppManagers} from '@lib/managers';
 import appDownloadManager from '@lib/appDownloadManager';
@@ -226,7 +229,7 @@ export async function openAvatarEditorWithFile(
     initialTab: isVideo ? 'adjustments' : 'crop',
     onEditFinish: onFinish,
     dontCreatePreview,
-    onClose: () => { }
+    onClose: () => revokeObjectURL(mediaSrc)
   });
 }
 
@@ -236,8 +239,8 @@ export default class AvatarEdit {
   private icon: HTMLSpanElement;
 
   constructor(onChange: (payload: AvatarEditPayload) => void, options?: Options) {
-    this.container = document.createElement('div');
-    this.container.classList.add('avatar-edit');
+    // a native button only with the keyboard layer: it takes the focus on click
+    this.container = Button('avatar-edit', {noRipple: true, ariaLabel: 'AccDescr.EditAvatar', asDiv: !Modes.a11y});
 
     this.canvas = document.createElement('canvas');
     this.canvas.classList.add('avatar-edit-canvas');
@@ -304,6 +307,7 @@ async function finishFromResult({result: editorResult, canvas, onChange}: Finish
 
   const ctx = canvas.getContext('2d');
   ctx.drawImage(img, 0, 0, width, height);
+  revokeObjectURL(imgResult.url);
   ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
   ctx.fillRect(0, 0, width, height);
 
@@ -365,6 +369,7 @@ async function finishFromVideoResult({
     [canvas.width, canvas.height] = [width, height];
     const ctx = canvas.getContext('2d');
     ctx.drawImage(thumbImg.img, 0, 0, width, height);
+    revokeObjectURL(thumbImg.url);
     ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
     ctx.fillRect(0, 0, width, height);
   }

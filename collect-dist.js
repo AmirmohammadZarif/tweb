@@ -18,6 +18,11 @@ const keepAsset = require('./keepAsset');
 
 const publicPath = path.join(__dirname, 'public');
 const distPath = path.join(__dirname, 'dist');
+// Assets a previous build shipped that keepAsset() would otherwise keep forever.
+const obsoleteAssets = new Set([
+  'rlottie-wasm.js',
+  'rlottie-wasm.wasm'
+]);
 
 function copyFiles(source, destination) {
   if(!fs.existsSync(destination)) {
@@ -42,6 +47,12 @@ function clearOldFiles() {
   const files = fs.readdirSync(publicPath, {withFileTypes: true});
   const removed = [];
   files.forEach((file) => {
+    if(file.isFile() && obsoleteAssets.has(file.name)) {
+      fs.unlinkSync(path.join(publicPath, file.name));
+      removed.push(file.name);
+      return;
+    }
+
     if(file.isDirectory() ||
       bundleFiles.some((bundleFile) => bundleFile === file.name) ||
       keepAsset(file.name)) {

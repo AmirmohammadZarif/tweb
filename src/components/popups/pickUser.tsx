@@ -1,13 +1,14 @@
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import AppSelectPeers, {SelectSearchPeerType} from '@components/appSelectPeers';
 import PopupElement, {createPopup, PopupContext, PopupContextValue} from '@components/popups/indexTsx';
-import {LangPackKey, i18n} from '@lib/langPack';
+import I18n, {LangPackKey, i18n} from '@lib/langPack';
 import {Modify} from '@types';
 import {IsPeerType} from '@appManagers/appPeersManager';
 import TransitionSlider from '@components/transition';
 import appNavigationController, {NavigationItem} from '@components/appNavigationController';
 import {ForumTopic} from '@layer';
-import Row from '@components/row';
+import RowTsx from '@components/rowTsx';
+import {wrapSolidComponent} from '@helpers/solid/wrapSolidComponent';
 import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
 import {avatarNew} from '@components/avatarNew';
 import {makeMediaSize} from '@helpers/mediaSize';
@@ -15,6 +16,7 @@ import getDialogIndex from '@appManagers/utils/dialogs/getDialogIndex';
 import {Middleware} from '@helpers/middleware';
 import deferredPromise from '@helpers/cancellablePromise';
 import {MOUNT_CLASS_TO} from '@config/debug';
+import Modes from '@config/modes';
 import findUpAttribute from '@helpers/dom/findUpAttribute';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import rootScope from '@lib/rootScope';
@@ -32,6 +34,7 @@ import type DialogsStorage from '@lib/storages/dialogs';
 import type MonoforumDialogsStorage from '@lib/storages/monoforumDialogs';
 import wrapPeerTitle from '@components/wrappers/peerTitle';
 import {Accessor, createSignal, JSX, Show, untrack, useContext} from 'solid-js';
+import {ButtonIconTsx} from '@components/buttonIconTsx';
 import fastSmoothScroll from '@helpers/fastSmoothScroll';
 import {AppManagers} from '@lib/managers';
 import {REAL_FOLDERS} from '@lib/appManagers/constants';
@@ -52,6 +55,7 @@ export type PopupPickUserOptions = Modify<ConstructorParameters<typeof AppSelect
   middleware?: never,
   titleLangKey: LangPackKey,
   initial?: PeerId[],
+  prependPeerIds?: PeerId[],
   useTopics?: boolean,
   footerButtonProps?: Parameters<typeof PopupElement['FooterButton']>[0],
   footer?: (ctx: {multiSelect: Accessor<AppSelectPeers['multiSelect']>}) => JSX.Element,
@@ -71,13 +75,8 @@ async function wrapTopicRow({
   middleware: Middleware
 }) {
   const size = makeMediaSize(32, 32);
-  const row = new Row({
-    title: threadId ? await wrapPeerTitle({peerId, threadId}) : i18n('AllMessages'),
-    clickable: true
-  });
-  row.container.dataset.peerId = [peerId, threadId].filter(Boolean).join('_');
-  row.container.classList.add('selector-forum-topic');
-  const media = row.createMedia('abitbigger');
+  const title = threadId ? await wrapPeerTitle({peerId, threadId}) : i18n('AllMessages');
+  let media: JSX.Element;
   if(threadId) {
     const avatar = avatarNew({
       peerId,
@@ -91,13 +90,23 @@ async function wrapTopicRow({
       }
     });
     await avatar.readyThumbPromise;
-    media.append(avatar.node);
+    media = avatar.node;
   } else {
-    media.append(wrapEmojiText('💬'));
-    row.container.classList.add('selector-forum-topic-all');
+    media = wrapEmojiText('💬');
   }
 
-  return row.container;
+  const row = wrapSolidComponent(() => (
+    <RowTsx
+      clickable
+      class="selector-forum-topic"
+      classList={{'selector-forum-topic-all': !threadId}}
+    >
+      <RowTsx.Title>{title}</RowTsx.Title>
+      <RowTsx.Media size="abitbigger">{media}</RowTsx.Media>
+    </RowTsx>
+  ), middleware);
+  row.dataset.peerId = [peerId, threadId].filter(Boolean).join('_');
+  return row;
 }
 
 export default function showPickUserPopup(options: PopupPickUserOptions) {
@@ -177,6 +186,21 @@ export default function showPickUserPopup(options: PopupPickUserOptions) {
     }
 
     await finalize();
+  };
+
+  // The header button both reflects and drives the selector the user is currently looking at, so
+  // every selector reports its mode back here — the peer list and, once opened, the topic list.
+  const trackMultiSelectMode = (sel: AppSelectPeers) => {
+    const originalSetMultiSelectMode = sel.setMultiSelectMode.bind(sel);
+    sel.setMultiSelectMode = (mode) => {
+      originalSetMultiSelectMode(mode);
+      setMultiSelectMode(mode);
+    };
+    setMultiSelectMode(sel.multiSelect);
+  };
+
+  const enableMultiSelect = () => {
+    (canGoBack() ? forumSelector : selector)?.setMultiSelectMode('enabled');
   };
 
   const onBackClick = () => {
@@ -260,6 +284,7 @@ export default function showPickUserPopup(options: PopupPickUserOptions) {
         };
       },
       renderResultsFunc: async(threadIds, append) => {
+        const middleware = fs.middlewareHelperLoader.get();
         if(firstRender) {
           firstRender = false;
 
@@ -269,12 +294,16 @@ export default function showPickUserPopup(options: PopupPickUserOptions) {
         }
 
         const promises = threadIds.map((threadId) => {
-          return wrapTopicRow({peerId, threadId, middleware: fsMiddleware});
+          return wrapTopicRow({peerId, threadId, middleware});
         });
         const elements = await Promise.all(promises);
+        if(!middleware()) {
+          return;
+        }
+
         elements.forEach((element) => {
           const sel = fs.selected.has(element.dataset.peerId);
-          element.prepend(fs.checkbox(sel));
+          element.prepend(fs.checkbox(sel, undefined, element.querySelector<HTMLElement>('.peer-title, .row-title')));
         });
         fs.list[!append ? 'append' : 'prepend'](...elements);
       },
@@ -297,6 +326,7 @@ export default function showPickUserPopup(options: PopupPickUserOptions) {
     });
 
     fs.setMultiSelectMode(selector.multiSelect);
+    trackMultiSelectMode(fs);
     fs.addInitial(selected);
     fs.container.classList.add('tabs-tab');
     fs.container.middlewareHelper = fsMiddlewareHelper;
@@ -482,12 +512,7 @@ export default function showPickUserPopup(options: PopupPickUserOptions) {
     });
     selector.container.classList.add('tabs-tab');
 
-    const originalSetMultiSelectMode = selector.setMultiSelectMode.bind(selector);
-    selector.setMultiSelectMode = (mode) => {
-      originalSetMultiSelectMode(mode);
-      setMultiSelectMode(mode);
-    };
-    setMultiSelectMode(selector.multiSelect);
+    trackMultiSelectMode(selector);
 
     const loadPromises: Promise<any>[] = [];
     if(options.showTopPeers) {
@@ -566,6 +591,7 @@ export default function showPickUserPopup(options: PopupPickUserOptions) {
     return (
       <PopupElement.FooterButton
         confirm
+        langKey={Modes.a11y ? 'Next' : undefined}
         callback={() => {
           finalize();
         }}
@@ -598,6 +624,16 @@ export default function showPickUserPopup(options: PopupPickUserOptions) {
             onBackClick={onBackClick}
           />
           <PopupElement.Title title={options.titleLangKey} />
+          {/* 'hidden' is the only mode where multiselect is available but off — 'disabled' has none
+              to offer and 'enabled' is already selecting, so the button belongs to that state alone */}
+          <Show when={multiSelectMode() === 'hidden'}>
+            <ButtonIconTsx
+              icon="checkround"
+              class="popup-forward-multiselect"
+              aria-label={I18n.format('Message.Context.Select', true)}
+              onClick={enableMultiSelect}
+            />
+          </Show>
         </PopupElement.Header>
         <PopupElement.Body>
           <Inner />
@@ -615,6 +651,9 @@ export default function showPickUserPopup(options: PopupPickUserOptions) {
     get selector() {
       return selector;
     },
+    get middleware() {
+      return middleware;
+    },
     hide() {
       setShow(false);
     },
@@ -631,7 +670,8 @@ export async function showPickUser2Popup<T extends boolean = false>({
   limitCallback,
   titleLangKey,
   placeholder,
-  exceptSelf
+  exceptSelf,
+  excludePeerIds
 }: {
   peerType?: SelectSearchPeerType[],
   filterPeerTypeBy: AppSelectPeers['filterPeerTypeBy'],
@@ -641,7 +681,8 @@ export async function showPickUser2Popup<T extends boolean = false>({
   limit?: number,
   limitCallback?: () => void,
   titleLangKey?: LangPackKey,
-  exceptSelf?: boolean
+  exceptSelf?: boolean,
+  excludePeerIds?: PopupPickUserOptions['excludePeerIds']
 }) {
   return new Promise<T extends false ? PeerId : PeerId[]>((resolve, reject) => {
     let resolved = false;
@@ -649,13 +690,24 @@ export async function showPickUser2Popup<T extends boolean = false>({
       peerType,
       placeholder: placeholder || 'SelectChat',
       onSelect: (chosen) => {
+        // The footer button stays clickable with an empty selection — treat
+        // that as a cancel (onClose rejects) instead of resolving with [].
+        if(!chosen.length) {
+          return;
+        }
+
         resolved = true;
         resolve((multiSelect ? chosen.map((c) => c.peerId) : chosen[0].peerId) as any);
       },
+      multiSelect,
+      // The batch is confirmed via the floating footer button, which needs a
+      // label — an unlabeled FooterButton renders as an empty bar.
+      footerButtonProps: multiSelect ? {langKey: 'Send'} : undefined,
       filterPeerTypeBy,
       chatRightsActions,
       titleLangKey,
       exceptSelf,
+      excludePeerIds,
       onClose: () => {
         if(!resolved) {
           reject();
@@ -693,6 +745,41 @@ export async function showPickUser3Popup(
   });
 }
 
+/**
+ * A picker footer that offers the link until a recipient is ticked. Confirming
+ * an empty selection is a dead button, and the link itself is what someone who
+ * opened the picker and picked nobody still wants — so that is what the button
+ * becomes. Shared by the conference invite picker and every `shareUrlToPeers`
+ * batch; both feed the returned pair straight into their picker options.
+ */
+export function createCopyLinkFooter(options: {
+  confirmLangKey: LangPackKey,
+  copy: () => void,
+  confirm: () => void
+}): Pick<PopupPickUserOptions, 'footer' | 'onChange'> {
+  const [selectedCount, setSelectedCount] = createSignal(0);
+
+  return {
+    onChange: (length) => setSelectedCount(length),
+    footer: () => (
+      <PopupElement.FooterButton
+        confirm
+        langKey={selectedCount() ? options.confirmLangKey : 'CopyLink'}
+        callback={() => {
+          if(selectedCount()) {
+            options.confirm();
+            return;
+          }
+
+          options.copy();
+          // Copying is not done with the picker — a recipient may still follow.
+          return false;
+        }}
+      />
+    )
+  };
+}
+
 export function showSharingPickerPopup(options: {
   onSelect: PopupPickUserOptions['onSelect'],
   chatRightsActions?: PopupPickUserOptions['chatRightsActions'],
@@ -704,6 +791,10 @@ export function showSharingPickerPopup(options: {
   // batch; `false` (default) ⇒ pick-and-send immediately. Pass-through to
   // AppSelectPeers' own `multiSelect` enum if a non-boolean is needed.
   multiSelect?: PopupPickUserOptions['multiSelect'],
+  // Replace the floating confirm button — `shareUrlToPeers` swaps it for a
+  // "copy the link" action while nothing is picked.
+  footer?: PopupPickUserOptions['footer'],
+  onChange?: PopupPickUserOptions['onChange'],
   onCloseAfterTimeout?: () => void,
   onClose?: () => void
 }) {

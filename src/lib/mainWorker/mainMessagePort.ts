@@ -6,8 +6,10 @@ import type toggleStorages from '@helpers/toggleStorages';
 import type {ActiveAccountNumber} from '@lib/accounts/types';
 import type {LoadStateResult} from '@appManagers/utils/state/loadState';
 import type {PasscodeStorageValue} from '@lib/commonStateStorage';
-import type {ThreadedWorkerType} from '@lib/appManagers/appManagersManager';
+import type {ThreadedWorkerType} from '@lib/threadedWorkerTypes';
 import type {LogEntry} from '@lib/debug/logsBuffer';
+import type {ThreadMemoryStats} from '@lib/debug/memoryStats';
+import type {ObjectURLPinUpdate, SharedObjectURLUpdate} from '@helpers/objectUrlUtils';
 import SuperMessagePort from '@lib/superMessagePort';
 import {CacheStorageDbName} from '@lib/files/cacheStorage';
 
@@ -43,7 +45,13 @@ export default class MTProtoMessagePort<Master extends boolean = true> extends S
   serviceWorkerOnline: (online: boolean) => void,
   serviceWorkerPort: (payload: void, source: MessageEventSource, event: MessageEvent) => void,
   threadedPort: (payload: ThreadedWorkerType, source: MessageEventSource, event: MessageEvent) => void,
-  createObjectURL: (blob: Blob) => string,
+  updateObjectURLPins: (
+    updates: ObjectURLPinUpdate[],
+    source: MessageEventSource
+  ) => void,
+  createSharedObjectURL: (payload: {blob: Blob, owner: string}) => string,
+  setSharedObjectURL: (payload: {url: string, owner: string}, source: MessageEventSource) => void,
+  releaseSharedObjectURL: (payload: {url: string, owner: string}) => void,
   tabState: (payload: TabState, source: MessageEventSource) => void,
   createProxyWorkerURLs: (payload: {originalUrl: string, blob: Blob, type: ThreadedWorkerType}) => string[],
   setInterval: (timeout: number) => number,
@@ -58,7 +66,7 @@ export default class MTProtoMessagePort<Master extends boolean = true> extends S
   toggleCacheStorage: (value: boolean, source: MessageEventSource) => void,
   resetEncryptableCacheStorages: () => void,
   forceLogout: () => void,
-  toggleUninteruptableActivity: (payload: { activity: string, active: boolean }, source: MessageEventSource) => void,
+  toggleUninteruptableActivity: (payload: {activity: string, active: boolean}, source: MessageEventSource) => void,
   disableCacheStoragesByNames: (names: CacheStorageDbName[]) => void,
   enableCacheStoragesByNames: (names: CacheStorageDbName[]) => void,
   resetOpenCacheStoragesByNames: (names: CacheStorageDbName[]) => void,
@@ -66,14 +74,21 @@ export default class MTProtoMessagePort<Master extends boolean = true> extends S
   // ring buffer on export, and propagates the enabled flag (prod ?debug=1 isn't
   // visible to the worker's own location.search).
   getLogs: (payload: void) => LogEntry[],
-  setLogBufferEnabled: (enabled: boolean) => void
+  setLogBufferEnabled: (enabled: boolean) => void,
+  // The worker shares the tab's renderer process (Chrome hosts a same-origin SharedWorker in an
+  // existing renderer for that site), so its heap is charged to the tab - see @lib/debug/memoryStats.
+  getMemoryStats: (payload: void) => Promise<ThreadMemoryStats>
 } & MTProtoBroadcastEvent, {
   convertWebp: (payload: {fileName: string, bytes: Uint8Array}) => Promise<Uint8Array>,
   convertOpus: (payload: {fileName: string, bytes: Uint8Array}) => Promise<Uint8Array>,
   localStorageProxy: (payload: LocalStorageProxyTask['payload']) => Promise<any>,
+  // Tab-scoped hand-off of the passcode key across an account-switch reload; see
+  // @lib/passcode/keyHandoff for why it must not go through localStorage.
+  passcodeKeyHandoff: (payload: string) => void,
   mirror: (payload: MirrorTaskPayload) => void,
   notificationBuild: (payload: NotificationBuildTaskPayload) => void,
   receivedServiceMessagePort: (payload: void) => void,
+  sharedObjectURLUpdated: (payload: SharedObjectURLUpdate) => void,
   log: (payload: any) => void,
   tabsUpdated: (payload: TabState[]) => void,
   callNotification: (payload: CallNotificationPayload) => void,

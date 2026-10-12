@@ -1,6 +1,6 @@
 import type LazyLoadQueue from '@components/lazyLoadQueue';
 import type {PeerPhotoSize} from '@appManagers/appAvatarsManager';
-import type {StoriesSegment, StoriesSegments} from '@appManagers/appStoriesManager';
+import type {StoriesSegment, StoriesSegments as StoriesSegmentsType} from '@appManagers/appStoriesManager';
 import {getMiddleware, type Middleware} from '@helpers/middleware';
 import deferredPromise from '@helpers/cancellablePromise';
 import {
@@ -18,7 +18,7 @@ import {
 import rootScope from '@lib/rootScope';
 import {NULL_PEER_ID, REPLIES_PEER_ID, HIDDEN_PEER_ID} from '@appManagers/constants';
 import {Chat, ChatPhoto, PhotoSize, User, UserProfilePhoto} from '@layer';
-import {getPeerAvatarColorByPeer} from '@appManagers/utils/peers/getPeerColorById';
+import {getPeerAvatarColorById, getPeerAvatarColorByPeer} from '@appManagers/utils/peers/getPeerColorById';
 import getPeerPhoto from '@appManagers/utils/peers/getPeerPhoto';
 import wrapAbbreviation from '@lib/richTextProcessor/wrapAbbreviation';
 import getPeerInitials from '@components/wrappers/getPeerInitials';
@@ -46,42 +46,80 @@ import {createAutoDeleteIcon} from '@components/autoDeleteIcon';
 import {resolveElements} from '@solid-primitives/refs';
 import toArray from '@helpers/array/toArray';
 import computeLockColor from '@helpers/computeLockColor';
-import createLoopingMutedVideo from '@helpers/dom/createLoopingMutedVideo';
-import animationIntersector from '@components/animationIntersector';
+import createAvatarVideo from '@components/createAvatarVideo';
+import {MOUNT_CLASS_TO} from '@config/debug';
+import WeakRefSet from '@helpers/weakRefSet';
 
 const FADE_IN_DURATION = 200;
 const TEST_SWAPPING = 0;
 
-const avatarsMap: Map<string, Set<ReturnType<typeof AvatarNew>>> = new Map();
-const believeMe: Map<string, Set<ReturnType<typeof AvatarNew>>> = new Map();
+// * Only what the registry actually calls: naming the full `ReturnType<typeof AvatarNew>` here
+// * makes AvatarNew's own return-type inference circular, since it registers itself below.
+type TrackedAvatar = {render: (...args: any[]) => any, updateStoriesSegments: (...args: any[]) => any};
+
+// * This registry must NOT own what it tracks. It used to hold avatars strongly and let go only on
+// * a key change or from onCleanup, so an avatar whose owner never disposed it - a caller outside a
+// * Solid root, a middleware that never fired - kept its whole detached subtree alive for the tab's
+// * lifetime. In a day-old tab 14 197 detached nodes hung off this map, the single biggest retainer
+// * in the heap. Now the ELEMENT owns the avatar (avatarByElement) and the map only points at it
+// * weakly: an avatar whose element is still reachable - mounted, or deliberately kept for
+// * re-mounting like the chat list does - keeps updating, and one that was dropped for good takes
+// * its entry with it.
+// * `believeMe` below is the same kind of registry and gets the same treatment, so both share the
+// * type and the finalizer rather than growing a second copy of this bookkeeping
+type AvatarRegistry = Map<string, WeakRefSet<TrackedAvatar>>;
+
+const avatarsMap: AvatarRegistry = new Map();
+const avatarByElement: WeakMap<HTMLElement, TrackedAvatar> = new WeakMap();
+const collectedAvatars = new FinalizationRegistry<{map: AvatarRegistry, key: string, ref: WeakRef<TrackedAvatar>}>(({map, key, ref}) => {
+  const set = map.get(key);
+  if(!set?.delete(ref) || set.size) {
+    return;
+  }
+
+  map.delete(key);
+});
+
+// * Iterating also prunes refs whose avatar is already gone but whose finalizer has not run yet
+const forEachAvatar = (map: AvatarRegistry, key: string, callback: (avatar: TrackedAvatar) => void) => {
+  const set = map.get(key);
+  if(!set?.size) {
+    return;
+  }
+
+  set.forEachLive(callback);
+
+  if(!set.size) {
+    map.delete(key);
+  }
+};
+
+// * Exposed for diagnosis: this map was the biggest single retainer in a leaked heap, and its size
+// * is the cheapest way to tell whether avatars are still being released (see memoryReport)
+MOUNT_CLASS_TO && (MOUNT_CLASS_TO.avatarsMap = avatarsMap);
+
+// * Avatars queued for a peer nobody has rendered yet, so the first render can wake the rest. An
+// * entry leaves only when that render happens - and for an avatar whose row is dropped before it
+// * ever scrolls into view, it never does. Holding them strongly kept 3 430 avatars, and through
+// * `element` their whole detached rows, in a day-old tab: the map's 286 peers outnumbered the 10
+// * avatars actually on screen. Weak for the same reason as avatarsMap above
+const believeMe: AvatarRegistry = new Map();
 const seen: Set<PeerId> = new Set();
+
+// * Exposed for the same reason as avatarsMap: memoryReport counts both, and a believeMe that keeps
+// * growing while the tab sits idle is the signature of this leak coming back
+MOUNT_CLASS_TO && (MOUNT_CLASS_TO.believeMe = believeMe);
 
 function getAvatarQueueKey(peerId: PeerId, threadId?: number) {
   return peerId + (threadId ? '_' + threadId : '');
 }
 
 const onAvatarUpdate = ({peerId, threadId}: {peerId: PeerId, threadId?: number}) => {
-  const key = getAvatarQueueKey(peerId, threadId);
-  const set = avatarsMap.get(key);
-  if(!set?.size) {
-    return;
-  }
-
-  for(const avatar of set) {
-    avatar.render();
-  }
+  forEachAvatar(avatarsMap, getAvatarQueueKey(peerId, threadId), (avatar) => avatar.render());
 };
 
 const onAvatarStoriesUpdate = ({peerId}: {peerId: PeerId}) => {
-  const key = getAvatarQueueKey(peerId);
-  const set = avatarsMap.get(key);
-  if(!set?.size) {
-    return;
-  }
-
-  for(const avatar of set) {
-    avatar.updateStoriesSegments();
-  }
+  forEachAvatar(avatarsMap, getAvatarQueueKey(peerId), (avatar) => avatar.updateStoriesSegments());
 };
 
 rootScope.addEventListener('avatar_update', onAvatarUpdate);
@@ -98,12 +136,11 @@ rootScope.addEventListener('stories_read', onAvatarStoriesUpdate);
 rootScope.addEventListener('story_deleted', onAvatarStoriesUpdate);
 rootScope.addEventListener('story_new', onAvatarStoriesUpdate);
 
-
-const getStoriesSegments = async(peerId: PeerId, storyId?: number): Promise<AckedResult<StoriesSegments>> => {
+const getStoriesSegments = async(peerId: PeerId, storyId?: number): Promise<AckedResult<StoriesSegmentsType>> => {
   if(storyId) {
     const storyUnreadType = await rootScope.managers.appStoriesManager.getUnreadType(peerId, storyId);
 
-    const segments: StoriesSegments = [{
+    const segments: StoriesSegmentsType = [{
       length: 1,
       type: storyUnreadType
     }];
@@ -150,43 +187,22 @@ export function findUpAvatar(target: Element | EventTarget) {
 async function loadAvatarVideoOverlay(
   peerId: PeerId,
   photo: UserProfilePhoto.userProfilePhoto | ChatPhoto.chatPhoto,
-  node: HTMLElement,
   middleware: Middleware,
   videoSize: PeerPhotoSize = 'photo_video'
 ): Promise<HTMLVideoElement | undefined> {
   // Load the URL and the video_start_ts (cover/start frame) in parallel so
   // playback can begin at that frame, matching the static cover.
   const [url, videoStartTs] = await Promise.all([
-    Promise.resolve(apiManagerProxy.loadAvatar(peerId, photo, videoSize)),
+    Promise.resolve(apiManagerProxy.loadAvatar(peerId, photo, videoSize)).catch((): string => undefined),
     rootScope.managers.appAvatarsManager.getAvatarVideoStartTs(peerId, photo, videoSize === 'photo_video_full').catch((): number => undefined)
   ]);
-  if(!url || !middleware()) return undefined;
+  if(!url || !middleware()) {
+    return;
+  }
 
-  // Muted-autoplay setup with src assigned last (see helper) — retry on
-  // canplay/loadeddata covers the "interrupted by a new load request" reject.
-  const v = createLoopingMutedVideo(url, 'avatar-photo avatar-video', videoStartTs);
-
-  // Don't animate while the avatar isn't visible — scrolled off the chat list,
-  // or sitting in the right sidebar while it's slid closed (the column is moved
-  // off-screen with a transform but stays mounted). Hand the <video> to the
-  // app-wide animation intersector instead of an ad-hoc IntersectionObserver:
-  // it pauses on off-screen / blur / idle / lite-mode and resumes when visible,
-  // and stays correct across Document-PiP window moves. Observe the <video>
-  // itself (like wrappers/video.ts) so it auto-unregisters when swapped/removed.
-  animationIntersector.addAnimation({
-    animation: v,
-    observeElement: v,
-    type: 'video'
-  });
-
-  middleware.onDestroy(() => {
-    animationIntersector.removeAnimationByPlayer(v);
-    v.pause();
-    v.src = '';
-    v.load();
-  });
-
-  return v;
+  // Android's ImageReceiver limits small video avatars to three repeats.
+  // Full profile avatars retain continuous playback.
+  return createAvatarVideo(url, videoStartTs, middleware, videoSize === 'photo_video' ? 3 : undefined);
 }
 
 const calculateSegmentsDimensions = (s: number) => {
@@ -214,6 +230,7 @@ export function wrapPhotoToAvatar(
   // full photo is already cached, skip the appearance fade so the re-mounts are
   // seamless instead of replaying the fade-in (avatar "blinking" away and back).
   // The first, uncached load still fades in normally.
+  const middleware = avatarElem.getMiddleware();
   const cacheContext = apiManagerProxy.getCacheContext(photo as any, photoSize?.type);
   return wrapPhoto({
     container: avatarElem.node,
@@ -223,7 +240,8 @@ export function wrapPhotoToAvatar(
     boxWidth: boxSize,
     withoutPreloader: true,
     size: photoSize,
-    noFadeIn: !!cacheContext?.downloaded
+    noFadeIn: !!cacheContext?.downloaded,
+    middleware
   }).then((result) => {
     avatarElem.node.classList.replace('media-container', 'avatar-relative');
     avatarElem.node.style.width = avatarElem.node.style.height = '';
@@ -242,14 +260,18 @@ export function wrapPhotoToAvatar(
     // For photos that include a video variant (animated profile photo), overlay
     // a muted looping <video> on top of the still image once it is loaded.
     if((photo as any)?.video_sizes?.length) {
-      attachAvatarVideoFromPhoto(avatarElem.node, photo as any);
+      attachAvatarVideoFromPhoto(avatarElem.node, photo as any, middleware);
     }
 
     return result.loadPromises.thumb;
   });
 }
 
-async function attachAvatarVideoFromPhoto(container: HTMLElement, photo: import('@layer').Photo.photo) {
+async function attachAvatarVideoFromPhoto(
+  container: HTMLElement,
+  photo: import('@layer').Photo.photo,
+  middleware: Middleware
+) {
   const [{default: chooseProfileVideoSize}, {default: appDownloadManager}] = await Promise.all([
     import('@appManagers/utils/photos/chooseProfileVideoSize'),
     import('@lib/appDownloadManager')
@@ -261,20 +283,9 @@ async function attachAvatarVideoFromPhoto(container: HTMLElement, photo: import(
     media: photo,
     thumb: videoSize
   });
+  if(!middleware()) return;
 
-  const v = createLoopingMutedVideo(url, 'avatar-photo avatar-video', videoSize.video_start_ts);
-  container.appendChild(v);
-
-  // Same as loadAvatarVideoOverlay: pause this looping avatar video whenever it
-  // isn't visible (e.g. the profile carousel in the right sidebar while it's
-  // closed, or a service-message bubble scrolled out of the chat) via the
-  // app-wide intersector. No middleware here — it auto-unregisters once the
-  // observed <video> leaves the DOM.
-  animationIntersector.addAnimation({
-    animation: v,
-    observeElement: v,
-    type: 'video'
-  });
+  container.appendChild(createAvatarVideo(url, videoSize.video_start_ts, middleware));
 }
 
 export function StoriesSegments(props: {
@@ -285,7 +296,7 @@ export function StoriesSegments(props: {
   simple?: boolean,
   isStoryFolded?: Accessor<boolean>,
 }) {
-  const [storiesSegments, setStoriesSegments] = createSignal<StoriesSegments>();
+  const [storiesSegments, setStoriesSegments] = createSignal<StoriesSegmentsType>();
   const storyDimensions: Accessor<ReturnType<typeof calculateSegmentsDimensions>> = createMemo((previousDimensions) => {
     if(storiesSegments() === undefined) {
       return;
@@ -409,6 +420,8 @@ export const AvatarNew = (props: {
   noFadeIn?: boolean,
   isSubscribed?: boolean,
   peerTitle?: string,
+  // * whose colour a `peerTitle` avatar takes — someone known only by name has none of their own
+  peerTitleColorId?: PeerId,
   lazyLoadQueue?: LazyLoadQueue | false,
   wrapOptions?: WrapSomethingOptions,
   withStories?: boolean,
@@ -509,18 +522,22 @@ export const AvatarNew = (props: {
       return;
     }
 
-    const set = believeMe.get(lastKey);
-    if(set) {
-      set.delete(this);
-      if(!set.size) {
-        believeMe.delete(lastKey);
-      }
+    // * this used to delete `this`, which is undefined inside this arrow - so a key change never
+    // * took the avatar out of believeMe, and nothing else did either
+    const set = believeRef && believeMe.get(lastKey);
+    if(set?.delete(believeRef) && !set.size) {
+      believeMe.delete(lastKey);
     }
 
+    believeRef = undefined;
+
     const avatarsSet = avatarsMap.get(lastKey);
-    if(!avatarsSet?.delete(ret)) {
+    if(!selfRef || !avatarsSet?.delete(selfRef)) {
       return;
     }
+
+    collectedAvatars.unregister(ret); // it is off the map already - do not let the finalizer re-run
+    selfRef = undefined;
 
     if(!avatarsSet.size) {
       avatarsMap.delete(lastKey);
@@ -547,11 +564,12 @@ export const AvatarNew = (props: {
     const cached = !(result instanceof Promise);
 
     const animate = !cached && liteMode.isAvailable('animations') && !props.noFadeIn;
-    let image: HTMLImageElement;
-    const element = image = document.createElement('img');
+    const image = document.createElement('img');
+    const element = image;
     element.className = classNames('avatar-photo', animate && 'fade-in');
+    element.alt = ''; // decorative — the peer name is the accessible name
 
-    let renderThumbPromise: Promise<void>;
+    let renderThumbPromise: Promise<any>;
     let callback: () => void;
     let thumbImage: HTMLImageElement, thumbElement: JSX.Element;
     if(cached) {
@@ -574,6 +592,7 @@ export const AvatarNew = (props: {
       } else if(photo.stripped_thumb) {
         thumbElement = thumbImage = document.createElement('img');
         thumbImage.className = 'avatar-photo avatar-photo-thumbnail';
+        thumbImage.alt = '';
         const url = getPreviewURLFromBytes(photo.stripped_thumb);
         renderThumbPromise = renderImageFromUrlPromise(
           thumbImage,
@@ -606,10 +625,24 @@ export const AvatarNew = (props: {
       };
     }
 
+    // Resolves to whether the image actually rendered: the download can fail
+    // (e.g. FILE_ID_INVALID when the cached peer references a stale photo_id).
+    // On failure keep the colour/initials placeholder and settle the ready
+    // promises — chat opening (bubbleGroups.createAvatar), the media viewer and
+    // profile avatars all await readyThumbPromise, so leaving it pending blocks
+    // them — and swallow the rejection so it doesn't surface as unhandled.
     const renderPromise = callbackify(loadPromise, (url) => {
       const result = renderImageFromUrl(image, url, undefined, useCache, props.processImageOnLoad);
       callbackify(result, callback);
       return result instanceof Promise ? result : Promise.resolve(result);
+    }).then(() => true, () => {
+      if(middleware()) {
+        setReady(true);
+        readyPromise.resolve();
+        readyThumbPromise.resolve();
+      }
+
+      return false;
     });
 
     // After the static image loads, if the photo has a video variant, lazily
@@ -634,12 +667,12 @@ export const AvatarNew = (props: {
     const wantsVideo = (props.isBig || (props.withVideoAvatar && ownerIsPremiumUser)) &&
       liteMode.isAvailable('video');
     if(wantsVideo && photoHasVideo && size === finalSize) {
-      Promise.resolve(renderPromise).then(() => {
-        if(!middleware()) return;
+      renderPromise.then((rendered) => {
+        if(!rendered || !middleware()) return;
         // Big profile avatar gets the full-quality video ('u'); chat list /
         // topbar use the small preview ('p') to save bandwidth.
         const videoSize: PeerPhotoSize = props.isBig ? 'photo_video_full' : 'photo_video';
-        loadAvatarVideoOverlay(peerId, photo, node, middleware, videoSize).then((videoElement) => {
+        loadAvatarVideoOverlay(peerId, photo, middleware, videoSize).then((videoElement) => {
           if(!middleware() || !videoElement) return;
           setVideo(videoElement);
         });
@@ -674,7 +707,7 @@ export const AvatarNew = (props: {
     isTopic?: boolean,
     isSubscribed?: boolean,
     isMonoforum?: boolean,
-    storiesSegments?: StoriesSegments
+    storiesSegments?: StoriesSegmentsType
   }) => {
     setThumb();
     setMedia();
@@ -720,7 +753,7 @@ export const AvatarNew = (props: {
 
     if(peerId === myId && isDialog) {
       set({
-        icon: props.meAsNotes ? 'mynotes' : 'saved',
+        icon: props.meAsNotes ? 'mynotes' : 'saved_filled',
         isForum: !props.meAsNotes && appSettings.savedAsForum
       });
 
@@ -746,7 +779,7 @@ export const AvatarNew = (props: {
 
     const peer = props.peer ?? apiManagerProxy.getPeer(peerId);
     if(title) {
-      const color = getPeerAvatarColorByPeer(peer);
+      const color = getPeerAvatarColorByPeer(peer) ?? (props.peerTitleColorId ? getPeerAvatarColorById(props.peerTitleColorId) : undefined);
       const abbr = wrapAbbreviation(title);
       set({
         abbreviature: documentFragmentToNodes(abbr),
@@ -775,7 +808,7 @@ export const AvatarNew = (props: {
     }
 
     if(peerId !== NULL_PEER_ID && peerId.isUser() && (peer as User.user)?.pFlags?.deleted) {
-      set({color: 'archive', icon: 'deletedaccount'});
+      set({color: 'archive', icon: 'deletedaccount_filled'});
       return;
     }
 
@@ -891,6 +924,8 @@ export const AvatarNew = (props: {
   };
 
   let lastKey: string;
+  let selfRef: WeakRef<TrackedAvatar>;
+  let believeRef: WeakRef<TrackedAvatar>;
   const render = async(_props?: Modify<typeof props, {size?: never, peerId?: PeerId}>) => {
     const key = getKey();
     if(key !== lastKey) {
@@ -899,9 +934,11 @@ export const AvatarNew = (props: {
 
       let set = avatarsMap.get(key);
       if(!set) {
-        avatarsMap.set(key, set = new Set());
+        avatarsMap.set(key, set = new WeakRefSet());
       }
-      set.add(ret);
+
+      selfRef = set.track(ret);
+      collectedAvatars.register(ret, {map: avatarsMap, key, ref: selfRef}, ret);
     }
 
     if(_props?.peerId !== undefined && props.peerId !== _props.peerId) {
@@ -920,13 +957,22 @@ export const AvatarNew = (props: {
         const key = getKey();
         let set = believeMe.get(key);
         if(!set) {
-          believeMe.set(key, set = new Set());
+          believeMe.set(key, set = new WeakRefSet());
         }
 
-        set.add(ret);
+        // * one ref for this avatar's lifetime, reused when the key changes - so not set.track(),
+        // * which mints a new one every call and would leave the old key holding a stale entry
+        believeRef ??= new WeakRef(ret);
+        set.add(believeRef);
+        // * no unregister token: a finalizer that fires after the entry is gone finds nothing to
+        // * delete and returns, so the stale registration costs nothing
+        collectedAvatars.register(ret, {map: believeMe, key, ref: believeRef});
 
         props.lazyLoadQueue.push({
           div: node,
+          // * without this the queue cannot purge the item when the owner dies, and the item holds
+          // * `node` - the same detached subtree this map used to keep
+          middleware,
           load: () => {
             seen.add(props.peerId);
             return render();
@@ -951,13 +997,13 @@ export const AvatarNew = (props: {
 
     const set = believeMe.get(key);
     if(set) {
-      set.delete(ret);
-      const arr = Array.from(set);
-      believeMe.delete(key);
-
-      for(let i = 0, length = arr.length; i < length; ++i) {
-        arr[i].render();
+      if(believeRef) {
+        set.delete(believeRef);
+        believeRef = undefined;
       }
+
+      believeMe.delete(key);
+      set.forEachLive((avatar) => avatar.render());
     }
 
     const result = await promise;
@@ -1004,6 +1050,25 @@ export const AvatarNew = (props: {
       '--size': isTopic() && props.wrapOptions?.customEmojiSize?.width ? props.wrapOptions.customEmojiSize.width + 'px' : undefined
     };
   };
+
+  // Accessible name for the avatar — the peer's display name, mirroring the
+  // string that getPeerInitials() abbreviates. Lets screen readers announce
+  // photo avatars, which otherwise expose nothing.
+  const accessibleName = createMemo(() => {
+    if(props.peerTitle !== undefined) {
+      return props.peerTitle;
+    }
+
+    const peer = props.peer ?? (props.peerId !== undefined ? apiManagerProxy.getPeer(props.peerId) : undefined);
+    if(!peer) {
+      return '';
+    }
+
+    return (peer as Chat.chat).title ?? [
+      (peer as User.user).first_name,
+      (peer as User.user).last_name
+    ].filter(Boolean).join(' ');
+  });
 
   const inner = (
     <>
@@ -1063,6 +1128,8 @@ export const AvatarNew = (props: {
       data-thread-id={props.threadId}
       data-story-id={props.storyId}
       style={style()}
+      role={accessibleName() ? 'img' : undefined}
+      aria-label={accessibleName() || undefined}
       {...(props.props || {})}
     >
       {wtf}
@@ -1081,9 +1148,13 @@ export const AvatarNew = (props: {
     setIsSubscribed,
     setAutoDeletePeriod,
     updateStoriesSegments,
+    getMiddleware: () => middlewareHelper.get(),
     set,
     color
   };
+
+  // * The strong edge the weak registry leans on: while the element is reachable, so is its avatar
+  avatarByElement.set(node, ret);
 
   if(
     props.peerId !== undefined ||

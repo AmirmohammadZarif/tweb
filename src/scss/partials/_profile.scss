@@ -1,5 +1,30 @@
 @use "../shared" as *;
 
+// * the status keeps the anchor of the line as it crossfades and resizes (`crossfadeContent`): its
+// * centre where the line stays centred - the old status and the new, overflowing the resizing
+// * box or not - and its start where the line stays put at its start
+@mixin status-leaving-anchor($centred) {
+  .profile-subtitle-status {
+    @if $centred {
+      justify-content: center;
+
+      .crossfade-leaving {
+        inset-inline-start: auto;
+        left: 50%;
+        transform: translateX(-50%);
+      }
+    } @else {
+      justify-content: flex-start;
+
+      .crossfade-leaving {
+        left: auto;
+        inset-inline-start: 0;
+        transform: none;
+      }
+    }
+  }
+}
+
 .profile {
   &-avatars {
     &-container {
@@ -239,6 +264,8 @@
         @include animation-level(2) {
           transition: inset-inline-start var(--transition-standard-in), transform var(--transition-standard-in), color var(--transition-standard-in), max-width var(--transition-standard-in);
         }
+
+        @include status-leaving-anchor(false);
       }
 
       .emoji-status {
@@ -335,6 +362,10 @@
       width: calc(100% / 3);
       opacity: 0;
 
+      :where(.a11y) &:focus-visible {
+        opacity: 1;
+      }
+
       @include animation-level(2) {
         transition: opacity .2s ease-in-out;
       }
@@ -430,18 +461,6 @@
       margin-bottom: var(--section-padding-bottom);
     }
 
-    .sidebar-left-section {
-      position: relative;
-      background-color: var(--surface-color);
-      padding-bottom: .5rem;
-
-      .profile-subtitle {
-        .peer-typing-container {
-          justify-content: center;
-        }
-      }
-    }
-
     &.search-empty {
       .gradient-delimiter {
         display: none;
@@ -494,6 +513,10 @@
         opacity: 0 !important;
       }
 
+      :where(.a11y) & .profile-avatars-arrow {
+        visibility: hidden;
+      }
+
       .profile-avatars-gradient {
         transition-delay: 0s;
         transition-duration: 100ms;
@@ -507,6 +530,8 @@
           inset-inline-start: 50%;
           transform: translateX(-50%);
         }
+
+        @include status-leaving-anchor(true);
 
         .profile-name {
           max-width: 21.25rem;
@@ -639,13 +664,6 @@
         }
       }
 
-      .animated-close-icon {
-        &:before,
-        &:after {
-          background-color: currentColor;
-        }
-      }
-
       .sidebar-header__title,
       .btn-icon {
         @include animation-level(2) {
@@ -738,9 +756,30 @@
       color: var(--primary-color);
     }
 
+    // * a box of its own, which what it showed fades out over (`crossfadeContent`) - an inline one
+    // * would leave that a line of another height - and which the new status resizes. What fades
+    // * out is not cut to the new status
+    &-status {
+      display: inline-flex;
+
+      .crossfade-leaving {
+        inset-inline-end: auto;
+        width: max-content;
+        overflow: visible;
+      }
+    }
+
+    @include status-leaving-anchor(true);
+
     .show-when {
       margin-inline-start: .25rem;
       cursor: pointer;
+      pointer-events: all;
+    }
+
+    // the subtitle lives inside the avatars header, which is pointer-events:
+    // none — opt the topic's forum button back in, like .show-when above
+    .topic-name-button {
       pointer-events: all;
     }
   }
@@ -1012,21 +1051,6 @@
 
 .profile-music {
   cursor: pointer;
-}
-
-.saved-music-container {
-  .saved-music-content {
-    .audio {
-      padding: 0.3125rem 1rem;
-
-      &:not(.audio-show-progress) {
-        .audio-time,
-        .audio-description:before {
-          display: none;
-        }
-      }
-    }
-  }
 }
 
 .search-super-content-gifts {

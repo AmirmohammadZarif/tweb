@@ -1,6 +1,7 @@
 import {Component} from 'solid-js';
 import {hexToRgb, hslaToString, mixColors, rgbaToHsla} from '@helpers/color';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
+import Modes from '@config/modes';
 import createContextMenu from '@helpers/dom/createContextMenu';
 import customProperties from '@helpers/dom/customProperties';
 import findUpClassName from '@helpers/dom/findUpClassName';
@@ -12,20 +13,21 @@ import getPeerActiveUsernames from '@appManagers/utils/peers/getPeerActiveUserna
 import {LangPackKey, i18n, joinElementsWith} from '@lib/langPack';
 import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
 import wrapPlainText from '@lib/richTextProcessor/wrapPlainText';
-import lottieLoader from '@lib/rlottie/lottieLoader';
+import lottieLoader from '@lib/lottie/lottieLoader';
 import rootScope from '@lib/rootScope';
 import Button from '@components/button';
 import {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import confirmationPopup from '@components/confirmationPopup';
 import {StarsAmount} from '@components/popups/stars';
-import SettingSection from '@components/settingSection';
-import {UsernameRow} from '@components/usernamesSection';
+import Section, {appendSectionContent} from '@components/section';
+import UsernameRow from '@components/usernameRow';
 import wrapPeerTitle from '@components/wrappers/peerTitle';
 import {wrapLeftDuration} from '@components/wrappers/wrapDuration';
 import {ChatInvite, ChatInviteActions, ChatInviteLink, getChatInviteLinksInitArgs, isActiveInvite} from './chatInviteLinkShared';
 import {AppChatInviteLinkTab, AppChatInviteLinksTab, AppEditChatInviteLinkTab} from '@components/solidJsTabs/tabs';
 import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
 import {usePromiseCollector} from '@components/solidJsTabs/promiseCollector';
+import {mountSolidComponent, wrapSolidComponent} from '@helpers/solid/wrapSolidComponent';
 
 const ChatInviteLinks: Component = () => {
   const [tab] = useSuperTab<typeof AppChatInviteLinksTab>();
@@ -89,7 +91,7 @@ const ChatInviteLinks: Component = () => {
         const editTab = tab.slider.createTab(AppEditChatInviteLinkTab);
         editTab.eventListener.addEventListener('finish', (invite) => {
           _menuItem.destroy();
-          _menuItem.row.container.replaceWith(createRow(invite).container);
+          _menuItem.row.container.replaceWith(createInviteRow(invite).container);
         });
         await editTab.open({
           chatId: chatId,
@@ -128,14 +130,14 @@ const ChatInviteLinks: Component = () => {
 
         if(_menuItem) {
           if(newInvite) {
-            _menuItem.row.container.replaceWith(createRow(newInvite).container);
+            _menuItem.row.container.replaceWith(createInviteRow(newInvite).container);
           }
 
-          revokedLinks.content.prepend(_menuItem.row.container);
+          revokedLinksContent.prepend(_menuItem.row.container);
           _menuItem.update(editedInvite);
         } else {
-          const row = createRow(editedInvite);
-          revokedLinks.content.prepend(row.container);
+          const row = createInviteRow(editedInvite);
+          revokedLinksContent.prepend(row.container);
           primaryInvite = newInvite;
           inviteLink.setChatInvite(primaryInvite);
         }
@@ -164,16 +166,12 @@ const ChatInviteLinks: Component = () => {
       verify: () => !!menuInvite?.pFlags?.revoked
     }];
 
-    let inviteLinkSection: SettingSection;
+    let inviteLinkSection: HTMLElement;
     {
-      const section = inviteLinkSection = new SettingSection({
-        name: 'InviteLink',
-        caption: adminId ? 'ManageLinks.Admin.Permanent.Desc' : undefined,
-        captionArgs: adminId ? await Promise.all([
-          wrapPeerTitle({peerId: adminId.toPeerId(false)}),
-          wrapPeerTitle({peerId: chatId.toPeerId(true)})
-        ]) : undefined
-      });
+      const captionArgs = adminId ? await Promise.all([
+        wrapPeerTitle({peerId: adminId.toPeerId(false)}),
+        wrapPeerTitle({peerId: chatId.toPeerId(true)})
+      ]) : undefined;
 
       inviteLink = new ChatInviteLink({
         buttons: menuButtons,
@@ -182,20 +180,33 @@ const ChatInviteLinks: Component = () => {
         withSubtitle: true
       });
 
+      inviteLink.subtitle.setAttribute('role', 'button');
+      if(Modes.a11y) inviteLink.subtitle.tabIndex = 0;
       attachClickEvent(inviteLink.subtitle, () => {
         // menuInvite = primaryInvite;
         openLink(primaryInvite);
       }, {listenerSetter: tab.listenerSetter});
 
-      section.content.append(inviteLink.container);
+      inviteLinkSection = wrapSolidComponent(() => (
+        <Section
+          name="InviteLink"
+          caption={adminId ? 'ManageLinks.Admin.Permanent.Desc' : undefined}
+          captionArgs={captionArgs}
+        >
+          {inviteLink.container}
+        </Section>
+      ), tab.middlewareHelper.get());
     }
 
-    let additionalLinks: SettingSection;
+    let additionalLinks: HTMLElement, additionalLinksContent: HTMLElement;
     {
-      const section = additionalLinks = new SettingSection({
-        name: adminId ? 'LinksCreatedByThisAdmin' : 'InviteLinks.Additional',
-        caption: adminId ? undefined : 'InviteLinks.Description'
-      });
+      additionalLinks = wrapSolidComponent(() => (
+        <Section
+          name={adminId ? 'LinksCreatedByThisAdmin' : 'InviteLinks.Additional'}
+          caption={adminId ? undefined : 'InviteLinks.Description'}
+          contentProps={{ref: (element) => additionalLinksContent = element}}
+        />
+      ), tab.middlewareHelper.get());
 
       if(!adminId) {
         const btn = Button('btn-primary btn-transparent primary', {icon: 'plus', text: 'CreateNewLink'});
@@ -203,30 +214,36 @@ const ChatInviteLinks: Component = () => {
         attachClickEvent(btn, () => {
           const editTab = tab.slider.createTab(AppEditChatInviteLinkTab);
           editTab.eventListener.addEventListener('finish', (chatInvite) => {
-            const row = createRow(chatInvite);
+            const row = createInviteRow(chatInvite);
             if(primaryInvite) {
-              section.content.prepend(row.container);
+              additionalLinksContent.prepend(row.container);
             } else {
-              section.content.firstElementChild.after(row.container);
+              additionalLinksContent.firstElementChild.after(row.container);
             }
           });
           editTab.open({chatId: chatId});
         }, {listenerSetter: tab.listenerSetter});
 
-        section.content.append(btn);
-        section.content = section.generateContentElement();
+        additionalLinksContent.append(btn);
+        additionalLinksContent = appendSectionContent(additionalLinks);
       }
     }
 
-    let adminsLinks: SettingSection;
+    let adminsLinks: HTMLElement;
     if(!adminId) {
-      const section = adminsLinks = new SettingSection({name: 'LinksCreatedByOtherAdmins'});
+      let adminsLinksContent!: HTMLElement;
+      const section = adminsLinks = wrapSolidComponent(() => (
+        <Section
+          name="LinksCreatedByOtherAdmins"
+          contentProps={{ref: (element) => adminsLinksContent = element}}
+        />
+      ), tab.middlewareHelper.get());
 
       const promise = (p.adminsInvites || Promise.reject()).then((adminsInvites) => {
         let {admins} = adminsInvites;
         admins = admins.filter((admin) => admin.admin_id.toPeerId(false) !== rootScope.myId);
         if(!admins.length) {
-          section.container.classList.add('hide');
+          section.classList.add('hide');
           return;
         }
 
@@ -263,19 +280,24 @@ const ChatInviteLinks: Component = () => {
           });
         }, {listenerSetter: tab.listenerSetter});
 
-        section.content.append(chatlist);
+        adminsLinksContent.append(chatlist);
 
         return Promise.all(loadPromises);
       }, () => {
-        section.container.remove();
+        section.remove();
       });
 
       loadPromises.push(promise);
     }
 
-    let revokedLinks: SettingSection;
+    let revokedLinks: HTMLElement, revokedLinksContent: HTMLElement;
     {
-      const section = revokedLinks = new SettingSection({name: 'RevokedLinks'});
+      revokedLinks = wrapSolidComponent(() => (
+        <Section
+          name="RevokedLinks"
+          contentProps={{ref: (element) => revokedLinksContent = element}}
+        />
+      ), tab.middlewareHelper.get());
 
       const btn = Button('btn-primary btn-transparent danger', {icon: 'delete', text: 'DeleteAllRevokedLinks'});
 
@@ -293,24 +315,24 @@ const ChatInviteLinks: Component = () => {
         await tab.managers.appChatInvitesManager.deleteRevokedExportedChatInvites(chatId, adminId);
         toggle();
 
-        Array.from(section.content.children).forEach((el) => {
+        Array.from(revokedLinksContent.children).forEach((el) => {
           const cache = invitesMap.get(el as HTMLElement);
           cache.destroy(true);
         });
         onRevokedLinksUpdate();
       }, {listenerSetter: tab.listenerSetter});
 
-      section.content.append(btn);
-      section.content = section.generateContentElement();
+      revokedLinksContent.append(btn);
+      revokedLinksContent = appendSectionContent(revokedLinks);
     }
 
     tab.scrollable.append(...[
       stickerContainer,
       caption,
-      inviteLinkSection.container,
-      additionalLinks.container,
-      adminsLinks?.container,
-      revokedLinks.container
+      inviteLinkSection,
+      additionalLinks,
+      adminsLinks,
+      revokedLinks
     ].filter(Boolean));
 
     const openLink = (invite: ChatInvite) => {
@@ -367,8 +389,14 @@ const ChatInviteLinks: Component = () => {
       return lottieLoader.waitForFirstFrame(player);
     });
 
+    type InviteRow = {
+      container: HTMLElement,
+      title: HTMLElement,
+      subtitle: HTMLElement,
+      media: HTMLElement
+    };
     type K = {
-      row: UsernameRow,
+      row: InviteRow,
       invite: ChatInvite,
       update: (newInvite?: ChatInvite) => void,
       destroy: (unmount?: boolean) => void
@@ -376,7 +404,8 @@ const ChatInviteLinks: Component = () => {
     const invitesMap: Map<HTMLElement, K> = new Map();
     const updateCallbacks: Set<() => void> = new Set();
 
-    const createRow = (invite: ChatInvite) => {
+    const createInviteRow = (invite: ChatInvite) => {
+      let title: HTMLDivElement, subtitle: HTMLDivElement, media: HTMLDivElement;
       let priceElement: HTMLElement, subtitleRight: HTMLElement;
       if(invite.subscription_pricing) {
         priceElement = StarsAmount({
@@ -385,14 +414,25 @@ const ChatInviteLinks: Component = () => {
         subtitleRight = i18n('Stars.Subscriptions.PerMonth');
       }
 
-      const row = new UsernameRow(
-        true,
-        invite.subscription_pricing ? 'link_paid' : undefined,
-        invite.subscription_pricing ? 'green' : undefined,
-        priceElement,
-        subtitleRight
-      );
-      row.title.replaceChildren(wrapInviteTitle(invite));
+      const mounted = mountSolidComponent(() => (
+        <UsernameRow
+          isLink
+          icon={invite.subscription_pricing ? 'link_paid' : 'limit_link'}
+          color={invite.subscription_pricing ? 'green' : undefined}
+          title={wrapInviteTitle(invite)}
+          titleRight={priceElement}
+          subtitleRight={subtitleRight}
+          titleRef={(element) => title = element}
+          subtitleRef={(element) => subtitle = element}
+          mediaRef={(element) => media = element}
+        />
+      ), middleware);
+      const row: InviteRow = {
+        container: mounted.element,
+        title,
+        subtitle,
+        media
+      };
 
       if(!invite.expire_date && !invite.pFlags.revoked && !invite.subscription_pricing) {
         delete row.media.dataset.color;
@@ -403,6 +443,7 @@ const ChatInviteLinks: Component = () => {
       const destroy = (unmount?: boolean) => {
         onClean?.();
         invitesMap.delete(row.container);
+        mounted.dispose();
         if(unmount) {
           row.container.remove();
         }
@@ -526,29 +567,29 @@ const ChatInviteLinks: Component = () => {
     };
 
     const onRevokedLinksUpdate = () => {
-      revokedLinks.container.classList.toggle('hide', !revokedLinks.content.childElementCount);
+      revokedLinks.classList.toggle('hide', !revokedLinksContent.childElementCount);
     };
 
     const loadLinksPromise = Promise.all([p.invites, p.invitesRevoked]).then(([chatInvites, chatInvitesRevoked]) => {
       if(adminId) {
         primaryInvite = chatInvites.invites[0] as ChatInvite;
-      } else if(!usernames.length) {
+      } else if(!usernames.length && chatFull._ !== 'communityFull') {
         primaryInvite = chatFull.exported_invite as ChatInvite;
       }
 
       inviteLink.setChatInvite(primaryInvite || usernames[0]);
 
       ([
-        [chatInvites, additionalLinks],
-        [chatInvitesRevoked, revokedLinks]
-      ] as Array<[MessagesExportedChatInvites, SettingSection]>).forEach(([chatInvites, section]) => {
+        [chatInvites, additionalLinksContent],
+        [chatInvitesRevoked, revokedLinksContent]
+      ] as Array<[MessagesExportedChatInvites, HTMLElement]>).forEach(([chatInvites, content]) => {
         (chatInvites.invites as ChatInvite[]).forEach((invite) => {
           if(primaryInvite?.link === invite.link) {
             return;
           }
 
-          const row = createRow(invite);
-          section.content.append(row.container);
+          const row = createInviteRow(invite);
+          content.append(row.container);
         });
       });
 

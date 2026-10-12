@@ -42,10 +42,10 @@ async function prepare(templateId: number): Promise<PreparedCrmVoiceTemplate> {
 
   let objectURL: string, decodable: ArrayBuffer;
   if(isOgg(mime)) {
-    const {url} = await opusDecodeController.decode(bytes.slice(), false);
+    const {blob: wav} = await opusDecodeController.decode(bytes.slice(), false);
     opusDecodeController.setKeepAlive(false);
-    objectURL = url;
-    decodable = await fetch(url).then((r) => r.arrayBuffer());
+    objectURL = URL.createObjectURL(wav);
+    decodable = await wav.arrayBuffer();
   } else {
     objectURL = URL.createObjectURL(blob);
     decodable = bytes.slice().buffer;

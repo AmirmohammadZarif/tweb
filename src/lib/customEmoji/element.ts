@@ -3,7 +3,7 @@ import animationIntersector from '@components/animationIntersector';
 import safePlay from '@helpers/dom/safePlay';
 import {MiddlewareHelper} from '@helpers/middleware';
 import {createCustomFiller} from '@lib/richTextProcessor/wrapRichText';
-import RLottiePlayer from '@lib/rlottie/rlottiePlayer';
+import LottiePlayer from '@lib/lottie/lottiePlayer';
 import {CustomEmojiRendererElement, SyncedPlayer} from '@lib/customEmoji/renderer';
 
 export type CustomEmojiElements = Set<CustomEmojiElement>;
@@ -11,7 +11,7 @@ export type CustomEmojiElements = Set<CustomEmojiElement>;
 export default class CustomEmojiElement extends HTMLElement {
   public elements: CustomEmojiElements;
   public renderer: CustomEmojiRendererElement;
-  public player: RLottiePlayer | HTMLVideoElement;
+  public player: LottiePlayer | HTMLVideoElement;
   public paused: boolean;
   public syncedPlayer: SyncedPlayer;
   public clean: boolean;
@@ -99,10 +99,8 @@ export default class CustomEmojiElement extends HTMLElement {
 
     if(this.renderer) {
       const elements = this.renderer.customEmojis.get(this.docId);
-      if(elements?.delete(this) && !elements.size) {
-        this.renderer.customEmojis.delete(this.docId);
-        this.renderer.textColored.delete(elements);
-        this.renderer.playersSynced.delete(elements);
+      if(elements?.delete(this)) {
+        this.renderer.onElementCleared(this.docId, elements);
       }
 
       if(replaceChildren) {

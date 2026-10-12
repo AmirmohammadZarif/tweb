@@ -1,0 +1,82 @@
+# Keep the whole Tiptap release aligned with the audited editor version.
+overrides:
+  '@tiptap/core': &tiptapVersion 3.31.3
+  '@tiptap/extension-blockquote': 3.31.3
+  '@tiptap/extension-bold': 3.31.3
+  '@tiptap/extension-bullet-list': 3.31.3
+  '@tiptap/extension-code': 3.31.3
+  '@tiptap/extension-code-block': 3.31.3
+  '@tiptap/extension-document': 3.31.3
+  '@tiptap/extension-dropcursor': 3.31.3
+  '@tiptap/extension-gapcursor': 3.31.3
+  '@tiptap/extension-hard-break': 3.31.3
+  '@tiptap/extension-heading': 3.31.3
+  '@tiptap/extension-horizontal-rule': 3.31.3
+  '@tiptap/extension-italic': 3.31.3
+  '@tiptap/extension-link': 3.31.3
+  '@tiptap/extension-list': 3.31.3
+  '@tiptap/extension-list-item': 3.31.3
+  '@tiptap/extension-list-keymap': 3.31.3
+  '@tiptap/extension-ordered-list': 3.31.3
+  '@tiptap/extension-paragraph': 3.31.3
+  '@tiptap/extension-strike': 3.31.3
+  '@tiptap/extension-table': 3.31.3
+  '@tiptap/extension-text': 3.31.3
+  '@tiptap/extension-underline': 3.31.3
+  '@tiptap/extensions': 3.31.3
+  '@tiptap/pm': 3.31.3
+  '@tiptap/starter-kit': 3.31.3
+
+allowBuilds:
+  '@parcel/watcher@2.6.0': true
+  '@sentry/cli': set this to true or false
+  'cpu-features@0.0.10': true
+  # typed-scss-modules pulls esbuild 0.17 only to bundle an optional config file we
+  # do not have, so its native binary never runs and never needs building
+  'esbuild@0.17.19': false
+  'esbuild@0.27.4': true
+  'ssh2@1.17.0': true
+  # downloads the sentry-cli binary the source-map upload in vite.config.ts runs
+  '@sentry/cli@2.58.6': true
+minimumReleaseAgeExclude:
+  - 'baseline-browser-mapping@2.11.0'
+  - 'browserslist@4.28.7'
+  - 'electron-to-chromium@1.5.395'
+  - 'oxlint@1.75.0'
+  - 'oxlint-tsgolint@7.0.2001'
+  - 'postcss@8.5.21'
+  - 'sass@1.101.3'
+  - '@oxlint-tsgolint/darwin-arm64@7.0.2001'
+  - '@oxlint-tsgolint/darwin-x64@7.0.2001'
+  - '@oxlint-tsgolint/linux-arm64@7.0.2001'
+  - '@oxlint-tsgolint/linux-x64@7.0.2001'
+  - '@oxlint-tsgolint/win32-arm64@7.0.2001'
+  - '@oxlint-tsgolint/win32-x64@7.0.2001'
+  - '@oxlint/binding-android-arm-eabi@1.75.0'
+  - '@oxlint/binding-android-arm64@1.75.0'
+  - '@oxlint/binding-darwin-arm64@1.75.0'
+  - '@oxlint/binding-darwin-x64@1.75.0'
+  - '@oxlint/binding-freebsd-x64@1.75.0'
+  - '@oxlint/binding-linux-arm-gnueabihf@1.75.0'
+  - '@oxlint/binding-linux-arm-musleabihf@1.75.0'
+  - '@oxlint/binding-linux-arm64-gnu@1.75.0'
+  - '@oxlint/binding-linux-arm64-musl@1.75.0'
+  - '@oxlint/binding-linux-ppc64-gnu@1.75.0'
+  - '@oxlint/binding-linux-riscv64-gnu@1.75.0'
+  - '@oxlint/binding-linux-riscv64-musl@1.75.0'
+  - '@oxlint/binding-linux-s390x-gnu@1.75.0'
+  - '@oxlint/binding-linux-x64-gnu@1.75.0'
+  - '@oxlint/binding-linux-x64-musl@1.75.0'
+  - '@oxlint/binding-openharmony-arm64@1.75.0'
+  - '@oxlint/binding-win32-arm64-msvc@1.75.0'
+  - '@oxlint/binding-win32-ia32-msvc@1.75.0'
+  - '@oxlint/binding-win32-x64-msvc@1.75.0'
+
+# Temml charges the tokens a macro expansion emits against `maxExpandTokens` and the
+# MathML nodes a render builds against `maxNodes`, so a `\def\x{…}` used a thousand
+# times or a dozen nested `\cancelto`s cannot turn 2 KB of message into a tab-freezing
+# formula — see src/components/instantViewMath.tsx. Upstreamed as ronkok/Temml#139; until
+# a release carries it, a temml upgrade means re-applying the patch (`pnpm patch temml`),
+# and src/tests/instantViewMathBudget.test.ts checks the shipped build for it.
+patchedDependencies:
+  temml: patches/temml.patch

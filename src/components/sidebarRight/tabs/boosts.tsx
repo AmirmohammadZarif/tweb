@@ -4,14 +4,13 @@ import Section from '@components/section';
 import {SliderSuperTabEventable} from '@components/sliderTab';
 import {Accessor, createMemo, createRoot, createSignal, For, JSX, onCleanup, Show} from 'solid-js';
 import {render} from 'solid-js/web';
-import Row from '@components/row';
+import RowTsx from '@components/rowTsx';
 import {avatarNew, AvatarNew} from '@components/avatarNew';
 import LimitLine from '@components/limit';
 import {LoadableList, StatisticsOverviewItems, createLoadableList, MoreButton, makeAbsStats} from '@components/sidebarRight/tabs/statistics';
-import PopupBoostsViaGifts, {BoostsBadge} from '@components/popups/boostsViaGifts';
+import showBoostsViaGiftsPopup, {BoostsBadge} from '@components/popups/boostsViaGifts';
 import Button from '@components/button';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
-import PopupElement from '@components/popups';
 import {InviteLink} from '@components/sidebarLeft/tabs/inviteLink';
 import {horizontalMenu} from '@components/horizontalMenu';
 import classNames from '@helpers/string/classNames';
@@ -21,15 +20,15 @@ import Icon from '@components/icon';
 import toggleDisability from '@helpers/dom/toggleDisability';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import rootScope from '@lib/rootScope';
-import PopupGiftLink from '@components/popups/giftLink';
+import showGiftLinkPopup from '@components/popups/giftLink';
 import {toastNew} from '@components/toast';
-import ListenerSetter from '@helpers/listenerSetter';
 import indexOfAndSplice from '@helpers/array/indexOfAndSplice';
 import appImManager from '@lib/appImManager';
-import PopupPayment from '@components/popups/payment';
+import {createPaymentPopup} from '@components/popups/payment';
 import formatStarsAmount from '@appManagers/utils/payments/formatStarsAmount';
-import PopupBoost from '@components/popups/boost';
+import showBoostPopup from '@components/popups/boost';
 import Tabs from '@components/tabs';
+import {wrapSolidComponent} from '@helpers/solid/wrapSolidComponent';
 
 const getColorByMonths = (months: number) => {
   return months === 12 ? 'red' : (months === 3 ? 'green' : 'blue');
@@ -41,38 +40,37 @@ const getBoostMonths = (from: number, to: number) => Math.round(getBoostsDays(fr
 export const CPrepaidGiveaway = (props: {
   giveaway: PrepaidGiveaway,
   appConfig: MTAppConfig,
-  clickable?: true | (() => void),
-  listenerSetter?: ListenerSetter
+  clickable?: true | (() => void)
 }) => {
   const {quantity} = props.giveaway;
   const stars = (props.giveaway as PrepaidGiveaway.prepaidStarsGiveaway).stars;
   const months = (props.giveaway as PrepaidGiveaway.prepaidGiveaway).months;
   const boosts = stars ? (props.giveaway as PrepaidGiveaway.prepaidStarsGiveaway).boosts : (props.appConfig.giveaway_boosts_per_premium || 1) * quantity;
-  const row = new Row({
-    titleLangKey: stars ? 'Stars' : 'BoostingGiveawayMsgInfoPlural1',
-    titleLangArgs: [stars || quantity],
-    subtitleLangKey: stars ? 'Giveaway.Prepaid.For' : 'Giveaway.Prepaid.Subtitle',
-    subtitleLangArgs: [quantity, i18n('Giveaway.Prepaid.Period', [months])],
-    clickable: props.clickable,
-    listenerSetter: props.listenerSetter,
-    rightContent: BoostsBadge({boosts}) as HTMLElement
-  });
-
-  row.title.classList.add('text-bold');
-  const media = row.createMedia('abitbigger');
   const avatar = AvatarNew({size: 42});
   if(stars) {
     avatar.set({icon: 'star', color: 'stars'});
   } else {
-    avatar.set({icon: 'gift_premium', color: getColorByMonths(months)});
+    avatar.set({icon: 'gift_premium_filled', color: getColorByMonths(months)});
   }
-  media.append(avatar.node);
-
-  return row.container;
+  return (
+    <RowTsx clickable={props.clickable}>
+      <RowTsx.Title class="text-bold">
+        {i18n(stars ? 'Stars' : 'BoostingGiveawayMsgInfoPlural1', [stars || quantity])}
+      </RowTsx.Title>
+      <RowTsx.Subtitle>
+        {i18n(stars ? 'Giveaway.Prepaid.For' : 'Giveaway.Prepaid.Subtitle', [
+          quantity,
+          i18n('Giveaway.Prepaid.Period', [months])
+        ])}
+      </RowTsx.Subtitle>
+      <RowTsx.RightContent><BoostsBadge boosts={boosts} /></RowTsx.RightContent>
+      <RowTsx.Media size="abitbigger">{avatar.node}</RowTsx.Media>
+    </RowTsx>
+  );
 };
 
 export default class AppBoostsTab extends SliderSuperTabEventable {
-  private peerId: PeerId;
+  public peerId: PeerId;
   private isBroadcast: boolean;
   private targets: Map<HTMLElement, Boost>;
   private canCreateGiveaway: boolean;
@@ -86,7 +84,7 @@ export default class AppBoostsTab extends SliderSuperTabEventable {
     const limitLine = new LimitLine({
       progress: true,
       hint: {
-        icon: 'boost',
+        icon: 'boost_filled',
         noStartEnd: true
       }
     });
@@ -116,14 +114,14 @@ export default class AppBoostsTab extends SliderSuperTabEventable {
       url
     });
 
-    const boostsViaGiftsButton = Button('btn-primary btn-transparent primary', {icon: 'gift_premium', text: 'BoostingGetBoostsViaGifts'});
+    const boostsViaGiftsButton = Button('btn-primary btn-transparent primary', {icon: 'gift_premium_filled', text: 'BoostingGetBoostsViaGifts'});
     attachClickEvent(boostsViaGiftsButton, () => {
-      PopupElement.createPopup(PopupBoostsViaGifts, this.peerId);
+      showBoostsViaGiftsPopup(this.peerId);
     }, {listenerSetter: this.listenerSetter});
 
     const boostButton = Button('btn-primary btn-transparent primary', {icon: 'addboost', text: this.isBroadcast ? 'BoostChannel' : 'BoostGroup'});
     attachClickEvent(boostButton, () => {
-      PopupElement.createPopup(PopupBoost, this.peerId);
+      showBoostPopup(this.peerId);
     }, {listenerSetter: this.listenerSetter});
 
     const noBoostersHint = i18n('NoBoostersHint');
@@ -199,8 +197,7 @@ export default class AppBoostsTab extends SliderSuperTabEventable {
                   giveaway={prepaidGiveaway}
                   appConfig={appConfig}
                   clickable={() => {
-                    PopupElement.createPopup(
-                      PopupBoostsViaGifts,
+                    showBoostsViaGiftsPopup(
                       this.peerId,
                       prepaidGiveaway,
                       () => {
@@ -211,17 +208,18 @@ export default class AppBoostsTab extends SliderSuperTabEventable {
                       }
                     );
                   }}
-                  listenerSetter={this.listenerSetter}
                 />
               );
             }}</For>
           </Section>
         )}
-        <Section class="boosts-users-container">
+        <Tabs.MenuShell betweenSections>
           <Tabs.Menu ref={tabs} class="boosts-users-tabs">
             <MenuTab key="BoostingBoostsCount" count={boostsList().count} />
             {showGifts() && <MenuTab key="BoostingGiftsCount" count={giftsBoostsList().count} />}
           </Tabs.Menu>
+        </Tabs.MenuShell>
+        <Section class="boosts-users-container">
           <Tabs.Content ref={content} class="boosts-users-contents" onClick={async(e) => {
             const target = findUpClassName(e.target, 'row');
             const boost = this.targets.get(target);
@@ -230,7 +228,7 @@ export default class AppBoostsTab extends SliderSuperTabEventable {
             }
 
             if(boost.stars) {
-              PopupPayment.create({
+              createPaymentPopup({
                 noPaymentForm: true,
                 transaction: {
                   _: 'starsTransaction',
@@ -257,8 +255,7 @@ export default class AppBoostsTab extends SliderSuperTabEventable {
             if(peerId && !boost.pFlags.gift && !boost.pFlags.unclaimed && !boost.pFlags.giveaway) {
               appImManager.setInnerPeer({peerId: boost.user_id.toPeerId(false)});
             } else if(peerId && peerId !== rootScope.myId) {
-              PopupElement.createPopup(
-                PopupGiftLink,
+              showGiftLinkPopup(
                 slug,
                 undefined,
                 {
@@ -276,7 +273,7 @@ export default class AppBoostsTab extends SliderSuperTabEventable {
                 }
               );
             } else if(slug) {
-              PopupElement.createPopup(PopupGiftLink, slug);
+              showGiftLinkPopup(slug);
             } else {
               toastNew({langPackKey: 'BoostingRecipientWillBeSelected'});
             }
@@ -315,7 +312,7 @@ export default class AppBoostsTab extends SliderSuperTabEventable {
     if(boosts > 1) {
       badge = document.createElement('span');
       badge.classList.add('boosts-user-boosts', 'boosts-user-badge');
-      badge.append(Icon('boost'), ` ${boosts}`);
+      badge.append(Icon('boost_filled'), ` ${boosts}`);
     }
 
     let title: HTMLElement;
@@ -346,34 +343,36 @@ export default class AppBoostsTab extends SliderSuperTabEventable {
       rightContent = document.createElement('span');
       rightContent.classList.add('boosts-user-badge-right', 'boosts-user-badge');
       rightContent.append(
-        Icon(boost.pFlags.giveaway ? 'gift_premium' : 'gift'),
+        Icon(boost.pFlags.giveaway ? 'gift_premium_filled' : 'gift'),
         i18n(boost.pFlags.giveaway ? 'BoostingGiveaway' : 'BoostingGift')
       );
 
       rightContent.classList.toggle('is-gift', !boost.pFlags.giveaway && !!boost.pFlags.gift);
     }
 
-    const row = new Row({
-      title: true,
-      subtitle,
-      clickable: true,
-      noWrap: true,
-      rightContent
-    });
-
-    if(peerId) {
-      row.container.dataset.peerId = '' + peerId;
-    }
-
-    row.title.classList.add('boosts-user-title');
-    row.title.append(...[title, badge].filter(Boolean));
-    const media = row.createMedia('abitbigger');
+    const middleware = this.middlewareHelper.get();
     const avatar = avatarNew({
       peerId,
       size: 42,
-      middleware: this.middlewareHelper.get()
+      middleware
     });
-    media.append(avatar.node);
+    const container = wrapSolidComponent(() => (
+      <RowTsx clickable noWrap>
+        <RowTsx.Title class="boosts-user-title">
+          {title}
+          {badge}
+        </RowTsx.Title>
+        <RowTsx.Subtitle>{subtitle}</RowTsx.Subtitle>
+        <Show when={rightContent}>
+          <RowTsx.RightContent element={rightContent} />
+        </Show>
+        <RowTsx.Media size="abitbigger">{avatar.node}</RowTsx.Media>
+      </RowTsx>
+    ), middleware);
+
+    if(peerId) {
+      container.dataset.peerId = '' + peerId;
+    }
 
     if(peerId) {
       await avatar.readyThumbPromise;
@@ -389,8 +388,8 @@ export default class AppBoostsTab extends SliderSuperTabEventable {
       });
     }
 
-    this.targets.set(row.container, boost);
-    return row.container;
+    this.targets.set(container, boost);
+    return container;
   };
 
   public async init(peerId: PeerId) {

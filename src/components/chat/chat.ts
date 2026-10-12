@@ -41,14 +41,13 @@ import {Accessor, createEffect, createMemo, createRoot, createSignal, on, onClea
 import TopbarSearch from '@components/chat/topbarSearch';
 import createUnifiedSignal from '@helpers/solid/createUnifiedSignal';
 import liteMode from '@helpers/liteMode';
-import {useFullPeer} from '@stores/fullPeers';
+import {useFullPeer, type PeerFull} from '@stores/fullPeers';
 import {useAppConfig, useAppState} from '@stores/appState';
 import {unwrap} from 'solid-js/store';
 import callbackify from '@helpers/callbackify';
 import useIsNightTheme from '@hooks/useIsNightTheme';
 import useStars, {setReservedStars} from '@stores/stars';
-import PopupElement from '@components/popups';
-import PopupStars from '@components/popups/stars';
+import showStarsPopup from '@components/popups/stars';
 import {getPendingPaidReactionKey, PENDING_PAID_REACTION_SENT_ABORT_REASON, PENDING_PAID_REACTIONS} from '@components/chat/reactions';
 import showUndoablePaidTooltip, {paidReactionLangKeys} from '@components/chat/undoablePaidTooltip';
 import namedPromises from '@helpers/namedPromises';
@@ -70,9 +69,14 @@ import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
 import hasRights from '@appManagers/utils/chats/hasRights';
 import {ChatType} from '@components/chat/chatType';
 import {animateSingle} from '@helpers/animation';
+import focusSearchInput from '@components/chat/focusSearchInput';
 
 export type ChatSearchKeys = Pick<RequestHistoryOptions, 'query' | 'isCacheableSearch' | 'isPublicHashtag' | 'savedReaction' | 'fromPeerId' | 'inputFilter' | 'hashtagType'>;
 export const CHAT_SEARCH_KEYS: (keyof ChatSearchKeys)[] = ['query', 'isCacheableSearch', 'isPublicHashtag', 'savedReaction', 'fromPeerId', 'inputFilter', 'hashtagType'];
+
+// * after this long an in-flight peer change is treated as abandoned rather than as a reason to
+// * ignore further attempts to open the same chat
+const STUCK_SET_PEER_TIMEOUT = 15000;
 
 export default class Chat extends EventListenerBase<{
   setPeer: (mid: number, isTopMessage: boolean) => void
@@ -107,6 +111,7 @@ export default class Chat extends EventListenerBase<{
   public chatPaddingBottom: Signal<number>;
 
   public setPeerPromise: Promise<void>;
+  private setPeerPromiseStartedAt: number;
   public peerChanged: boolean;
 
   public log: ReturnType<typeof logger>;
@@ -220,7 +225,7 @@ export default class Chat extends EventListenerBase<{
   public historyStorage: ReturnType<typeof useHistoryStorage>;
   public historyStorageNoThreadId: ReturnType<typeof useHistoryStorage>;
   public peerTranslation: ReturnType<typeof usePeerTranslation>;
-  public fullPeer: Accessor<ChatFull | UserFull>;
+  public fullPeer: Accessor<PeerFull>;
 
   public staticMessages: MyMessage[] = [];
 
@@ -671,7 +676,7 @@ export default class Chat extends EventListenerBase<{
       });
     }
 
-    this.bubbles.listenerSetter.add(rootScope)('chat_update', async(chatId) => {
+    const onChatOrFullUpdate = async(chatId: ChatId) => {
       const {peerId} = this;
       if(peerId.isAnyChat() && peerId.toChatId() === chatId) {
         const {
@@ -690,7 +695,11 @@ export default class Chat extends EventListenerBase<{
           this.updateStarsAmount(starsAmount);
         }
       }
-    });
+    };
+
+    this.bubbles.listenerSetter.add(rootScope)('chat_update', onChatOrFullUpdate);
+    // * the full channel may lift the per-message price for this user ("Remove Fee")
+    this.bubbles.listenerSetter.add(rootScope)('chat_full_update', onChatOrFullUpdate);
 
     this.bubbles.listenerSetter.add(rootScope)('botforum_pending_topic_created', ({peerId, tempId, newId}) => {
       if(peerId !== this.peerId || (this.threadId && this.threadId !== tempId)) return;
@@ -807,6 +816,7 @@ export default class Chat extends EventListenerBase<{
             const scrollSaver = this.bubbles.createScrollSaver();
             scrollSaver.save();
             this.container.classList.toggle(className, !isSmallScreen && isActive);
+            this.topbar.setFloating();
             this.topbar.container.classList.toggle('hide-pinned', isSmallScreen);
             scrollSaver.restore();
           },
@@ -846,6 +856,12 @@ export default class Chat extends EventListenerBase<{
     this.contextMenu?.destroy();
     this.selection?.attachListeners(undefined, undefined);
     this.destroyMiddlewareHelper.destroy();
+    // * The per-peer helper too, not just the destroy-scoped one: the roots hung off it - the
+    // * theme_changed subscription among them - are disposed by its clean/destroy, and nothing else
+    // * ever calls it once the chat is gone. Its listener stayed on rootScope holding this whole
+    // * chat, container and shared-media tabs included, which is how 4 951 detached nodes ended up
+    // * charged to rootScope in a day-old tab. Peer changes keep cleaning it as before.
+    this.middlewareHelper.destroy();
 
     this.topbar =
       this.bubbles =
@@ -948,7 +964,8 @@ export default class Chat extends EventListenerBase<{
     this.isChannel = isChannel;
     this.isBot = isBot;
     this.isForum = isForum;
-    this.isAllMessagesForum = isForum && !threadId;
+    // welcome messages belong to the chat, not to a topic: no topic separators or grouping there
+    this.isAllMessagesForum = isForum && !threadId && type !== ChatType.Welcome;
     this.isAnonymousSending = isAnonymousSending;
     this.isUserBlocked = isUserBlocked;
     this.isPremiumRequired = isPremiumRequired;
@@ -980,7 +997,11 @@ export default class Chat extends EventListenerBase<{
     // hold the message objects directly, and getMessageByPeer falls back to `… || _logs`), so wiring it to
     // `_logs` here would need the whole admin-log read path re-verified. If that's ever done, the scheduled
     // chokepoint in getMessage() can generalize to "own-peer non-history box".
-    this.messagesStorageKey = `${this.peerId}_${this.type === ChatType.Scheduled ? 'scheduled' : 'history'}`;
+    this.messagesStorageKey = `${this.peerId}_${
+      this.type === ChatType.Scheduled ? 'scheduled' :
+        this.type === ChatType.Welcome ? 'welcome' :
+          'history'
+    }`;
 
     // this.container && this.container.classList.toggle('no-forwards', this.noForwards);
 
@@ -1056,7 +1077,12 @@ export default class Chat extends EventListenerBase<{
           this.autoDownload = useAutoDownloadSettings(this.peer, this.appSettings);
         });
       });
-    } else if(this.setPeerPromise) {
+    } else if(this.setPeerPromise && (Date.now() - this.setPeerPromiseStartedAt) < STUCK_SET_PEER_TIMEOUT) {
+      // Deduplicating a peer change that is already in flight is only correct while that change can
+      // still finish. If it never settles, this early return silently swallows every retry and the
+      // chat can never be opened again for the lifetime of the tab. Past the deadline, fall through
+      // and start a fresh change — `bubbles.setPeer` bumps `setPeerTempId`, which invalidates the
+      // abandoned flow.
       return;
     }
 
@@ -1122,6 +1148,7 @@ export default class Chat extends EventListenerBase<{
     }
 
     const bubblesSetPeerPromise = this.bubbles.setPeer({...options, samePeer, sameSearch});
+    this.setPeerPromiseStartedAt = Date.now();
     const setPeerPromise = this.setPeerPromise = bubblesSetPeerPromise.then((result) => {
       return result.promise;
     }).catch(noop).finally(() => {
@@ -1162,13 +1189,9 @@ export default class Chat extends EventListenerBase<{
     tab.destroy();
   }
 
-  public setMessageId(options: Partial<{
-    lastMsgId: number,
-    lastMsgPeerId: PeerId,
-    mediaTimestamp: number,
-    pollOption?: string | Uint8Array,
-    type: ChatType
-  } & ChatSearchKeys> = {}) {
+  public setMessageId(options: Partial<Pick<ChatSetPeerOptions,
+    'lastMsgId' | 'lastMsgPeerId' | 'mediaTimestamp' | 'pollOption' | 'highlight' | 'type'
+  > & ChatSearchKeys> = {}) {
     return this.setPeer({
       peerId: this.peerId,
       threadId: this.threadId,
@@ -1241,7 +1264,7 @@ export default class Chat extends EventListenerBase<{
       // scheduled messages live in a separate per-peer storage; resolving a bare id via
       // getMessageByPeer would hit history/global and return another chat's message, so for
       // our own scheduled peer read from this chat's (scheduled) storage instead
-      if(this.type === ChatType.Scheduled && peerId === this.peerId) {
+      if((this.type === ChatType.Scheduled || this.type === ChatType.Welcome) && peerId === this.peerId) {
         return apiManagerProxy.getMessageFromStorage(this.messagesStorageKey, _mid);
       }
 
@@ -1310,10 +1333,13 @@ export default class Chat extends EventListenerBase<{
     this.searchSignal?.(undefined);
   }
 
-  public initSearch(options: {query?: string, filterPeerId?: PeerId, reaction?: Reaction} = {}): void {
+  public initSearch(options: {query?: string, filterPeerId?: PeerId, reaction?: Reaction, focus?: boolean} = {}): void {
     if(!this.peerId) return;
     options.query ||= '';
     this.searchSignal(options);
+    if(options.focus) {
+      focusSearchInput(this.topbar.container);
+    }
   }
 
   public canSend(action?: ChatRights) {
@@ -1323,6 +1349,10 @@ export default class Chat extends EventListenerBase<{
     // itself as well, so a path that doesn't ask still can't send.
     if(useIsCrmReadOnly()()) return Promise.resolve(false);
     if(isVerificationBot(this.peerId)) return Promise.resolve(false);
+    // what goes into the welcome messages is up to the right to manage them, not to post
+    if(this.type === ChatType.Welcome) {
+      return this.managers.appChatsManager.hasRights(this.peerId.toChatId(), 'manage_welcome_messages');
+    }
     if(this.type === ChatType.Saved && this.threadId !== this.peerId) {
       return Promise.resolve(false);
     }
@@ -1342,7 +1372,9 @@ export default class Chat extends EventListenerBase<{
         return false;
       }
 
-      return (!dialog && !historyStorage.history.length) || isUserBlocked;
+      // * only a history the server has answered as empty (`count` stays null until then):
+      // * no START while it is still loading, the way iOS and Android do it
+      return (!dialog && !historyStorage.history.length && historyStorage.count === 0) || isUserBlocked;
     });
   }
 
@@ -1370,14 +1402,24 @@ export default class Chat extends EventListenerBase<{
         silent: this.input.sendSilent,
         sendAsPeerId: this.input.sendAsPeerId,
         effect: this.input.effect(),
-        suggestedPost: this.input.suggestedPost
+        suggestedPost: this.input.suggestedPost,
+        ...this.input.getEphemeralSendingParams()
       }),
       replyToMonoforumPeerId: this.input?.suggestedPost?.monoforumThreadId || this.input?.getReplyTo()?.replyToMonoforumPeerId || this.monoforumThreadId,
-      savedReaction: this.savedReaction
+      savedReaction: this.savedReaction,
+      // a welcome message is an ephemeral send the server keeps for whoever joins next: no
+      // slow mode, no paid messages, no forwarding, as for any ephemeral send
+      ...(this.type === ChatType.Welcome ? {ephemeral: true, welcome: true} : {})
     };
   }
 
   public isOurMessage(message: Message.message | Message.messageService) {
+    // a welcome message is shown the way a new member receives it, as Android does: incoming,
+    // from whoever it is from — and with no read state, it is delivered to nobody yet
+    if((message as Message.message).pFlags?.welcome_template) {
+      return false;
+    }
+
     if(this.isMegagroup) {
       return !!message.pFlags.out;
     }
@@ -1402,7 +1444,12 @@ export default class Chat extends EventListenerBase<{
   }
 
   public isPinnedMessagesNeeded() {
-    return this.type === ChatType.Chat || (this.isForum && this.type !== ChatType.Static && this.type !== ChatType.Logs);
+    // A forum topic (and the view-as-messages mode) is a `Chat` like any other,
+    // so the type alone decides. The old `|| this.isForum` also matched a
+    // forum's Pinned / Scheduled / Search tabs — which grew `Static` / `Logs`
+    // exclusions one at a time and still put a pinned plate inside the forum's
+    // own pinned-messages list, where no other peer has one.
+    return this.type === ChatType.Chat;
   }
 
   public isForwardOfForward(message: Message) {
@@ -1478,7 +1525,7 @@ export default class Chat extends EventListenerBase<{
           pending.abortController.abort();
         }
 
-        PopupElement.createPopup(PopupStars, {
+        showStarsPopup({
           itemPrice: count,
           onTopup: () => {
             this.sendReaction(options);
@@ -1584,7 +1631,9 @@ export default class Chat extends EventListenerBase<{
 
       return {
         cached: fullPeer.cached,
-        result: fullPeer.result.then((fullPeer) => fullPeer.ttl_period)
+        result: fullPeer.result.then((fullPeer) => {
+          return 'ttl_period' in fullPeer ? fullPeer.ttl_period : undefined;
+        })
       }
     } catch{
       return {
@@ -1596,21 +1645,21 @@ export default class Chat extends EventListenerBase<{
 
   public async openAutoDeleteMessagesCustomTimePopup() {
     const {
-      popup: {default: AutoDeleteMessagesCustomTimePopup},
+      popup: {default: showAutoDeleteMessagesCustomTimePopup},
       autoDeletePeriod
     } = await namedPromises({
       popup: import('../sidebarLeft/tabs/autoDeleteMessages/customTimePopup'),
       autoDeletePeriod: this.getAutoDeletePeriod().then(ackedResult => ackedResult.result)
     });
 
-    new AutoDeleteMessagesCustomTimePopup({
+    showAutoDeleteMessagesCustomTimePopup({
       HotReloadGuard: SolidJSHotReloadGuardProvider,
       descriptionLangKey: this.isBroadcast ? 'AutoDeleteMessages.InfoChannel' : 'AutoDeleteMessages.InfoChat',
       period: autoDeletePeriod,
       onFinish: (period) => {
         this.managers.appPrivacyManager.setAutoDeletePeriodFor(this.peerId, period);
       }
-    }).show();
+    });
   }
 
   public canManageAutoDelete = async() => {

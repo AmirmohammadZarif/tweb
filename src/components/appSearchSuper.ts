@@ -7,8 +7,8 @@ import {createSearchGroup, SearchGroup, SearchGroupType} from '@components/searc
 import {horizontalMenu} from '@components/horizontalMenu';
 import LazyLoadQueue from '@components/lazyLoadQueue';
 import {putPreloader} from '@components/putPreloader';
-import ripple from '@components/ripple';
-import Scrollable, {ScrollableX} from '@components/scrollable';
+import Scrollable from '@components/scrollable';
+import {ScrollableContextValue} from '@components/scrollable2';
 import useHeavyAnimationCheck, {getHeavyAnimationPromise} from '@hooks/useHeavyAnimationCheck';
 import I18n, {LangPackKey, i18n, join} from '@lib/langPack';
 import findUpClassName from '@helpers/dom/findUpClassName';
@@ -26,16 +26,17 @@ import {formatPhoneNumber} from '@helpers/formatPhoneNumber';
 import useIsCrmSuperAdmin from '@stores/crmRole';
 import {ButtonMenuItemOptions, ButtonMenuSync} from '@components/buttonMenu';
 import showForwardPopup from '@components/popups/forward';
-import PopupDeleteMessages from '@components/popups/deleteMessages';
-import Row from '@components/row';
+import showDeleteMessagesPopup from '@components/popups/deleteMessages';
+import {renderSearchWebPageRow} from '@components/searchWebPageRow';
 import htmlToDocumentFragment from '@helpers/dom/htmlToDocumentFragment';
 import {SearchSelection} from '@components/chat/selection';
 import {attachClickEvent, simulateClickEvent} from '@helpers/dom/clickEvent';
 import {MyDocument} from '@appManagers/appDocsManager';
-import AppMediaViewer from '@components/appMediaViewer';
+import AppMediaViewer from '@components/mediaViewer';
 import lockTouchScroll from '@helpers/dom/lockTouchScroll';
 import copy from '@helpers/object/copy';
 import safeAssign from '@helpers/object/safeAssign';
+import ScrollableRefiller from '@helpers/scrollableRefiller';
 import findAndSplice from '@helpers/array/findAndSplice';
 import {ScrollStartCallbackDimensions} from '@helpers/fastSmoothScroll';
 import setInnerHTML from '@helpers/dom/setInnerHTML';
@@ -63,10 +64,10 @@ import SwipeHandler from '@components/swipeHandler';
 import wrapDocument from '@components/wrappers/document';
 import wrapPhoto from '@components/wrappers/photo';
 import wrapVideo from '@components/wrappers/video';
-import wrapMediaSpoiler, {hasSensitiveSpoiler, onMediaSpoilerClick} from '@components/wrappers/mediaSpoiler';
+import attachMediaPeekListeners, {getMessageMediaPeekSource} from '@components/mediaPeek';
+import wrapMediaSpoiler, {hasMediaSpoiler, hasSensitiveSpoiler, onMediaSpoilerClick} from '@components/wrappers/mediaSpoiler';
 import filterAsync from '@helpers/array/filterAsync';
 import ChatContextMenu, {getSponsoredMessageButtons} from '@components/chat/contextMenu';
-import PopupElement from '@components/popups';
 import getParticipantRank from '@appManagers/utils/chats/getParticipantRank';
 import {NULL_PEER_ID} from '@appManagers/constants';
 import createParticipantContextMenu from '@helpers/dom/createParticipantContextMenu';
@@ -77,11 +78,10 @@ import {StoriesProfileList} from '@components/stories/profileList';
 import {StoriesContextActions} from '@components/stories/store';
 import Button from '@components/button';
 import anchorCallback from '@helpers/dom/anchorCallback';
-import PopupPremium from '@components/popups/premium';
+import showPremiumPopup from '@components/popups/premium';
 import {ChatType} from './chat/chatType';
 import getFwdFromName from '@appManagers/utils/messages/getFwdFromName';
 import SidebarSlider from '@components/slider';
-import setBlankToAnchor from '@richTextProcessor/setBlankToAnchor';
 import cancelClickOrNextIfNotClick from '@helpers/dom/cancelClickOrNextIfNotClick';
 import createElementFromMarkup from '@helpers/createElementFromMarkup';
 import numberThousandSplitter from '@helpers/number/numberThousandSplitter';
@@ -107,11 +107,20 @@ import {wrapGlobalPostsSearch} from './sidebarLeft/globalPostsSearch';
 import createMiddleware from '@helpers/solid/createMiddleware';
 import Tabs from '@components/tabs';
 import Section from '@components/section';
+import copyMessageMediaWithFeedback from '@components/copyMessageMediaWithFeedback';
 import createTopPeersList from '@components/topPeersList';
 import CrmNotesPanel from '@components/crmNotesPanel';
 import CrmContractsPanel from '@components/crmContractsPanel';
+import {fastRaf} from '@helpers/schedulers';
+import {SearchSuperMediaInputFilter} from '@components/sharedMediaFilters';
+import {getMediaTypeForProfileTab, orderMediaTabsByMain, ProfileTabMediaType} from '@components/sharedMediaProfileTab';
+import {supportsSharedMediaScrollDate} from '@components/sharedMediaScrollDate';
+import createSharedMediaScrollDateBadge from '@components/sharedMediaScrollDateBadge';
 
-export type SearchSuperType = MyInputMessagesFilter/*  | 'members' */;
+// The call log is searched by the Calls tab, never by shared media — and unlike
+// every other filter its constructor is not just its id (it carries `pFlags`),
+// so a media tab could not build one from `{_: inputFilter}` anyway.
+export type SearchSuperType = Exclude<MyInputMessagesFilter, 'inputMessagesFilterPhoneCalls'>/*  | 'members' */;
 export type SearchSuperContext = {
   peerId: PeerId,
   inputFilter: {_: MyInputMessagesFilter},
@@ -124,7 +133,7 @@ export type SearchSuperContext = {
   nextRate?: number,
   minDate?: number,
   maxDate?: number
-} & Pick<RequestHistoryOptions, 'chatType'>;
+} & Pick<RequestHistoryOptions, 'chatType' | 'communityId'>;
 
 export type SearchSuperMediaType = 'stories' | 'members' | 'media' |
   'files' | 'links' | 'music' | 'chats' | 'voice' | 'groups' | 'similar' |
@@ -139,6 +148,24 @@ export type SearchSuperMediaTab = {
   menuTabName?: HTMLElement,
   scroll?: {scrollTop: number, scrollHeight: number},
   hideOn?: HTMLElement
+};
+
+export type SearchSuperMediaCounters = {
+  photos: number,
+  videos: number
+};
+
+// * a tab whose visibility follows its message counter — an empty one is hidden (see loadFirstTime)
+export function isCounterDrivenMediaTab(mediaTab: SearchSuperMediaTab) {
+  return !!mediaTab.inputFilter && mediaTab.inputFilter !== 'inputMessagesFilterEmpty';
+}
+
+type SearchSuperCommittedMediaFilterState = {
+  inputFilter: SearchSuperMediaInputFilter,
+  loaded: boolean,
+  nextRate: number,
+  counter: number,
+  scroll: SearchSuperMediaTab['scroll']
 };
 
 type SearchSuperLoadTypeOptions = {
@@ -167,6 +194,9 @@ class SearchContextMenu {
   private noForwards: boolean;
   private message: MyMessage;
   private selectedMessages: MyMessage[];
+  private copyMediaButton: ButtonMenuItemOptions & {
+    verify?: () => boolean | Promise<boolean>
+  };
 
   constructor(
     private attachTo: HTMLElement,
@@ -258,6 +288,13 @@ class SearchContextMenu {
       onClick: this.onForwardClick,
       verify: () => this.searchSuper.selection.isSelecting && !this.noForwards,
       withSelection: true
+    }, this.copyMediaButton = {
+      icon: 'copy',
+      text: 'MediaViewer.Context.Copy',
+      onClick: this.onCopyMediaClick,
+      verify: () => !this.searchSuper.selection.isSelecting &&
+        ChatContextMenu.canCopyMedia(this.message, undefined, this.noForwards, this.attachTo),
+      keepOpen: true
     }, {
       icon: 'download',
       text: 'MediaViewer.Context.Download',
@@ -314,6 +351,13 @@ class SearchContextMenu {
     });
   };
 
+  private onCopyMediaClick = () => {
+    copyMessageMediaWithFeedback({
+      message: this.message,
+      button: this.copyMediaButton
+    });
+  };
+
   private onForwardClick = () => {
     if(this.searchSuper.selection.isSelecting) {
       simulateClickEvent(this.searchSuper.selection.selectionForwardBtn);
@@ -336,8 +380,7 @@ class SearchContextMenu {
     if(this.searchSuper.selection.isSelecting) {
       simulateClickEvent(this.searchSuper.selection.selectionDeleteBtn);
     } else {
-      PopupElement.createPopup(
-        PopupDeleteMessages,
+      showDeleteMessagesPopup(
         this.peerId,
         [this.mid],
         ChatType.Chat
@@ -365,7 +408,7 @@ export default class AppSearchSuper {
   public nav: HTMLElement;
   public navScrollableContainer: HTMLDivElement;
   public tabsContainer: HTMLElement;
-  public navScrollable: ScrollableX;
+  private disposeNav: () => void;
   private tabsMenu: HTMLElement;
   private prevTabId = -1;
 
@@ -381,6 +424,7 @@ export default class AppSearchSuper {
   private nextRates: Partial<{[type in SearchSuperMediaType]: number}> = {};
   private loadPromises: Partial<{[type in SearchSuperMediaType]: Promise<any>}> = {};
   private loaded: Partial<{[type in SearchSuperMediaType]: boolean}> = {};
+  private refiller: ScrollableRefiller<SearchSuperMediaType>;
   private loadedChats = false;
   private firstLoad = true;
 
@@ -406,12 +450,15 @@ export default class AppSearchSuper {
 
   // * arguments
   public mediaTabs: SearchSuperMediaTab[];
+  private mediaTabsDefaultOrder: SearchSuperMediaTab[];
+  public mainMediaTabType: ProfileTabMediaType;
   public scrollable: Scrollable;
   public searchGroups?: {[group in SearchGroupType]: SearchGroup};
   public asChatList? = false;
   public hideEmptyTabs? = true;
   public onChangeTab?: (mediaTab: SearchSuperMediaTab) => void;
   public showSender? = false;
+  public useMainProfileTab?: boolean;
 
   private searchContextMenu: SearchContextMenu;
   public selection: SearchSelection;
@@ -421,6 +468,13 @@ export default class AppSearchSuper {
 
   public managers: AppManagers;
   private loadFirstTimePromise: Promise<void>;
+  private mediaFilterChangeId = 0;
+  private mediaFilterCommittedInputFilter: SearchSuperMediaInputFilter;
+  private mediaFilterCommittedState: SearchSuperCommittedMediaFilterState;
+  private mediaFilterStagingItemsTab: HTMLDivElement;
+  private mediaCountersRefreshId = 0;
+  private mediaCountersVersion = 0;
+  private scrollDateBadge: ReturnType<typeof createSharedMediaScrollDateBadge>;
 
   private listenerSetter: ListenerSetter;
   private swipeHandler: SwipeHandler;
@@ -429,6 +483,8 @@ export default class AppSearchSuper {
 
   public counters: Partial<{[type in SearchSuperMediaType]: number}> = {};
   public onLengthChange: (type: SearchSuperMediaType, length: number) => void;
+  public onMediaCountersChange: (counters?: SearchSuperMediaCounters) => void;
+  private mediaCounters: Partial<SearchSuperMediaCounters> = {};
 
   public openSavedDialogsInner: boolean;
 
@@ -450,8 +506,14 @@ export default class AppSearchSuper {
     'showSender' |
     'managers' |
     'scrollOffset'
-  > & Partial<Pick<AppSearchSuper, 'storiesArchive' | 'onLengthChange' | 'openSavedDialogsInner' | 'slider'>>) {
+  > & Partial<Pick<AppSearchSuper, 'storiesArchive' | 'onLengthChange' | 'onMediaCountersChange' | 'openSavedDialogsInner' | 'slider' | 'useMainProfileTab'>>) {
     safeAssign(this, options);
+    this.mediaTabsDefaultOrder = [...this.mediaTabs];
+
+    this.refiller = new ScrollableRefiller({
+      scrollable: this.scrollable,
+      getProgress: (type) => this.getMediaTabProgress(type)
+    });
 
     this.slider ??= appSidebarRight;
 
@@ -462,38 +524,31 @@ export default class AppSearchSuper {
     this.searchContextMenu = new SearchContextMenu(this.container, this, this.listenerSetter);
     this.selection = new SearchSelection(this, this.managers, this.listenerSetter);
 
-    const navScrollableContainer = this.navScrollableContainer = document.createElement('div');
-    navScrollableContainer.classList.add('search-super-tabs-scrollable', 'menu-horizontal-scrollable', 'sticky');
-
-    const navScrollable = this.navScrollable = new ScrollableX(navScrollableContainer);
-    navScrollable.container.classList.add('search-super-nav-scrollable');
-
-    const nav = this.nav = document.createElement('nav');
-    nav.classList.add('search-super-tabs', 'menu-horizontal-div');
-    this.tabsMenu = nav;
-
-    navScrollable.container.append(nav);
-
-    for(const mediaTab of this.mediaTabs) {
-      const menuTab = document.createElement('div');
-      menuTab.classList.add('menu-horizontal-div-item');
-      const span = document.createElement('span');
-      span.classList.add('menu-horizontal-div-item-span');
-      const i = document.createElement('i');
-      i.classList.add('menu-horizontal-div-item-background');
-
-      span.append(mediaTab.menuTabName = i18n(mediaTab.name));
-
-      menuTab.append(i, span);
-
-      ripple(menuTab);
-
-      this.tabsMenu.append(menuTab);
-
-      this.mediaTabsMap.set(mediaTab.type, mediaTab);
-
-      mediaTab.menuTab = menuTab;
-    }
+    let navScrollableContext: ScrollableContextValue;
+    // the tabs are reordered and hidden by hand later on, so they are rendered once and
+    // kept as plain elements — no `For`, nothing reactive to fight with
+    const navScrollableContainer = this.navScrollableContainer = createRoot((dispose) => {
+      this.disposeNav = dispose;
+      return Tabs.MenuScrollable({
+        class: 'search-super-tabs-scrollable sticky',
+        scrollableProps: {
+          class: 'search-super-nav-scrollable',
+          contextRef: (context) => navScrollableContext = context
+        },
+        children: Tabs.Menu({
+          class: 'search-super-tabs',
+          ref: (ref) => this.tabsMenu = this.nav = ref,
+          children: this.mediaTabs.map((mediaTab) => {
+            this.mediaTabsMap.set(mediaTab.type, mediaTab);
+            return Tabs.MenuTab({
+              ripple: true,
+              ref: (ref) => mediaTab.menuTab = ref,
+              children: (mediaTab.menuTabName = i18n(mediaTab.name))
+            });
+          })
+        })
+      });
+    }) as HTMLDivElement;
 
     this.tabsContainer = document.createElement('div');
     this.tabsContainer.classList.add('search-super-tabs-container', 'tabs-container');
@@ -637,6 +692,10 @@ export default class AppSearchSuper {
       const fromMediaTab = this.mediaTab;
       this.mediaTab = newMediaTab;
 
+      if(!supportsSharedMediaScrollDate(newMediaTab.type)) {
+        this.scrollDateBadge?.hide();
+      }
+
       if(this.prevTabId !== -1 && animate) {
         this.onTransitionStart();
       }
@@ -707,7 +766,7 @@ export default class AppSearchSuper {
       }
 
       this.onTransitionEnd();
-    }, undefined, navScrollable, this.listenerSetter);
+    }, undefined, navScrollableContext, this.listenerSetter);
 
     attachClickEvent(this.tabsContainer, (e) => {
       if(this.selection.isSelecting) {
@@ -716,7 +775,7 @@ export default class AppSearchSuper {
       }
     }, {capture: true, passive: false, listenerSetter: this.listenerSetter});
 
-    const onMediaClick = async(className: string, targetClassName: string, inputFilter: MyInputMessagesFilter, e: MouseEvent) => {
+    const onMediaClick = async(className: string, targetClassName: string, inputFilter: SearchSuperType, e: MouseEvent) => {
       const target = findUpClassName(e.target as HTMLDivElement, className);
       if(!target) return;
 
@@ -736,7 +795,11 @@ export default class AppSearchSuper {
       }
 
       const peerId = target.dataset.peerId.toPeerId();
-      const message = await this.managers.appMessagesManager.getMessageByPeer(peerId, mid);
+      const message = await this.getItemMessage(target);
+      if(!target.isConnected) {
+        return;
+      }
+
       const skipSensitive = this.isMessageSensitive(message as Message.message);
 
       const targets = (Array.from(this.tabs[inputFilter].querySelectorAll('.' + targetClassName)) as HTMLElement[]).map((el) => {
@@ -768,11 +831,26 @@ export default class AppSearchSuper {
       });
     };
 
-    this.tabs.inputMessagesFilterPhotoVideo && attachClickEvent(
-      this.tabs.inputMessagesFilterPhotoVideo,
-      onMediaClick.bind(null, 'grid-item', 'grid-item', 'inputMessagesFilterPhotoVideo'),
+    const mediaTab = this.mediaTabsMap.get('media');
+    mediaTab?.itemsTab && attachClickEvent(
+      mediaTab.itemsTab,
+      (e) => {
+        if(this.mediaFilterStagingItemsTab) return;
+        return onMediaClick('grid-item', 'grid-item', mediaTab.inputFilter, e);
+      },
       {listenerSetter: this.listenerSetter}
     );
+    mediaTab?.itemsTab && attachMediaPeekListeners({
+      listenTo: mediaTab.itemsTab,
+      listenerSetter: this.listenerSetter,
+      findTarget: (target) => {
+        // * a press while selecting selects
+        if(this.selection?.isSelecting || this.mediaFilterStagingItemsTab) return;
+        const element = findUpClassName(target, 'grid-item');
+        return element && !hasMediaSpoiler(element) ? element : undefined;
+      },
+      getSource: async(element) => getMessageMediaPeekSource(await this.getItemMessage(element))
+    });
     this.tabs.inputMessagesFilterDocument && attachClickEvent(
       this.tabs.inputMessagesFilterDocument,
       onMediaClick.bind(null, 'document-with-thumb', 'media-container', 'inputMessagesFilterDocument'),
@@ -817,9 +895,271 @@ export default class AppSearchSuper {
     this.container.classList.remove('sliding');
   };
 
+  public getFirstVisibleMediaTab() {
+    return this.mediaTabs.find((mediaTab) => !mediaTab.menuTab.classList.contains('hide'));
+  }
+
+  public setMainMediaTab(type?: ProfileTabMediaType) {
+    this.mainMediaTabType = type;
+    const ordered = orderMediaTabsByMain(
+      this.mediaTabsDefaultOrder,
+      type,
+      (mediaTab) => !mediaTab.menuTab.classList.contains('hide')
+    );
+    if(ordered.every((mediaTab, index) => this.mediaTabs[index] === mediaTab)) {
+      return;
+    }
+
+    this.mediaTabs.splice(0, this.mediaTabs.length, ...ordered);
+    this.nav.append(...ordered.map((mediaTab) => mediaTab.menuTab));
+    this.tabsContainer.append(...ordered.map((mediaTab) => mediaTab.contentTab.parentElement));
+
+    if(this.prevTabId !== -1) {
+      this.prevTabId = this.mediaTabs.indexOf(this.mediaTab);
+    }
+  }
+
   public setCounter(type: SearchSuperMediaType, count: number) {
     this.counters[type] = count;
+
+    if(type === 'media') {
+      const inputFilter = this.mediaTabsMap.get('media')?.inputFilter;
+      if(inputFilter === 'inputMessagesFilterPhotos') {
+        this.setMediaCounters({photos: count});
+      } else if(inputFilter === 'inputMessagesFilterVideo') {
+        this.setMediaCounters({videos: count});
+      }
+    }
+
+    this.updateMediaTabVisibility(type);
     this.onLengthChange?.(type, count);
+  }
+
+  // * counter-driven tabs are hidden while empty (see loadFirstTime), so they have to appear
+  // * (and disappear) on the fly when their counter crosses zero
+  private updateMediaTabVisibility(type: SearchSuperMediaType) {
+    if(!this.hideEmptyTabs || this.firstLoad) {
+      return;
+    }
+
+    const mediaTab = this.mediaTabsMap.get(type);
+    if(!mediaTab || !isCounterDrivenMediaTab(mediaTab)) {
+      return;
+    }
+
+    const hide = !this.counters[type];
+    if(mediaTab.menuTab.classList.contains('hide') === hide) {
+      return;
+    }
+
+    mediaTab.menuTab.classList.toggle('hide', hide);
+
+    let needChangeActive: boolean;
+    if(hide) {
+      needChangeActive = mediaTab.menuTab.classList.contains('active');
+      mediaTab.menuTab.classList.remove('active');
+    } else {
+      // * there was nothing to select when every tab was empty
+      needChangeActive = !this.mediaTabs.some((tab) => tab.menuTab.classList.contains('active'));
+    }
+
+    this.updateContainerHidden(needChangeActive);
+
+    if(
+      needChangeActive &&
+      this.mediaTab &&
+      !this.mediaTab.menuTab.classList.contains('hide') &&
+      this.canLoadMediaTab(this.mediaTab)
+    ) {
+      this.load(true);
+    }
+  }
+
+  private setMediaCounters(counters: Partial<SearchSuperMediaCounters>) {
+    Object.assign(this.mediaCounters, counters);
+    ++this.mediaCountersVersion;
+    const {photos, videos} = this.mediaCounters;
+    if(photos === undefined || videos === undefined) {
+      return;
+    }
+
+    this.onMediaCountersChange?.({photos, videos});
+  }
+
+  public updateMediaCountersByMessage(message: MyMessage, difference: 1 | -1) {
+    const key = this.filterMessagesByType([message], 'inputMessagesFilterPhotos').length ?
+      'photos' :
+      this.filterMessagesByType([message], 'inputMessagesFilterVideo').length ? 'videos' : undefined;
+    if(!key || this.mediaCounters[key] === undefined) {
+      return;
+    }
+
+    this.setMediaCounters({
+      [key]: Math.max(0, this.mediaCounters[key] + difference)
+    });
+  }
+
+  public async refreshMediaCounters() {
+    const refreshId = ++this.mediaCountersRefreshId;
+    const version = this.mediaCountersVersion;
+    const middleware = this.middleware.get();
+
+    try {
+      const counters = await this.getSearchCounters([{
+        _: 'inputMessagesFilterPhotos'
+      }, {
+        _: 'inputMessagesFilterVideo'
+      }], false);
+      if(
+        refreshId !== this.mediaCountersRefreshId ||
+        version !== this.mediaCountersVersion ||
+        !middleware()
+      ) {
+        return;
+      }
+
+      const photos = counters.find((counter) => counter.filter._ === 'inputMessagesFilterPhotos')?.count;
+      const videos = counters.find((counter) => counter.filter._ === 'inputMessagesFilterVideo')?.count;
+      this.setMediaCounters({photos, videos});
+    } catch(err) {
+      this.log.error('refresh media counters error:', err);
+    }
+  }
+
+  public async setMediaInputFilter(inputFilter: SearchSuperMediaInputFilter): Promise<SearchSuperMediaInputFilter | void> {
+    const changeId = ++this.mediaFilterChangeId;
+    const wasChanging = !!this.mediaFilterCommittedState;
+    await this.loadPromises.media;
+
+    const mediaTab = this.mediaTabsMap.get('media');
+    if(!mediaTab || changeId !== this.mediaFilterChangeId) {
+      return;
+    }
+
+    const committedInputFilter = this.mediaFilterCommittedInputFilter ??= mediaTab.inputFilter as SearchSuperMediaInputFilter;
+    if(!wasChanging && committedInputFilter === inputFilter) {
+      return;
+    }
+
+    const itemsTab = mediaTab.itemsTab as HTMLDivElement;
+    this.mediaFilterCommittedState ??= {
+      inputFilter: committedInputFilter,
+      loaded: this.loaded.media,
+      nextRate: this.nextRates.media,
+      counter: this.counters.media,
+      scroll: mediaTab.scroll
+    };
+
+    if(inputFilter === committedInputFilter || this.mediaTab !== mediaTab) {
+      this.restoreCommittedMediaFilterState(mediaTab, itemsTab);
+      return committedInputFilter;
+    }
+
+    const stagingItemsTab = itemsTab.cloneNode(false) as HTMLDivElement;
+    this.mediaFilterStagingItemsTab = stagingItemsTab;
+    mediaTab.inputFilter = inputFilter;
+    this.tabs[inputFilter] = stagingItemsTab;
+    this.searchContext.inputFilter = {_: inputFilter};
+    this.historyStorage[inputFilter] = [];
+    this.usedFromHistory[inputFilter] = -1;
+    // * the counters the refiller watches just went back to the start, and it
+    // * only re-arms on a HIGHER number — without this the media tab would never
+    // * refill again for the rest of this peer
+    this.refiller.reset('media');
+    this.loaded.media = false;
+    this.nextRates.media = 0;
+    delete this.counters.media;
+
+    mediaTab.scroll = undefined;
+
+    let loadResult: Awaited<ReturnType<AppSearchSuper['load']>>;
+    try {
+      loadResult = await this.load(true);
+    } catch(err) {
+      this.log.error('media filter load error:', err);
+    }
+
+    if(changeId !== this.mediaFilterChangeId) {
+      this.discardMediaFilterStagingItemsTab(stagingItemsTab);
+      return;
+    }
+
+    if(!Array.isArray(loadResult) || typeof loadResult[0] !== 'number') {
+      this.discardMediaFilterStagingItemsTab(stagingItemsTab);
+      this.restoreCommittedMediaFilterState(mediaTab, itemsTab);
+      return committedInputFilter;
+    }
+
+    await new Promise<void>((resolve) => fastRaf(() => {
+      if(changeId !== this.mediaFilterChangeId) {
+        this.discardMediaFilterStagingItemsTab(stagingItemsTab);
+        resolve();
+        return;
+      }
+
+      this.removeFromLazyLoadQueue(itemsTab);
+      itemsTab.replaceChildren(...Array.from(stagingItemsTab.children));
+      this.tabs[inputFilter] = itemsTab;
+      this.mediaFilterCommittedInputFilter = inputFilter;
+      this.mediaFilterCommittedState = undefined;
+
+      const parent = mediaTab.contentTab.parentElement;
+      Array.from(parent.children).slice(1).forEach((element) => element.remove());
+      if(!itemsTab.childElementCount) {
+        parent.append(this.createNothingFoundElement());
+      }
+
+      if(this.mediaTab === mediaTab) {
+        this.scrollToStart();
+      }
+
+      this.lazyLoadQueue.refresh();
+      this.mediaFilterStagingItemsTab = undefined;
+      resolve();
+    }));
+  }
+
+  private restoreCommittedMediaFilterState(mediaTab: SearchSuperMediaTab, itemsTab: HTMLDivElement) {
+    const state = this.mediaFilterCommittedState;
+    if(!state) {
+      return;
+    }
+
+    const pendingInputFilter = mediaTab.inputFilter;
+    if(pendingInputFilter !== state.inputFilter && this.tabs[pendingInputFilter] !== itemsTab) {
+      delete this.tabs[pendingInputFilter];
+    }
+
+    mediaTab.inputFilter = state.inputFilter;
+    mediaTab.scroll = state.scroll;
+    this.refiller.reset('media'); // same swap the other way round — the counters it watches are a different filter's now
+    this.tabs[state.inputFilter] = itemsTab;
+    this.searchContext.inputFilter = {_: state.inputFilter};
+    this.loaded.media = state.loaded;
+    this.nextRates.media = state.nextRate;
+    this.counters.media = state.counter;
+    this.mediaFilterCommittedInputFilter = state.inputFilter;
+    this.mediaFilterCommittedState = undefined;
+  }
+
+  private discardMediaFilterStagingItemsTab(itemsTab: HTMLDivElement) {
+    this.removeFromLazyLoadQueue(itemsTab);
+    if(this.mediaFilterStagingItemsTab === itemsTab) {
+      this.mediaFilterStagingItemsTab = undefined;
+    }
+  }
+
+  private removeFromLazyLoadQueue(container: HTMLElement) {
+    Array.from(container.children).forEach((element) => {
+      this.lazyLoadQueue.delete({div: element as HTMLElement});
+    });
+  }
+
+  private createNothingFoundElement() {
+    const div = document.createElement('div');
+    div.append(i18n('Chat.Search.NothingFound'));
+    div.classList.add('position-center', 'text-center', 'content-empty', 'no-select');
+    return div;
   }
 
   public filterMessagesByType(messages: MyMessage[], type: SearchSuperType): MyMessage[] {
@@ -852,7 +1192,6 @@ export default class AppSearchSuper {
       autonomous: isSaved,
       fromName: !peerId ? getFwdFromName(message.fwd_from) : undefined
     });
-
     const setLastMessagePromise = appDialogsManager.setLastMessageN({
       dialog: {
         _: 'dialog',
@@ -872,6 +1211,11 @@ export default class AppSearchSuper {
 
       return {element: dialogElement.container, message};
     });
+  }
+
+  // * the message a `search-super-item` shows
+  private getItemMessage(item: HTMLElement) {
+    return this.managers.appMessagesManager.getMessageByPeer(item.dataset.peerId.toPeerId(), +item.dataset.mid);
   }
 
   private async processPhotoVideoFilter({message, promises, middleware}: ProcessSearchSuperResult) {
@@ -950,6 +1294,7 @@ export default class AppSearchSuper {
       withTime: !showSender,
       fontWeight: 400,
       voiceAsMusic: true,
+      clickable: true,
       showSender,
       searchContext: this.copySearchContext(inputFilter, this.nextRates.files, false),
       lazyLoadQueue: this.lazyLoadQueue,
@@ -1070,29 +1415,21 @@ export default class AppSearchSuper {
       title.append(wrapPlainText(webPage.display_url.split('/', 1)[0]));
     }
 
-    const row = new Row({
+    const row = renderSearchWebPageRow({
       title,
       titleRight: wrapSentTime(message),
       subtitle: subtitleFragment,
-      havePadding: true,
-      clickable: true,
-      noRipple: true,
-      asLink: aIsAnchor
+      media: previewDiv,
+      link: aIsAnchor ? {
+        href: a.href,
+        onClick: a.getAttribute('onclick'),
+        targetBlank: a.target === '_blank'
+      } : undefined,
+      middleware
     });
 
-    if(aIsAnchor) {
-      (row.container as HTMLAnchorElement).href = a.href;
-      const onClick = a.getAttribute('onclick');
-      onClick && row.container.setAttribute('onclick', onClick);
-      if(a.target === '_blank') {
-        setBlankToAnchor(row.container as HTMLAnchorElement);
-      }
-    }
-
-    row.applyMediaElement(previewDiv, 'big');
-
-    if(row.container.innerText.trim().length) {
-      return {message, element: row.container};
+    if(row.innerText.trim().length) {
+      return {message, element: row};
     }
   }
 
@@ -1149,7 +1486,9 @@ export default class AppSearchSuper {
         break;
       }
 
-      case 'inputMessagesFilterPhotoVideo': {
+      case 'inputMessagesFilterPhotos':
+      case 'inputMessagesFilterPhotoVideo':
+      case 'inputMessagesFilterVideo': {
         processCallback = this.processPhotoVideoFilter;
         break;
       }
@@ -1223,6 +1562,7 @@ export default class AppSearchSuper {
         element.classList.add('search-super-item');
         element.dataset.mid = '' + message.mid;
         element.dataset.peerId = '' + message.peerId;
+        element.dataset.timestamp = '' + message.date;
         threadId && (element.dataset.threadId = '' + threadId);
         container[method](element);
 
@@ -1265,6 +1605,10 @@ export default class AppSearchSuper {
       return;
     }
 
+    if(mediaTab.type === 'media' && this.mediaFilterStagingItemsTab) {
+      return;
+    }
+
     if(mediaTab.hideOn) {
       mediaTab.hideOn.classList.remove('hide');
     }
@@ -1277,11 +1621,7 @@ export default class AppSearchSuper {
     // this.contentContainer.classList.add('loaded');
 
     if(!length && !mediaTab.itemsTab.childElementCount) {
-      const div = document.createElement('div');
-      div.append(i18n('Chat.Search.NothingFound'));
-      div.classList.add('position-center', 'text-center', 'content-empty', 'no-select');
-
-      parent.append(div);
+      parent.append(this.createNothingFoundElement());
     }
   }
 
@@ -1296,7 +1636,7 @@ export default class AppSearchSuper {
     }
 
     const query = this.searchContext.query;
-    if(query && !this.searchContext.peerId) {
+    if(query && !this.searchContext.peerId && !this.searchContext.communityId) {
       const addDialogSubtitle = async(dom: DialogDom, peerId: PeerId) => {
         const peer = await this.managers.appPeersManager.getPeer(peerId);
         if(peerId === rootScope.myId) {
@@ -1351,7 +1691,6 @@ export default class AppSearchSuper {
             },
             withStories: true
           });
-
           return {dom, peerId};
         }).filter(Boolean).forEach(async({dom, peerId}) => addDialogSubtitle(dom, peerId));
 
@@ -1454,7 +1793,7 @@ export default class AppSearchSuper {
           }
         })
       ]);
-    } else if(!this.searchContext.peerId && !this.searchContext.minDate) {
+    } else if(!this.searchContext.peerId && !this.searchContext.communityId && !this.searchContext.minDate) {
       const [appState] = useAppState();
       const renderRecentSearch = (setActive = true) => {
         if(!middleware()) {
@@ -1466,8 +1805,12 @@ export default class AppSearchSuper {
         createRoot((dispose) => {
           middleware.onClean(dispose);
 
+          // Keep this panel's order until it reopens, but apply removals immediately.
+          const recentSearch = unwrap(appState.recentSearch).slice();
           const arr = For({
-            each: appState.recentSearch,
+            get each() {
+              return recentSearch.filter((peerId) => appState.recentSearch.includes(peerId));
+            },
             children: (peerId) => {
               const middlewareHelper = createMiddleware();
               const {dom} = appDialogsManager.addDialogNew({
@@ -1481,7 +1824,6 @@ export default class AppSearchSuper {
                 },
                 withStories: true
               });
-
               (async() => {
                 dom.lastMessageSpan.append(await (peerId.isUser() ?
                   Promise.resolve(getUserStatusString(await this.managers.appUsersManager.getUser(peerId.toUserId()))) :
@@ -1893,7 +2235,6 @@ export default class AppSearchSuper {
           },
           loadPromises
         });
-
         dom.lastMessageSpan.append(await getChatMembersString(chat.id, this.managers, chat));
 
         return Promise.all(loadPromises);
@@ -1908,9 +2249,9 @@ export default class AppSearchSuper {
     const createPaywall = (limit: number) => {
       const wall = document.createElement('div');
       wall.classList.add('similar-channels-paywall');
-      const btn = Button('btn-primary btn-color-primary', {icon: 'premium_unlock', text: 'UnlockSimilar'});
+      const btn = Button('btn-primary btn-color-primary', {icon: 'premium_unlock_filled', text: 'UnlockSimilar'});
       btn.classList.add('similar-channels-paywall-button');
-      const onClick = () => PopupPremium.show();
+      const onClick = () => showPremiumPopup();
       const anchor = anchorCallback(onClick);
       attachClickEvent(btn, onClick);
       anchor.classList.add('primary');
@@ -1989,6 +2330,9 @@ export default class AppSearchSuper {
       openInner: this.openSavedDialogsInner
     });
 
+    // the pinned sublists of Saved Messages reorder like the pinned chats of a folder
+    xd.attachPinnedReorder();
+
     const getCount = async() => {
       const result = await this.managers.dialogsStorage.getDialogs({filterId: rootScope.myId});
       return result.count;
@@ -2026,7 +2370,6 @@ export default class AppSearchSuper {
           middleware
         }
       });
-
       const peer = await this.managers.appPeersManager.getPeer(peerId);
       const username = await this.managers.appPeersManager.getPeerUsername(peerId);
 
@@ -2049,8 +2392,9 @@ export default class AppSearchSuper {
       group.setActive();
       group.nameEl.style.display = 'none';
 
-      const SEARCH_LIMIT = 200; // will get filtered anyway
-      const {results: globalResults} = await this.managers.appUsersManager.searchContacts(this.searchContext.query, SEARCH_LIMIT);
+      // * the server returns channels only; the check below stays as a guard
+      const SEARCH_LIMIT = 200;
+      const {results: globalResults} = await this.managers.appUsersManager.searchContacts(this.searchContext.query, SEARCH_LIMIT, 'broadcasts');
       const filteredResultsWithUndefined = await Promise.all(
         globalResults.map(async(user) => await this.managers.appPeersManager.isBroadcast(user) ? user : undefined)
       );
@@ -2120,8 +2464,9 @@ export default class AppSearchSuper {
       const group = createSearchGroup({name: 'ChatList.Filter.Bots', type: 'apps', onFound: onClick, middleware});
       group.setActive();
 
-      const SEARCH_LIMIT = 200; // will get filtered anyway
-      const {results: globalResults} = await this.managers.appUsersManager.searchContacts(this.searchContext.query, SEARCH_LIMIT);
+      // * the server returns bots only; the check below stays as a guard
+      const SEARCH_LIMIT = 200;
+      const {results: globalResults} = await this.managers.appUsersManager.searchContacts(this.searchContext.query, SEARCH_LIMIT, 'bots');
       const filteredResultsWithUndefined = await Promise.all(
         globalResults.map(async(user) => await this.managers.appPeersManager.isBot(user) ? user : undefined)
       );
@@ -2299,9 +2644,7 @@ export default class AppSearchSuper {
 
         this.loadPromises[type] = null;
 
-        setTimeout(() => {
-          this.scrollable.checkForTriggers();
-        }, 0);
+        this.refiller.schedule(type, middleware);
       });
     }
 
@@ -2313,7 +2656,12 @@ export default class AppSearchSuper {
         this.loadedChats = true;
       }
 
-      if(!this.searchContext.query.trim() && !this.searchContext.peerId && !this.searchContext.minDate) {
+      if(
+        !this.searchContext.query.trim() &&
+        !this.searchContext.peerId &&
+        !this.searchContext.communityId &&
+        !this.searchContext.minDate
+      ) {
         this.loaded[type] = true;
         return Promise.resolve();
       }
@@ -2331,7 +2679,8 @@ export default class AppSearchSuper {
           used += ids.length;
           slicedLength += ids.length;
 
-          const notFilteredMessages = ids.map((m) => apiManagerProxy.getMessageByPeer(m.peerId, m.mid));
+          // * a mid can have no message behind it (deleted, or a synthetic bound), skip such holes
+          const notFilteredMessages = ids.map((m) => apiManagerProxy.getMessageByPeer(m.peerId, m.mid)).filter(Boolean);
           // const notFilteredMessages = await Promise.all(promises);
 
           messages.push(...this.filterMessagesByType(notFilteredMessages, inputFilter));
@@ -2347,9 +2696,7 @@ export default class AppSearchSuper {
         this.usedFromHistory[inputFilter] = used;
         // if(messages.length) {
         return this.performSearchResult({messages, mediaTab}).finally(() => {
-          setTimeout(() => {
-            this.scrollable.checkForTriggers();
-          }, 0);
+          this.refiller.schedule(type, middleware);
         });
         // }
       }
@@ -2373,6 +2720,9 @@ export default class AppSearchSuper {
       if(!messages && value.history/*  && mediaTab.type === 'saved' */) {
         messages = value.history.map((mid) => apiManagerProxy.getMessageByPeer(options.peerId, mid));
       }
+
+      // * a mid can have no message behind it (deleted, or a synthetic bound), skip such holes
+      messages = messages.filter(Boolean);
 
       history.push(...messages.map((m) => ({mid: m.mid, peerId: m.peerId})));
 
@@ -2416,9 +2766,7 @@ export default class AppSearchSuper {
                 promise.then(() => {
                   if(!middleware()) return;
                   // this.log('preloaded more');
-                  setTimeout(() => {
-                    this.scrollable.checkForTriggers();
-                  }, 0);
+                  this.refiller.schedule(type, middleware);
                 });
               }
             }
@@ -2438,6 +2786,29 @@ export default class AppSearchSuper {
     return promise;
   }
 
+  /**
+   * How far a tab has got, for `ScrollableRefiller`: fetched messages plus the
+   * ones already rendered out of them. Both only ever grow within a peer (and
+   * `cleanup` resets the refiller along with them), which is what makes the
+   * refill chain terminate.
+   *
+   * This is the exact state behind `canLoadMediaTab`'s second clause: the
+   * `justLoad` preload grows `historyStorage` WITHOUT rendering, and the only
+   * thing that renders the remainder into a list too short to scroll is the
+   * chain. A tab with no `inputFilter` — saved dialogs, stories, gifts, apps,
+   * posts — has no such state and no cache to drain, so it reports a flat 0 and
+   * gets the one check after a load that asks "is the viewport full yet"; its
+   * list owns whatever paging comes after that.
+   */
+  private getMediaTabProgress(type: SearchSuperMediaType) {
+    const inputFilter = this.mediaTabsMap.get(type)?.inputFilter;
+    if(!inputFilter) {
+      return 0;
+    }
+
+    return Math.max(0, this.usedFromHistory[inputFilter] ?? 0) + (this.historyStorage[inputFilter]?.length ?? 0);
+  }
+
   private canLoadMediaTab(mediaTab: SearchSuperMediaTab) {
     if(mediaTab.type === 'gifts') {
       return !this.stargiftsStore || (!this.stargiftsStore.loading && !this.stargiftsStore.loaded);
@@ -2451,9 +2822,9 @@ export default class AppSearchSuper {
     return isSensitive((usePeer(message.peerId) as User.user).restriction_reason || []) || isMessageSensitive(message);
   }
 
-  public getSearchCounters(filters: MessagesFilter[]) {
+  public getSearchCounters(filters: MessagesFilter[], canCache = true) {
     const {peerId, threadId} = this.searchContext;
-    return this.managers.appMessagesManager.getSearchCounters(peerId, filters, undefined, threadId);
+    return this.managers.appMessagesManager.getSearchCounters(peerId, filters, canCache, threadId);
   }
 
   private async loadFirstTime() {
@@ -2463,8 +2834,13 @@ export default class AppSearchSuper {
       return;
     }
 
-    const mediaTabs = this.mediaTabs.filter((mediaTab) => mediaTab.inputFilter && mediaTab.inputFilter !== 'inputMessagesFilterEmpty');
-    const filters = mediaTabs.map((mediaTab) => ({_: mediaTab.inputFilter}));
+    const mediaTabs = this.mediaTabs.filter(isCounterDrivenMediaTab);
+    const filterTypes = new Set(mediaTabs.map((mediaTab) => mediaTab.inputFilter));
+    if(this.mediaTabsMap.has('media')) {
+      filterTypes.add('inputMessagesFilterPhotos');
+      filterTypes.add('inputMessagesFilterVideo');
+    }
+    const filters = Array.from(filterTypes, (inputFilter) => ({_: inputFilter} as MessagesFilter));
 
     const [
       counters,
@@ -2477,7 +2853,7 @@ export default class AppSearchSuper {
       canViewGifts,
       canViewNotes,
       canViewContracts,
-      giftsCount,
+      profileTabsData,
       maybePinnedGifts
     ] = await Promise.all([
       this.getSearchCounters(filters),
@@ -2490,7 +2866,7 @@ export default class AppSearchSuper {
       this.canViewGifts(),
       this.canViewNotes(),
       this.canViewContracts(),
-      this.getGiftsCount(),
+      this.getProfileTabsData(),
       peerId === rootScope.myId && this.managers.appGiftsManager.getPinnedGifts(peerId)
     ]);
 
@@ -2506,7 +2882,12 @@ export default class AppSearchSuper {
       }
     }
 
-    let firstMediaTab: SearchSuperMediaTab;
+    if(this.mediaTabsMap.has('media')) {
+      const photos = counters.find((counter) => counter.filter._ === 'inputMessagesFilterPhotos')?.count;
+      const videos = counters.find((counter) => counter.filter._ === 'inputMessagesFilterVideo')?.count;
+      this.setMediaCounters({photos, videos});
+    }
+
     let count = 0;
     mediaTabs.forEach((mediaTab) => {
       const counter = counters.find((c) => c.filter._ === mediaTab.inputFilter);
@@ -2518,10 +2899,6 @@ export default class AppSearchSuper {
       this.setCounter(mediaTab.type, counter.count);
 
       if(counter.count) {
-        if(firstMediaTab === undefined) {
-          firstMediaTab = mediaTab;
-        }
-
         ++count;
       }
     });
@@ -2536,6 +2913,7 @@ export default class AppSearchSuper {
     const notesTab = this.mediaTabsMap.get('notes');
     const contractsTab = this.mediaTabsMap.get('contracts');
 
+    const giftsCount = profileTabsData.giftsCount ?? 0;
     const showGiftsTab = canViewGifts && giftsCount !== 0;
 
     const a: [SearchSuperMediaTab, boolean][] = [
@@ -2565,38 +2943,18 @@ export default class AppSearchSuper {
     this.setCounter('gifts', giftsCount);
 
     if(canViewStories) {
-      firstMediaTab = storiesTab;
-
       const newTitle = i18n(peerId.isUser() ? 'Stories' : 'ProfileStories');
       storiesTab.menuTabName.replaceWith(storiesTab.menuTabName = newTitle);
-    }
-
-    if(canViewMembers) {
-      firstMediaTab = membersTab;
-    }
-
-    if(canViewSavedDialogs) {
-      firstMediaTab = savedDialogsTab;
-    }
-
-    if(showGiftsTab && !firstMediaTab) {
-      firstMediaTab = giftsTab;
-    }
-
-    // A brand-new ticket has notes but no media yet — without this the whole
-    // shared-media block would stay collapsed and the notes tab unreachable.
-    if(canViewNotes && !firstMediaTab) {
-      firstMediaTab = notesTab;
-    }
-
-    // Same for a customer whose only CRM footprint is a signed contract.
-    if(canViewContracts && !firstMediaTab) {
-      firstMediaTab = contractsTab;
     }
 
     if(maybePinnedGifts) {
       this.setPinnedGifts(maybePinnedGifts);
     }
+
+    const mainMediaTabType = getMediaTypeForProfileTab(profileTabsData.mainTab);
+    this.setMainMediaTab(mainMediaTabType);
+    // * open on the first visible tab, the main one leading (tdesktop, Android)
+    const firstMediaTab = this.getFirstVisibleMediaTab();
 
     this.toggleContainerHidden(!firstMediaTab);
     if(firstMediaTab) {
@@ -2616,6 +2974,7 @@ export default class AppSearchSuper {
   }
 
   private updateContainerHidden(changeActive = false) {
+    this.setMainMediaTab(this.mainMediaTabType);
     const visibleTabs = this.mediaTabs.filter((tab) => !tab.menuTab.classList.contains('hide'));
     this.toggleContainerHidden(visibleTabs.length === 0);
     const isSingle = visibleTabs.length <= 1;
@@ -2822,24 +3181,42 @@ export default class AppSearchSuper {
     return !this.searchContext.threadId && this.mediaTabsMap.has('gifts');
   }
 
-  public async getGiftsCount() {
+  public async getProfileTabsData() {
     const {peerId, threadId} = this.searchContext;
     if(threadId) {
-      return;
+      return {};
     }
 
     const full = await this.managers.appProfileManager.getProfileByPeerId(peerId);
-    return (full as UserFull | ChatFull.channelFull).stargifts_count ?? 0;
+    const profile = full as UserFull.userFull | ChatFull.channelFull;
+    return {
+      giftsCount: profile.stargifts_count ?? 0,
+      mainTab: this.useMainProfileTab ? profile.main_tab : undefined
+    };
   }
 
   public cleanup() {
+    ++this.mediaFilterChangeId;
+    ++this.mediaCountersRefreshId;
+    ++this.mediaCountersVersion;
+    this.mediaCounters = {};
+    this.onMediaCountersChange?.();
+    this.mediaFilterCommittedState = undefined;
+    this.mediaFilterStagingItemsTab = undefined;
+    const mediaTab = this.mediaTabsMap.get('media');
+    if(mediaTab?.inputFilter && mediaTab.itemsTab) {
+      this.mediaFilterCommittedInputFilter = mediaTab.inputFilter as SearchSuperMediaInputFilter;
+      this.tabs[mediaTab.inputFilter] = mediaTab.itemsTab as HTMLDivElement;
+    }
     this.loadPromises = {};
     this.loaded = {};
+    this.refiller.reset();
     this.loadedChats = false;
     this.nextRates = {};
     this.firstLoad = true;
     this.prevTabId = -1;
     this.counters = {};
+    this.setMainMediaTab();
 
     this.lazyLoadQueue.clear();
 
@@ -2880,7 +3257,29 @@ export default class AppSearchSuper {
     });
   }
 
+  public updateScrollDateBadge(canShow: boolean) {
+    const mediaTab = this.mediaTab;
+    if(!canShow || !supportsSharedMediaScrollDate(mediaTab?.type)) {
+      this.scrollDateBadge?.hide();
+      return;
+    }
+
+    this.scrollDateBadge ??= createSharedMediaScrollDateBadge({
+      mount: (element) => this.tabsContainer.before(element),
+      getAnchorTop: () => this.navScrollableContainer.getBoundingClientRect().bottom,
+      getItems: () => {
+        const mediaTab = this.mediaTab;
+        return mediaTab.type === 'stories' ?
+          mediaTab.contentTab.querySelectorAll<HTMLElement>('.stories-album-content .search-super-item[data-timestamp]') :
+          mediaTab.itemsTab.children;
+      }
+    });
+    this.scrollDateBadge.update(true);
+  }
+
   public cleanupHTML() {
+    this.scrollDateBadge?.reset();
+
     this.mediaTabs.forEach((tab) => {
       tab.itemsTab.replaceChildren();
 
@@ -2921,7 +3320,7 @@ export default class AppSearchSuper {
     return context;
   }
 
-  public setQuery({peerId, query, threadId, historyStorage, folderId, minDate, maxDate, chatType}: {
+  public setQuery({peerId, query, threadId, historyStorage, folderId, minDate, maxDate, chatType, communityId}: {
     peerId: PeerId,
     query?: string,
     threadId?: number,
@@ -2929,7 +3328,7 @@ export default class AppSearchSuper {
     folderId?: number,
     minDate?: number,
     maxDate?: number
-  } & Pick<RequestHistoryOptions, 'chatType'>) {
+  } & Pick<RequestHistoryOptions, 'chatType' | 'communityId'>) {
     this.searchContext = {
       peerId,
       query: query || '',
@@ -2938,7 +3337,8 @@ export default class AppSearchSuper {
       folderId,
       minDate,
       maxDate,
-      chatType
+      chatType,
+      communityId
     };
 
     this.historyStorage = historyStorage ?? {};
@@ -2949,6 +3349,8 @@ export default class AppSearchSuper {
   public destroy() {
     this.cleanup();
     this.listenerSetter.removeAll();
+    this.disposeNav?.();
+    this.disposeNav = undefined;
     this.scrollable.destroy();
     this.swipeHandler?.removeListeners();
     this.selection?.cleanup();

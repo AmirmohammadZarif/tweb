@@ -8,7 +8,7 @@ import throttleWithRaf from '@helpers/schedulers/throttleWithRaf';
 import windowSize from '@helpers/windowSize';
 import {PhotoSize, VideoSize} from '@layer';
 import {AppManagers} from '@lib/managers';
-import RLottiePlayer from '@lib/rlottie/rlottiePlayer';
+import LottiePlayer from '@lib/lottie/lottiePlayer';
 import Scrollable from '@components/scrollable';
 import wrapSticker from '@components/wrappers/sticker';
 
@@ -34,6 +34,8 @@ export default function wrapStickerAnimation({
   onUnmount,
   scrollable,
   textColor,
+  animation: preparedAnimation,
+  noOffscreen,
   addOffsetX: _addOffsetX = 0,
   addOffsetY: _addOffsetY = 0
 }: {
@@ -53,6 +55,8 @@ export default function wrapStickerAnimation({
   onUnmount?: () => void,
   scrollable?: Scrollable,
   textColor?: string,
+  animation?: MaybePromise<LottiePlayer>, // * a player prepared in advance, ready to be played
+  noOffscreen?: boolean,
   addOffsetX?: number,
   addOffsetY?: number
 }) {
@@ -63,7 +67,8 @@ export default function wrapStickerAnimation({
   animationDiv.style.width = size + 'px';
   animationDiv.style.height = size + 'px';
 
-  let animation: RLottiePlayer;
+  let animation: LottiePlayer;
+
   const unmountAnimation = () => {
     if(NO_UNMOUNT) {
       return;
@@ -83,7 +88,14 @@ export default function wrapStickerAnimation({
   const middlewareHelper = middleware?.create() ?? getMiddleware();
   middleware = middlewareHelper.get();
 
-  const stickerPromise = wrapSticker({
+  const renderPromise: Promise<any> = preparedAnimation ? Promise.resolve(preparedAnimation).then((_animation) => {
+    animationDiv.append(..._animation.canvas);
+    if(play) {
+      _animation.play();
+    }
+
+    return _animation;
+  }) : wrapSticker({
     div: animationDiv,
     doc,
     middleware,
@@ -98,9 +110,12 @@ export default function wrapStickerAnimation({
     managers,
     fullThumb,
     isEffect: true,
-    textColor
-  }).then(({render}) => render).then((_animation) => {
-    assumeType<RLottiePlayer>(_animation);
+    textColor,
+    noOffscreen
+  }).then(({render}) => render);
+
+  const stickerPromise = renderPromise.then((_animation) => {
+    assumeType<LottiePlayer>(_animation);
     if(!middleware()) {
       _animation.remove();
       throw makeError('MIDDLEWARE');
@@ -116,14 +131,14 @@ export default function wrapStickerAnimation({
     animation.addEventListener('destroy', unmountAnimation);
 
     if(IS_VIBRATE_SUPPORTED) {
-      animation.addEventListener('firstFrame', () => {
+      animation.onFirstFrame(() => {
         navigator.vibrate(100);
-      }, {once: true});
+      });
     }
 
-    animation.addEventListener('firstFrame', () => {
+    animation.onFirstFrame(() => {
       setPosition();
-    }, {once: true});
+    });
 
     return animation;
   });

@@ -125,7 +125,7 @@ export default function showQuickRepliesPickerPopup(options: {
                       <Row.RightContent>
                         <ButtonIconTsx
                           class={styles.play}
-                          icon={playingId() === reply.crmVoiceTemplateId ? 'pause' : 'play'}
+                          icon={playingId() === reply.crmVoiceTemplateId ? 'pause_filled' : 'play_filled'}
                           onClick={(e) => togglePreview(e, reply.crmVoiceTemplateId)}
                         />
                       </Row.RightContent>

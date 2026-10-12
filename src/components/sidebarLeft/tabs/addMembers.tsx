@@ -2,7 +2,8 @@ import AppSelectPeers from '@components/appSelectPeers';
 import {setButtonLoader} from '@components/putPreloader';
 import ButtonCorner from '@components/buttonCorner';
 import Button from '@components/button';
-import SettingSection from '@components/settingSection';
+import Section from '@components/section';
+import {unwrapSolidElement} from '@helpers/solid/wrapSolidComponent';
 import {i18n} from '@lib/langPack';
 import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
 import type {AppAddMembersTab} from '@components/solidJsTabs/tabs';
@@ -12,11 +13,27 @@ type AppAddMembersTabClass = typeof AppAddMembersTab;
 
 const AddMembersTab = () => {
   const [tab] = useSuperTab<AppAddMembersTabClass>();
-  const {type, placeholder, takeOut, skippable, selectedPeerIds, selectedExtras, extraCategories, extraCategoriesSectionLangKey} = tab.payload;
+  const {
+    type,
+    placeholder,
+    takeOut,
+    skippable,
+    selectedPeerIds,
+    selectedExtras,
+    extraCategories,
+    extraCategoriesSectionLangKey,
+    peerType,
+    channelParticipantsPeerId,
+    peerLoader,
+    exceptSelf,
+    filterPeerTypeBy,
+    limit,
+    limitCallback
+  } = tab.payload;
 
   tab.container.classList.add('add-members-container');
 
-  const nextBtn = ButtonCorner({icon: 'arrow_next'});
+  const nextBtn = ButtonCorner({icon: 'arrow_next', ariaLabel: 'Next'});
   tab.content.append(nextBtn);
   tab.scrollable.container.remove();
 
@@ -46,34 +63,59 @@ const AddMembersTab = () => {
     onChange: skippable ? null : (length) => {
       nextBtn.classList.toggle('is-visible', !!length);
     },
-    peerType: [isPrivacy ? 'dialogs' : 'contacts'],
+    peerType: peerType || [peerLoader ?
+      'custom' :
+      (
+        channelParticipantsPeerId ?
+          'channelParticipants' :
+          (isPrivacy ? 'dialogs' : 'contacts')
+      )],
+    peerId: channelParticipantsPeerId,
+    getMoreCustom: peerLoader,
     placeholder,
-    exceptSelf: isPrivacy,
-    filterPeerTypeBy: isPrivacy ? ['isAnyGroup', 'isUser'] : undefined,
+    exceptSelf: exceptSelf ??
+      (isPrivacy || !!channelParticipantsPeerId || !!peerLoader),
+    filterPeerTypeBy: filterPeerTypeBy ??
+      (isPrivacy ? ['isAnyGroup', 'isUser'] : undefined),
     managers: tab.managers,
     design: isPrivacy ? 'round' : 'square',
     checkboxSide: isPrivacy ? 'right' : 'left'
   });
+
+  if(limit) {
+    const add = selector.add.bind(selector);
+    selector.add = (options) => {
+      const selectedPeersCount = [...selector.selected].filter((key) => typeof(key) !== 'string').length;
+      if(typeof(options.key) !== 'string' && !selector.selected.has(options.key) && selectedPeersCount >= limit) {
+        limitCallback?.();
+        return false;
+      }
+
+      return add(options);
+    };
+  }
 
   if(extraCategories?.length) {
     const categoriesByKey = new Map<string, AppAddMembersExtraCategory>(
       extraCategories.map((c) => [c.key, c])
     );
 
-    const categoriesSection = new SettingSection({
-      noDelimiter: true,
-      name: extraCategoriesSectionLangKey
-    });
-    categoriesSection.container.classList.add('folder-categories');
-
-    const f = document.createDocumentFragment();
-    for(const cat of extraCategories) {
+    const categoryButtons = extraCategories.map((cat) => {
       const button = Button('btn-primary btn-transparent folder-category-button', {icon: cat.icon, text: cat.text});
       button.dataset.peerId = cat.key;
       button.append(selector.checkbox());
-      f.append(button);
-    }
-    categoriesSection.content.append(f);
+      return button;
+    });
+
+    const categoriesSection = unwrapSolidElement(
+      <Section
+        class="folder-categories"
+        noDelimiter
+        name={extraCategoriesSectionLangKey}
+      >
+        {categoryButtons}
+      </Section>
+    ) as HTMLElement;
 
     const _add = selector.add.bind(selector);
     selector.add = ({key, title, scroll, fireOnChange, fallbackIcon}) => {
@@ -88,7 +130,7 @@ const AddMembersTab = () => {
     };
 
     selector.scrollable.append(
-      categoriesSection.container,
+      categoriesSection,
       selector.scrollable.container.lastElementChild
     );
   }
@@ -105,7 +147,12 @@ const AddMembersTab = () => {
 
   function attachToPromise(promise: Promise<any>) {
     const removeLoader = setButtonLoader(nextBtn, 'arrow_next');
-    promise.then(() => {
+    promise.then((result) => {
+      if(result === false) {
+        removeLoader();
+        return;
+      }
+
       tab.close();
     }, () => {
       removeLoader();

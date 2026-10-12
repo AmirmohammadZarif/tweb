@@ -1,21 +1,21 @@
-import PopupElement from '.';
+import {createSignal} from 'solid-js';
+import PopupElement, {createPopup} from '@components/popups/indexTsx';
 import CrmNotesPanel from '@components/crmNotesPanel';
 
 // Topbar route to the internal notes. The panel itself is shared with the
 // profile's shared-media "Notes" tab — see @components/crmNotesPanel.
-export default class PopupCrmNotes extends PopupElement {
-  constructor(private peerId: PeerId) {
-    super('popup-crm-notes', {
-      title: 'Crm.Note.PanelTitle',
-      body: true,
-      closable: true
-    });
-
-    this.appendSolidBody(() => <CrmNotesPanel peerId={this.peerId} scroll />);
-    this.show();
-  }
-}
-
 export function showCrmNotesPopup(peerId: PeerId) {
-  new PopupCrmNotes(peerId);
+  const [show, setShow] = createSignal(true);
+
+  createPopup(() => (
+    <PopupElement class="popup-crm-notes" closable show={show()} onClose={() => setShow(false)}>
+      <PopupElement.Header>
+        <PopupElement.CloseButton />
+        <PopupElement.Title title="Crm.Note.PanelTitle" />
+      </PopupElement.Header>
+      <PopupElement.Body>
+        <CrmNotesPanel peerId={peerId} scroll />
+      </PopupElement.Body>
+    </PopupElement>
+  ));
 }

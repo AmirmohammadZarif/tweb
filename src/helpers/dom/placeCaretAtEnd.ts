@@ -6,10 +6,22 @@
  */
 
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
+import {getChatInputEditor} from '@components/chat/inputEditor/registry';
 
 export default function placeCaretAtEnd(el: HTMLElement, ignoreTouchCheck = false, focus = true) {
-  const activeElement = el.ownerDocument.activeElement;
-  if(IS_TOUCH_SUPPORTED && (!ignoreTouchCheck || (activeElement.tagName !== 'INPUT' && !(activeElement as HTMLElement).isContentEditable))) {
+  // Safari leaves `activeElement` null when nothing is focused (other engines fall back to <body>),
+  // and reading `.tagName` off it threw out of the phone/search inputs that call this on touch.
+  // No focused element means no editable one, which is the case we bail out on anyway.
+  const activeElement = el.ownerDocument.activeElement as HTMLElement;
+  const isEditableFocused = !!activeElement &&
+    (activeElement.tagName === 'INPUT' || activeElement.isContentEditable);
+  if(IS_TOUCH_SUPPORTED && (!ignoreTouchCheck || !isEditableFocused)) {
+    return;
+  }
+
+  const editor = getChatInputEditor(el);
+  if(editor) {
+    editor.focusAtEnd(focus);
     return;
   }
 
@@ -19,10 +31,15 @@ export default function placeCaretAtEnd(el: HTMLElement, ignoreTouchCheck = fals
     el.selectionStart = length;
     el.selectionEnd = length;
   } else {
+    const view = el.ownerDocument.defaultView;
+    if(!view) return;
+
     const range = el.ownerDocument.createRange();
     range.selectNodeContents(el);
     range.collapse(false);
-    const sel = el.ownerDocument.defaultView.getSelection();
+    const sel = view.getSelection();
+    if(!sel) return;
+
     sel.removeAllRanges();
     sel.addRange(range);
   }

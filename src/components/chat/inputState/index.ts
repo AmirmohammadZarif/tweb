@@ -1,8 +1,6 @@
-import wrapDraftText from '@lib/richTextProcessor/wrapDraftText';
 import {createRoot} from 'solid-js';
 import {createStore, SetStoreFunction} from 'solid-js/store';
 import type ChatInput from '../input';
-import {useAiEditorButton} from './useAiEditorButton';
 import useDirectMessages from './useDirectMessages';
 import useFileInput from './useFileInput';
 import useStarsState from './useStarsState';
@@ -20,6 +18,7 @@ export interface ChatInputStateStore {
 
   // * file input
   isEditing: boolean;
+  isReplacingMedia: boolean;
   isSuggesting: boolean;
 
   // * direct messages
@@ -27,7 +26,6 @@ export interface ChatInputStateStore {
   isReplying: boolean;
   isSuggestingUneditablePostChange: boolean;
 
-  inputMessageContainerInited: boolean;
 }
 
 export type ChatInputState = ReturnType<typeof createChatInputState>;
@@ -48,13 +46,12 @@ const DEFAULT_STORE: ChatInputStateStore = {
   starsAmount: 0,
 
   isEditing: false,
+  isReplacingMedia: false,
   isSuggesting: false,
 
   isMonoforumAllChats: false,
   isReplying: false,
-  isSuggestingUneditablePostChange: false,
-
-  inputMessageContainerInited: false
+  isSuggestingUneditablePostChange: false
 };
 
 export default function createChatInputState(instance: ChatInput, initial: ChatInputStateStore = DEFAULT_STORE) {
@@ -70,30 +67,6 @@ export default function createChatInputState(instance: ChatInput, initial: ChatI
 
     const {canPaste} = useDirectMessages(context);
 
-    useAiEditorButton({
-      forceHidden: () => store.messageCount !== 1,
-      // Upstream additionally waits for the composer to grow to 72px, about three
-      // lines, before this appears. The line above already says there is exactly
-      // one message worth of text to rewrite — messageCount is 0 on an empty input
-      // and 2+ once the text splits — so the height check adds nothing except
-      // hiding the button from anyone writing a normal short reply.
-      shouldShowFromHeight: () => 0,
-      instance,
-      container: () => {
-        if(store.inputMessageContainerInited) return instance.inputMessageContainer;
-      },
-      inputField: () => instance.messageInputField,
-      onApply: (text) => {
-        const node = wrapDraftText(text.text, {
-          entities: text.entities,
-          middleware: instance.getMiddleware(),
-          wrappingForPeerId: instance.chat.peerId
-        });
-        instance.setInputValue(node, false, true);
-      },
-      appendTo: () => instance.newMessageWrapper,
-      canSend: true
-    });
 
     return {store, set, canPaste, dispose};
   });

@@ -1,8 +1,8 @@
-import RLottieIcon from '@lib/rlottie/rlottieIcon';
+import LottieIcon from '@lib/lottie/lottieIcon';
 import {GROUP_CALL_PARTICIPANT_CLEARED_MUTED_STATE, GROUP_CALL_PARTICIPANT_MUTED_STATE, getColorByMutedState, clearMutedStateModifier} from '.';
-import {SuperRLottieIcon} from '@components/superIcon';
+import {SuperLottieIcon} from '@components/superIcon';
 
-export default class GroupCallParticipantMutedIcon extends SuperRLottieIcon<{
+export default class GroupCallParticipantMutedIcon extends SuperLottieIcon<{
   PartState: GROUP_CALL_PARTICIPANT_CLEARED_MUTED_STATE,
   ColorState: GROUP_CALL_PARTICIPANT_MUTED_STATE
 }> {
@@ -30,13 +30,15 @@ export default class GroupCallParticipantMutedIcon extends SuperRLottieIcon<{
       },
       getColor: colored ? (state, prevState) => {
         return getColorByMutedState(state);
-      } : undefined
+      } : undefined,
+      // speaking comes and goes with the voice; the colour should not flicker with it
+      colorTransition: 200
     });
 
     const className = 'group-call-participant-muted-icon';
     this.container.classList.add(className + '-container');
 
-    const parts = RLottieIcon.generateEqualParts(4, 21);
+    const parts = LottieIcon.generateEqualParts(4, 21);
     this.add({
       name: 'voice_outlined2',
       parts

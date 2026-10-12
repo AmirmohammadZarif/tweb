@@ -3,9 +3,9 @@ import assumeType from '@helpers/assumeType';
 import {formatDate} from '@helpers/date';
 import htmlToDocumentFragment from '@helpers/dom/htmlToDocumentFragment';
 import {getRestrictionReason} from '@helpers/restrictions';
-import escapeRegExp from '@helpers/string/escapeRegExp';
 import limitSymbols from '@helpers/string/limitSymbols';
-import {Message, DocumentAttribute, DraftMessage, MessageMedia, Document, Photo} from '@layer';
+import {Message, MessageMedia, Document, Photo} from '@layer';
+import getAudioAttribute from '@appManagers/utils/docs/getAudioAttribute';
 import {MyDocument} from '@appManagers/appDocsManager';
 import {MyDraftMessage} from '@appManagers/appDraftsManager';
 import {MyMessage} from '@appManagers/appMessagesManager';
@@ -26,27 +26,30 @@ import TranslatableMessage from '@components/translatableMessage';
 import wrapMessageActionTextNew, {WrapMessageActionTextOptions} from '@components/wrappers/messageActionTextNew';
 import {wrapMessageGiveawayResults} from '@components/wrappers/messageActionTextNewUnsafe';
 import wrapPeerTitle from '@components/wrappers/peerTitle';
-import {flattenRichMessageSummary} from '@lib/richMessage';
+import getMessagePreviewIcon from '@components/wrappers/messagePreviewIcon';
+import getMessageForReplyContent from '@components/wrappers/messageForReplyContent';
 
 export type WrapMessageForReplyOptions = Modify<WrapMessageActionTextOptions, {
   message: MyMessage | MyDraftMessage
 }> & {
   text?: string,
-  usingMids?: number[],
   highlightWord?: string,
+  usingMids?: number[],
   withoutMediaType?: boolean,
+  withoutMessageIcon?: boolean,
   canTranslate?: boolean
 };
 
 export default async function wrapMessageForReply<T extends WrapMessageForReplyOptions>(
   options: T
 ): Promise<T['plain'] extends true ? string : DocumentFragment> {
-  options.text ??= (options.message as Message.message).message;
+  const content = getMessageForReplyContent(options.message, options.text);
+  options.text = content.text;
   if(!options.plain && options.highlightWord) {
     options.highlightWord = options.highlightWord.trim();
   }
 
-  const {message, usingMids, plain, highlightWord, withoutMediaType} = options;
+  const {message, usingMids, plain, withoutMediaType, withoutMessageIcon} = options;
 
   const parts: (Node | string)[] = [];
 
@@ -64,8 +67,7 @@ export default async function wrapMessageForReply<T extends WrapMessageForReplyO
       parts.push(part);
     } else {
       const el = document.createElement('span');
-      if(typeof(part) === 'string') el.innerHTML = part;
-      else el.append(part);
+      el.append(part); // * every rich part is already a node — a string here is plain text, never markup
       parts.push(el);
     }
   };
@@ -85,18 +87,24 @@ export default async function wrapMessageForReply<T extends WrapMessageForReplyO
     noTextFormat: true
   };
 
-  let entities = (message as Message.message).totalEntities ?? (message as DraftMessage.draftMessage).entities;
+  let entities = content.entities;
+  let isRichPreview = content.isRichPreview;
   const applyRichMessageSummary = () => {
     const richMessage = (message as Message.message).rich_message;
     if(!richMessage) {
       return false;
     }
 
-    const summary = flattenRichMessageSummary(richMessage);
+    const summary = getMessageForReplyContent(message);
     options.text = summary.text;
     entities = summary.entities;
+    isRichPreview = summary.isRichPreview;
     return true;
   };
+
+  const previewIcon = !plain && !withoutMediaType && !withoutMessageIcon ?
+    getMessagePreviewIcon(message) :
+    undefined;
 
   if((message as Message.message).media && !isRestricted) {
     assumeType<Message.message>(message);
@@ -170,14 +178,12 @@ export default async function wrapMessageForReply<T extends WrapMessageForReplyO
           addPart('AttachLiveLocation');
           break;
         case 'messageMediaPoll':
-          const pre = '📊' + ' ';
           if(plain) {
-            const f = pre + media.poll.question.text;
+            const f = '📊 ' + media.poll.question.text;
             addPart(undefined, f);
           } else {
             const textWithEntities = wrapTextWithEntities(media.poll.question);
             const fragment = wrapRichText(textWithEntities.text, {...someRichTextOptions, entities: textWithEntities.entities});
-            fragment.prepend(wrapEmojiText(pre));
             addPart(undefined, fragment);
           }
           break;
@@ -232,8 +238,10 @@ export default async function wrapMessageForReply<T extends WrapMessageForReplyO
 
             options.text = '';
           } else if(document.type === 'audio') {
-            const attribute = document.attributes.find((attribute) => attribute._ === 'documentAttributeAudio' && (attribute.title || attribute.performer)) as DocumentAttribute.documentAttributeAudio;
-            const f = '🎵' + ' ' + (attribute ? [attribute.title, attribute.performer].filter(Boolean).join(' - ') : document.file_name);
+            const attribute = getAudioAttribute(document);
+            const names = [attribute?.title, attribute?.performer].filter(Boolean);
+            // The icon is drawn by `getMessagePreviewIcon` unless this is plain text.
+            const f = (plain ? '🎵 ' : '') + (names.length ? names.join(' - ') : document.file_name);
             addPart(undefined, plain ? f : wrapEmojiText(f));
           } else {
             addPart(undefined, plain ? document.file_name : wrapEmojiText(document.file_name));
@@ -369,10 +377,12 @@ export default async function wrapMessageForReply<T extends WrapMessageForReplyO
   if(isRestricted) {
     options.text = getRestrictionReason((message as Message.message).restriction_reason).text;
     entities = [];
+    isRichPreview = false;
   }
 
   if(options.text) {
-    options.text = limitSymbols(options.text, 100);
+    // a cut here would move no entity: the rich preview cuts itself, around its entities
+    if(!isRichPreview) options.text = limitSymbols(options.text, 100);
 
     entities ??= parseEntities(options.text);
 
@@ -380,21 +390,6 @@ export default async function wrapMessageForReply<T extends WrapMessageForReplyO
       parts.push(wrapPlainText(options.text, entities));
     } else {
       // let entities = parseEntities(text.replace(/\n/g, ' '));
-
-      if(highlightWord) {
-        let found = false;
-        let match: any;
-        const regExp = new RegExp(escapeRegExp(highlightWord), 'gi');
-        entities = entities.slice(); // fix leaving highlight entity
-        while((match = regExp.exec(options.text)) !== null) {
-          entities.push({_: 'messageEntityHighlight', length: highlightWord.length, offset: match.index});
-          found = true;
-        }
-
-        if(found) {
-          sortEntities(entities);
-        }
-      }
 
       const messagePeerId = (message as Message.message).peerId;
       const shouldHideCode = [SERVICE_PEER_ID, VERIFICATION_CODES_BOT_ID].includes(messagePeerId);
@@ -417,12 +412,21 @@ export default async function wrapMessageForReply<T extends WrapMessageForReplyO
 
       let what: DocumentFragment | HTMLElement;
       if(options.canTranslate) {
+        const richMessage = (message as Message.message).rich_message;
         what = TranslatableMessage({
           peerId: (message as Message.message).peerId,
-          message: message as Message.message,
+          ...(richMessage ? {
+            textWithEntities: {
+              _: 'textWithEntities',
+              text: options.text,
+              entities
+            }
+          } : {
+            message: message as Message.message
+          }),
           richTextOptions: someRichTextOptions,
           middleware: options.middleware,
-          onTextWithEntities: (textWithEntities) => {
+          onTextWithEntities: isRichPreview ? undefined : (textWithEntities) => {
             return {
               ...textWithEntities,
               text: limitSymbols(textWithEntities.text, 100)
@@ -446,7 +450,12 @@ export default async function wrapMessageForReply<T extends WrapMessageForReplyO
     return parts.join('') as any;
   } else {
     const fragment = document.createDocumentFragment();
-    fragment.append(...parts);
+    fragment.append(
+      ...[
+        previewIcon && Icon(previewIcon, 'message-preview-icon', 'inline-icon', 'inline-icon-left'),
+        ...parts
+      ].filter(Boolean)
+    );
     return fragment as any;
   }
 }

@@ -4,7 +4,8 @@ import {MOUNT_CLASS_TO} from '@config/debug';
 import callbackify from '@helpers/callbackify';
 import deferredPromise, {CancellablePromise} from '@helpers/cancellablePromise';
 import cryptoMessagePort from '@lib/crypto/cryptoMessagePort';
-import rlottieMessagePort from '@lib/rlottie/rlottieMessagePort';
+import lottieMessagePort from '@lib/lottie/lottieMessagePort';
+import {THREADED_WORKER_TYPES, ThreadedWorkerType} from '@lib/threadedWorkerTypes';
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 import {AppStoragesManager} from '@appManagers/appStoragesManager';
 import createManagers from '@appManagers/createManagers';
@@ -15,6 +16,9 @@ import AccountController from '@lib/accounts/accountController';
 import pushSingleManager from '@appManagers/pushSingleManager';
 import Modes from '@config/modes';
 import SuperMessagePort from '@lib/superMessagePort';
+import objectUrlRegistry from '@lib/mainWorker/objectUrlRegistry';
+import {makeObjectUrlOwner, parseObjectUrlOwner} from '@helpers/objectUrlUtils';
+import {releaseSharedObjectURLsWhere} from '@lib/mainWorker/sharedObjectUrlCache';
 
 type Managers = Awaited<ReturnType<typeof createManagers>>;
 
@@ -32,9 +36,6 @@ type ThreadedSharedWorker = {
   threads: number
 };
 
-export const THREADED_WORKERS_TYPES = ['crypto', 'rlottie'] as const;
-export type ThreadedWorkerType = typeof THREADED_WORKERS_TYPES[number];
-
 export class AppManagersManager {
   private managersByAccount: Promise<ManagersByAccount> | ManagersByAccount;
   public readonly stateManagersByAccount: StateManagersByAccount;
@@ -50,10 +51,10 @@ export class AppManagersManager {
 
     this.threadedSharedWorkers = {};
     for(
-      const {type, superMessagePort, threads} of THREADED_WORKERS_TYPES.map((type) => {
+      const {type, superMessagePort, threads} of THREADED_WORKER_TYPES.map((type) => {
         return {
           type,
-          superMessagePort: type === 'crypto' ? cryptoMessagePort : rlottieMessagePort,
+          superMessagePort: type === 'crypto' ? cryptoMessagePort : lottieMessagePort,
           threads: type === 'crypto' ? App.cryptoWorkers : App.lottieWorkers
         };
       })
@@ -142,7 +143,10 @@ export class AppManagersManager {
         return urls;
       }
 
-      const newURLs = new Array(maxLength - length).fill(undefined).map(() => URL.createObjectURL(blob));
+      const newURLs = new Array(maxLength - length).fill(undefined).map((_, index) => {
+        const owner = makeObjectUrlOwner('threaded-worker', type, length + index);
+        return objectUrlRegistry.createShared(blob, owner);
+      });
       urls.push(...newURLs);
       return urls;
     });
@@ -156,6 +160,15 @@ export class AppManagersManager {
           managersByAccount[accountNumber].apiManager.logOut(otherAccountNumber);
         }
       }
+    });
+
+    rootScope.addEventListener('logging_out', ({accountNumber}) => {
+      releaseSharedObjectURLsWhere((owner) => {
+        const details = parseObjectUrlOwner(owner);
+        return !!details &&
+          details.namespace !== 'threaded-worker' &&
+          (accountNumber === undefined || details.parts[0] === accountNumber);
+      });
     });
   }
 
@@ -195,6 +208,12 @@ export class AppManagersManager {
 
   public getManagersByAccount() {
     return this.managersByAccount ??= this.createManagers();
+  }
+
+  // * For diagnostics only (see memoryStats): reading a report must never be what CREATES the
+  // * managers - getManagersByAccount() would do exactly that.
+  public get areManagersCreated() {
+    return !!this.managersByAccount;
   }
 
   public get isServiceWorkerOnline() {

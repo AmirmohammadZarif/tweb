@@ -44,6 +44,7 @@ declare global {
   }
 
   interface Window {
+    fillChatInputEditorTestData?: () => boolean | Promise<boolean>;
     Prism?: {
       manual?: boolean
     };
@@ -111,7 +112,7 @@ declare global {
     back(): void;
   }
 
-  declare const navigation: Navigation;
+  const navigation: Navigation;
 
   // * until here
 
@@ -138,27 +139,29 @@ declare global {
     'translations' | 'animated_emoji' | 'more_upload' | 'emoji_status' | 'profile_badge' |
     'advanced_chat_management' | 'no_ads' | 'app_icons' | 'infinite_reactions' |
     'animated_userpics' | 'premium_stickers' | 'peer_colors' | 'wallpapers' |
-    'saved_tags' | 'last_seen' | 'message_privacy' | 'pm_noforwards';
+    'saved_tags' | 'last_seen' | 'message_privacy' | 'pm_noforwards' | 'folder_tags';
 
   type MTMimeType = 'video/quicktime' | 'image/gif' | 'image/jpeg' | 'application/pdf' |
-    'video/mp4' | 'image/webp' | 'audio/mpeg' | 'audio/ogg' | 'application/octet-stream' |
+    'video/mp4' | 'image/webp' | 'audio/aac' | 'audio/flac' | 'audio/mp4' | 'audio/mpeg' |
+    'audio/ogg' | 'video/ogg' | 'application/octet-stream' |
     'application/x-tgsticker' | 'video/webm' | 'image/svg+xml' | 'image/png' | 'application/json' |
     'application/x-tgwallpattern' | 'audio/wav' | 'image/avif' | 'image/jxl' | 'image/bmp' |
-    'application/x-mpegurl' | 'application/x-tgstoryboard' | 'application/x-tgstoryboardmap';
+    'image/heic' | 'application/x-mpegurl' | 'application/x-tgstoryboard' | 'application/x-tgstoryboardmap';
 
   type MTFileExtension = 'mov' | 'gif' | 'pdf' | 'jpg' | 'jpeg' | 'wav' |
-    'tgv' | 'tgs' | 'svg' | 'mp4' | 'webm' | 'webp' | 'mp3' | 'ogg' | 'json' |
-    'png' | 'avif' | 'jxl' | 'bmp';
+    'tgv' | 'tgs' | 'svg' | 'mp4' | 'webm' | 'webp' | 'mp3' | 'm4a' | 'aac' |
+    'flac' | 'opus' | 'oga' | 'ogg' | 'ogv' | 'json' |
+    'png' | 'avif' | 'jxl' | 'bmp' | 'heic' | 'heif';
 
   type ApiFileManagerError = 'DOWNLOAD_CANCELED' | 'UPLOAD_CANCELED' | 'FILE_TOO_BIG' | 'REFERENCE_IS_NOT_REFRESHED';
   type StorageError = 'STORAGE_OFFLINE' | 'NO_ENTRY_FOUND' | 'IDB_CREATE_TIMEOUT';
   type ReferenceError = 'NO_NEW_CONTEXT' | 'NO_CONTEXT';
-  type NetworkerError = 'NETWORK_BAD_RESPONSE' | 'NETWORK_BAD_REQUEST';
-  type FiltersError = 'PINNED_DIALOGS_TOO_MUCH';
-  type RLottieError = 'FRAME_OUT_OF_RANGE' | 'ITEM_DESTROYED' | 'FILE_INVALID';
+  type NetworkerError = 'NETWORK_BAD_RESPONSE' | 'NETWORK_BAD_REQUEST' | 'BIND_FAILED';
+  type FiltersError = 'PINNED_DIALOGS_TOO_MUCH' | 'PINNED_DIALOGS_CHANGED';
+  type LottieError = 'FRAME_OUT_OF_RANGE' | 'ITEM_DESTROYED' | 'FILE_INVALID';
 
   type LocalFileError = ApiFileManagerError | ReferenceError | StorageError;
-  type LocalErrorType = LocalFileError | NetworkerError | FiltersError | RLottieError |
+  type LocalErrorType = LocalFileError | NetworkerError | FiltersError | LottieError |
     'UNKNOWN' | 'NO_DOC' | 'MIDDLEWARE' | 'PORT_DISCONNECTED' | 'NO_AUTO_DOWNLOAD' | 'CHAT_PRIVATE' | 'NO_WASM' |
     'CANCELED' | 'TIMEOUT' | 'TAB_ALREADY_OPEN';
 
@@ -178,6 +181,7 @@ declare global {
     | 'PHOTO_INVALID_DIMENSIONS'
     | 'PHOTO_SAVE_FILE_INVALID'
     | 'USER_ALREADY_PARTICIPANT'
+    | 'USER_WAS_KICKED'
     | 'USERNAME_INVALID'
     | 'USERNAME_PURCHASE_AVAILABLE'
     | 'USERNAMES_ACTIVE_TOO_MUCH'
@@ -207,6 +211,7 @@ declare global {
     | 'DIALOG_FILTERS_TOO_MUCH'
     | 'CHATLISTS_TOO_MUCH'
     | 'FRESH_RESET_AUTHORISATION_FORBIDDEN'
+    | 'FRESH_CHANGE_AUTHORIZATION_FORBIDDEN'
     | 'NO_USER'
     | 'USER_PRIVACY_RESTRICTED'
     | 'REACTION_INVALID'
@@ -219,6 +224,7 @@ declare global {
     | `FLOOD_WAIT_${number}`
     | 'MESSAGE_NOT_MODIFIED'
     | 'MESSAGE_EMPTY'
+    | 'MESSAGE_ID_REQUIRED'
     | 'SLUG_INVALID'
     | `PREMIUM_SUB_ACTIVE_UNTIL_${number}`
     | `PHONE_MIGRATE_${number}`
@@ -244,6 +250,7 @@ declare global {
     | 'FORM_EXPIRED'
     | `FLOOD_PREMIUM_WAIT_${number}`
     | 'STORY_ID_TOO_MANY'
+    | 'STORY_NOT_MODIFIED'
     | `FILE_REFERENCE_${number}_EXPIRED`
     | 'ADDRESS_STREET_LINE1_INVALID'
     | 'ADDRESS_STREET_LINE2_INVALID'
@@ -268,8 +275,22 @@ declare global {
     | 'SUMMARY_FLOOD_PREMIUM'
     | 'AUTH_TOKEN_EXPIRED'
     | 'CHANNELS_TOO_MUCH'
+    | 'USERS_TOO_MUCH'
+    | 'GROUP_FULL'
+    | 'ACCESS_DENIED'
+    | 'CHANNEL_PUBLIC_GROUP_NA'
+    | 'USER_BANNED_IN_CHANNEL'
+    | 'CHANNEL_INVALID'
+    | 'CHANNEL_ALREADY_LINKED'
+    | 'COMMUNITY_REQUEST_CREATED'
+    | 'COMMUNITY_PEERS_TOO_MUCH'
     | 'BOOSTS_REQUIRED'
     | 'USERNAME_OCCUPIED'
+    | 'MESSAGE_EDIT_FORBIDDEN'
+    | 'MESSAGE_ID_INVALID'
+    | 'PHONE_CODE_EMPTY'
+    | 'PHONE_CODE_EXPIRED'
+    | 'PHONE_CODE_INVALID'
   ;
 
   type ErrorType = LocalErrorType | ServerErrorType;
@@ -287,7 +308,9 @@ declare global {
     originalError?: any,
   };
 
-  declare const electronHelpers: {
+  // read it through getElectronHelpers() from @helpers/electronHelpers — a bare `typeof` check also
+  // matches any element whose id happens to be `electronHelpers`, which message content can render
+  const electronHelpers: {
     openExternal(url): void;
   } | undefined;
 

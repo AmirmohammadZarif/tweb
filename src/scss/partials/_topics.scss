@@ -16,6 +16,10 @@
     // max-width: unquote("min(100%, 20rem)") !important;
     // display: flex !important;
 
+    &.community-forum-tab {
+      background-color: var(--background-color) !important;
+    }
+
     &.is-floating {
       --offset: 5rem;
       --width: calc(100% - var(--offset));
@@ -57,9 +61,17 @@
     .sidebar-header {
       padding: 0 .75rem;
 
+      > .btn-icon {
+        flex: 0 0 auto;
+      }
+
+      &__rows {
+        margin-inline-end: .5rem;
+      }
+
       &__title,
       &__subtitle {
-        padding-inline-start: .5rem;
+        padding-inline-start: .625rem;
       }
 
       // .btn-icon {
@@ -232,4 +244,7 @@
 .topic-dialogs-override .chatlist-chat {
   min-height: 4rem;
   padding-inline-start: .75rem;
+  // * a topic row is a `chatlist-chat-bigger` too, but has no avatar to stand off the checkbox:
+  // * its lane is the plain one (`_chatlist.scss`)
+  --select-lane-shift: initial;
 }

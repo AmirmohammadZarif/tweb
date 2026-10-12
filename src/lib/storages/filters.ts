@@ -7,6 +7,7 @@ import {AppManager} from '@appManagers/manager';
 import findAndSplice from '@helpers/array/findAndSplice';
 import assumeType from '@helpers/assumeType';
 import {FOLDER_ID_ALL, FOLDER_ID_ARCHIVE, REAL_FOLDERS, REAL_FOLDER_ID, START_LOCAL_ID} from '@appManagers/constants';
+import noop from '@helpers/noop';
 import makeError from '@helpers/makeError';
 import indexOfAndSplice from '@helpers/array/indexOfAndSplice';
 import {isDialog} from '@appManagers/utils/dialogs/isDialog';
@@ -20,6 +21,8 @@ const convertment = [
 ] as ['pinned_peers' | 'exclude_peers' | 'include_peers', 'pinnedPeerIds' | 'excludePeerIds' | 'includePeerIds'][];
 
 const PREPENDED_FILTERS = REAL_FOLDERS.size;
+
+const OPTIONAL_FILTER_FIELDS = ['color', 'emoticon'] as const;
 
 const LOCAL_FILTER: DialogFilter.dialogFilter = {
   _: 'dialogFilter',
@@ -40,6 +43,13 @@ export default class FiltersStorage extends AppManager {
   private localFilters: {[filterId: string]: MyDialogFilter};
   private localId: number;
   private reloadedPeerIds: Set<PeerId>;
+  /**
+   * `messages.dialogFilters.tags_enabled`: whether the chat list shows each chat's folders under
+   * it. Kept in the state, since the folders themselves come from there and not from the server;
+   * `undefined` until the server has been asked once
+   */
+  private tagsEnabled: boolean;
+  private tagsEnabledRequested: boolean;
 
   protected after() {
     this.clear(true);
@@ -76,7 +86,13 @@ export default class FiltersStorage extends AppManager {
       this.onUpdateDialogFilters({_: 'updateDialogFilters'});
     });
 
+    // * the folders come from the state, the switch only from the server - it is asked once a session
+    this.rootScope.addEventListener('user_auth', () => {
+      this.requestTagsEnabled();
+    });
+
     return this.appStateManager.getState().then((state) => {
+      this.tagsEnabled = state.filtersTagsEnabled;
       const filtersArr = this.prependFilters(state.filtersArr);
       filtersArr.map((filter) => {
         this.saveDialogFilter(filter, false, true);
@@ -136,6 +152,8 @@ export default class FiltersStorage extends AppManager {
       this.filters = {};
       this.filtersArr = [];
       this.reloadedPeerIds = new Set();
+      this.tagsEnabled = undefined;
+      this.tagsEnabledRequested = false;
 
       this.localFilters = {};
       for(const filterId of REAL_FOLDERS) {
@@ -305,27 +323,85 @@ export default class FiltersStorage extends AppManager {
     }
   }
 
-  public async toggleDialogPin(peerId: PeerId, filterId: number) {
+  public toggleDialogPin(peerId: PeerId, filterId: number) {
+    const pinned = !this.filters[filterId]?.pinnedPeerIds.includes(peerId);
+    return this.toggleDialogsPin(filterId, [peerId], pinned);
+  }
+
+  /**
+   * A chat folder carries its pins itself, so changing them is an edit of the folder. Both halves
+   * are rewritten (`pinned_peers`, and the `pinnedPeerIds` the dialog indexes are generated from)
+   * and the local `filter_update` goes out before the request, so the list re-sorts without waiting
+   * for the round trip - and goes back where it was if the folder does not take the edit.
+   */
+  private setFilterPinnedPeers(filter: MyDialogFilter, peerIds: PeerId[]) {
+    const previous = filter.pinnedPeerIds.slice();
+    const inputPeers = new Map(filter.pinnedPeerIds.map((peerId, idx) => [peerId, filter.pinned_peers[idx]]));
+
+    const apply = (peerIds: PeerId[]) => {
+      // * in place: `pinnedPeerIds` is a non numerable property of the stored filter
+      filter.pinnedPeerIds.splice(0, filter.pinnedPeerIds.length, ...peerIds);
+      filter.pinned_peers.splice(
+        0,
+        filter.pinned_peers.length,
+        ...peerIds.map((peerId) => inputPeers.get(peerId) ?? this.appPeersManager.getInputPeerById(peerId))
+      );
+
+      this.rootScope.dispatchEvent('filter_update', filter);
+    };
+
+    apply(peerIds);
+
+    return this.updateDialogFilter(filter).then(noop, (err) => {
+      apply(previous);
+      throw err;
+    });
+  }
+
+  /**
+   * Reorders one chat folder's pins.
+   *
+   * `order` is the folder's pins in visual order, topmost first, and has to be exactly the set the
+   * folder holds - a reorder computed against a different set is not about this folder any more
+   * (tdesktop drops the save in that case too).
+   */
+  public reorderPinnedDialogs(filterId: number, order: PeerId[]) {
     const filter = this.filters[filterId];
-
-    const index = filter.pinnedPeerIds.indexOf(peerId);
-    const wasPinned = index !== -1;
-
-    if(wasPinned) {
-      filter.pinned_peers.splice(index, 1);
-      filter.pinnedPeerIds.splice(index, 1);
+    if(!filter) {
+      return Promise.reject(makeError('PINNED_DIALOGS_CHANGED'));
     }
 
-    if(!wasPinned) {
-      if(filter.pinned_peers.length >= (await this.apiManager.getLimit('folderPin'))) {
-        return Promise.reject(makeError('PINNED_DIALOGS_TOO_MUCH'));
-      }
-
-      filter.pinned_peers.unshift(this.appPeersManager.getInputPeerById(peerId));
-      filter.pinnedPeerIds.unshift(peerId);
+    const pinned = new Set(filter.pinnedPeerIds);
+    const reordered = order.filter((peerId) => pinned.has(peerId));
+    if(reordered.length !== pinned.size) {
+      return Promise.reject(makeError('PINNED_DIALOGS_CHANGED'));
     }
 
-    return this.updateDialogFilter(filter);
+    return this.setFilterPinnedPeers(filter, reordered);
+  }
+
+  /**
+   * Pins or unpins chats of a folder in one edit, rather than one round trip - and one full rewrite
+   * of the folder - per chat. `toggleDialogPin` is this with a single chat.
+   *
+   * `peerIds` in visual order, topmost first - new pins go above the ones the folder already has,
+   * in the order they were selected in.
+   */
+  public async toggleDialogsPin(filterId: number, peerIds: PeerId[], pinned: boolean) {
+    const filter = this.filters[filterId];
+    if(!filter) {
+      throw makeError('PINNED_DIALOGS_CHANGED');
+    }
+
+    const changing = new Set(peerIds);
+    const rest = filter.pinnedPeerIds.filter((peerId) => !changing.has(peerId));
+    const pinnedPeerIds = pinned ? [...peerIds, ...rest] : rest;
+    // the limit is about the pins the folder would end up with, so the change is whole or not at all
+    if(pinned && pinnedPeerIds.length > await this.apiManager.getLimit('folderPin')) {
+      throw makeError('PINNED_DIALOGS_TOO_MUCH');
+    }
+
+    return this.setFilterPinnedPeers(filter, pinnedPeerIds);
   }
 
   public createDialogFilter(filter: MyDialogFilter, prepend?: boolean) {
@@ -478,9 +554,59 @@ export default class FiltersStorage extends AppManager {
       return keys.map((filterId) => this.filters[filterId]).sort((a, b) => a.localId - b.localId);
     }
 
-    const messagesDialogFilters = await this.apiManager.invokeApiSingle('messages.getDialogFilters');
+    const messagesDialogFilters = await this.fetchDialogFilters();
     const prepended = this.prependFilters(messagesDialogFilters.filters);
     return prepended.map((filter) => this.saveDialogFilter(filter, overwrite)).filter(Boolean);
+  }
+
+  /** The folders as the server has them - and with them whether their tags are on */
+  private fetchDialogFilters() {
+    return this.apiManager.invokeApiSingle('messages.getDialogFilters').then((dialogFilters) => {
+      this.setTagsEnabled(!!dialogFilters.pFlags?.tags_enabled);
+      return dialogFilters;
+    });
+  }
+
+  /**
+   * The folders come from the state, and are not asked for again on start - so whether their tags
+   * are on, which the server keeps with them, is asked for on its own, once a session (every other
+   * client loads the folders on start): the state's answer may be from before the switch was
+   * thrown on another device, or not be there at all
+   */
+  private requestTagsEnabled() {
+    if(this.tagsEnabledRequested) {
+      return;
+    }
+
+    this.tagsEnabledRequested = true;
+    this.fetchDialogFilters().catch(() => {
+      this.tagsEnabledRequested = false;
+    });
+  }
+
+  private setTagsEnabled(enabled: boolean) {
+    if(this.tagsEnabled === enabled) {
+      return;
+    }
+
+    this.tagsEnabled = enabled;
+    this.appStateManager.pushToState('filtersTagsEnabled', enabled);
+  }
+
+  /**
+   * Shows or hides the folder tags in the chat list, on every device of the account. The switch
+   * is Premium's: the server takes it from a Premium account only, and the tags of an account
+   * without it stay hidden whatever the flag says (see `useFolderTagsShown`)
+   */
+  public async toggleDialogFilterTags(enabled: boolean) {
+    await this.apiManager.invokeApi('messages.toggleDialogFilterTags', {enabled});
+    this.setTagsEnabled(enabled);
+
+    // * the folders are asked for again once the tags are on, as Android does: the colours they
+    // * wear may have come with the switch
+    if(enabled) {
+      this.onUpdateDialogFilters({_: 'updateDialogFilters'});
+    }
   }
 
   public getSuggestedDialogsFilters() {
@@ -510,6 +636,14 @@ export default class FiltersStorage extends AppManager {
 
     const oldFilter = this.filters[filter.id];
     if(oldFilter) {
+      // * a flag the folder no longer has is a field the new one leaves out, and merging would keep
+      // * the old value: a colour taken off would go on tagging the folder's chats
+      for(const key of OPTIONAL_FILTER_FIELDS) {
+        if(!(key in filter)) {
+          delete (oldFilter as DialogFilter.dialogFilter)[key];
+        }
+      }
+
       filter = Object.assign(oldFilter, filter);
     } else {
       this.filters[filter.id] = filter;

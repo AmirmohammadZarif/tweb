@@ -2,8 +2,8 @@ import privacyTab from './privacyTab';
 import PrivacySection from '@components/privacySection';
 import {i18n, LangPackKey} from '@lib/langPack';
 import {SliderSuperTabEventable} from '@components/sliderTab';
-import SettingSection from '@components/settingSection';
-import Row from '@components/row';
+import Section from '@components/section';
+import RowTsx from '@components/rowTsx';
 import {pickAvatarAndUpload} from '@components/avatarEdit';
 import confirmationPopup from '@components/confirmationPopup';
 import rootScope from '@lib/rootScope';
@@ -12,6 +12,7 @@ import {getMiddleware, MiddlewareHelper} from '@helpers/middleware';
 import {UserFull, Photo} from '@layer';
 import ProgressivePreloader from '@components/preloader';
 import type {CancellablePromise} from '@helpers/cancellablePromise';
+import {wrapSolidComponent} from '@helpers/solid/wrapSolidComponent';
 
 const caption: LangPackKey = 'PrivacySettingsController.ProfilePhoto.CustomHelp';
 
@@ -22,6 +23,9 @@ function buildFallbackSection(tab: SliderSuperTabEventable) {
   let avatarMiddleware: MiddlewareHelper;
   let uploadPreloader: ProgressivePreloader;
   let uploadProgress: CancellablePromise<any>;
+  let fallbackTitle: HTMLDivElement;
+  let removeMedia: HTMLDivElement;
+  let removeRow!: HTMLElement;
 
   const renderRemoveAvatar = (fallback: Photo.photo | undefined) => {
     avatarMiddleware?.destroy();
@@ -54,8 +58,8 @@ function buildFallbackSection(tab: SliderSuperTabEventable) {
     const fallback = (userFull as UserFull.userFull)?.fallback_photo as Photo.photo | undefined;
     const hasFallback = !!fallback;
 
-    removeRow.container.classList.toggle('hide', !hasFallback);
-    fallbackRow.title.replaceChildren(i18n(hasFallback ?
+    removeRow.classList.toggle('hide', !hasFallback);
+    fallbackTitle.replaceChildren(i18n(hasFallback ?
       'PrivacySettingsController.UpdatePublicPhoto' :
       'PrivacySettingsController.SetPublicPhoto'));
 
@@ -64,7 +68,7 @@ function buildFallbackSection(tab: SliderSuperTabEventable) {
 
   const endUploadProgress = () => {
     uploadProgress = undefined;
-    removeRow.container.classList.remove('is-uploading');
+    removeRow.classList.remove('is-uploading');
     uploadPreloader?.detach();
     refreshFallback();
   };
@@ -74,8 +78,8 @@ function buildFallbackSection(tab: SliderSuperTabEventable) {
 
     // Switch the row into "uploading" mode: a progress ring over the avatar slot
     // (overlays the previous photo if any), and a click cancels (onRemoveRowClick).
-    removeRow.container.classList.remove('hide');
-    removeRow.container.classList.add('is-uploading');
+    removeRow.classList.remove('hide');
+    removeRow.classList.add('is-uploading');
 
     uploadPreloader ??= new ProgressivePreloader({isUpload: true, cancelable: false});
     uploadPreloader.attach(removeMedia, true, progress);
@@ -117,31 +121,33 @@ function buildFallbackSection(tab: SliderSuperTabEventable) {
     onRemoveFallbackClick();
   };
 
-  const section = new SettingSection({
-    name: 'PrivacySettingsController.PublicPhoto',
-    caption: 'PrivacySettingsController.PublicPhoto.Help'
-  });
+  const middleware = tab.middlewareHelper.get();
+  const section = wrapSolidComponent(() => (
+    <Section
+      name="PrivacySettingsController.PublicPhoto"
+      caption="PrivacySettingsController.PublicPhoto.Help"
+    >
+      <RowTsx clickable={onSetFallbackClick}>
+        <RowTsx.Icon icon="cameraadd" />
+        <RowTsx.Title ref={fallbackTitle}>
+          {i18n('PrivacySettingsController.SetPublicPhoto')}
+        </RowTsx.Title>
+      </RowTsx>
+      {/* The remove control is a transparent-danger Row whose media is the
+          currently-set public photo (instead of a delete icon). While an upload is
+          running it shows a progress ring in that slot, and a click cancels it. */}
+      <RowTsx
+        ref={(element) => removeRow = element}
+        clickable={onRemoveRowClick}
+        class="danger privacy-public-photo-remove"
+      >
+        <RowTsx.Title>{i18n('PrivacySettingsController.RemovePublicPhoto')}</RowTsx.Title>
+        <RowTsx.Media ref={removeMedia} size="medium" />
+      </RowTsx>
+    </Section>
+  ), middleware);
 
-  const fallbackRow = new Row({
-    icon: 'cameraadd',
-    titleLangKey: 'PrivacySettingsController.SetPublicPhoto',
-    clickable: () => onSetFallbackClick(),
-    listenerSetter: tab.listenerSetter
-  });
-
-  // The remove control is a transparent-danger Row whose media is the
-  // currently-set public photo (instead of a delete icon). While an upload is
-  // running it shows a progress ring in that slot, and a click cancels it.
-  const removeRow = new Row({
-    titleLangKey: 'PrivacySettingsController.RemovePublicPhoto',
-    clickable: () => onRemoveRowClick(),
-    listenerSetter: tab.listenerSetter
-  });
-  removeRow.container.classList.add('danger', 'privacy-public-photo-remove');
-  const removeMedia = removeRow.createMedia('medium');
-
-  section.content.append(fallbackRow.container, removeRow.container);
-  tab.scrollable.append(section.container);
+  tab.scrollable.append(section);
 
   refreshFallback();
   tab.listenerSetter.add(rootScope)('user_full_update', (userId) => {

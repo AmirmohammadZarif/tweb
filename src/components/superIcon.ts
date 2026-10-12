@@ -1,31 +1,41 @@
 import noop from '@helpers/noop';
 import safeAssign from '@helpers/object/safeAssign';
-import {LottieAssetName} from '@lib/rlottie/lottieLoader';
-import RLottieIcon, {RLottieIconItemPartOptions, RLottieIconItemPart} from '@lib/rlottie/rlottieIcon';
-import {RLottieColor} from '@lib/rlottie/rlottiePlayer';
+import {LottieAssetName} from '@lib/lottie/lottieLoader';
+import LottieIcon, {LottieIconItemPartOptions, LottieIconItemPart} from '@lib/lottie/lottieIcon';
+import {LottieColor} from '@lib/lottie/lottiePlayer';
+import liteMode from '@helpers/liteMode';
+import {mixColors} from '@helpers/color';
 
-export type SuperRLottieIconAddItemOptions = {name: LottieAssetName, parts: RLottieIconItemPartOptions};
-export type SuperRLottieIconGetInfoResult = RLottieIconItemPart;
-export class SuperRLottieIcon<Options extends {
+// how many times a colour fade re-tints the icon after its first step
+const COLOR_TRANSITION_STEPS = 4;
+
+export type SuperLottieIconAddItemOptions = {name: LottieAssetName, parts: LottieIconItemPartOptions};
+export type SuperLottieIconGetInfoResult = LottieIconItemPart;
+export class SuperLottieIcon<Options extends {
   PartState: any,
   ColorState?: any,
   Items?: {
     name: string
   }[]
-}> extends RLottieIcon {
-  protected getPart: (state: Options['PartState'], prevState?: Options['PartState']) => SuperRLottieIconGetInfoResult;
-  protected getColor?: (state: Options['ColorState'], prevState?: Options['ColorState']) => RLottieColor;
+}> extends LottieIcon {
+  protected getPart: (state: Options['PartState'], prevState?: Options['PartState']) => SuperLottieIconGetInfoResult;
+  protected getColor?: (state: Options['ColorState'], prevState?: Options['ColorState']) => LottieColor;
 
   protected partState: Options['PartState'];
   protected colorState: Options['ColorState'];
   protected loaded: boolean;
+  // a colour change fades over this long instead of landing in one frame
+  protected colorTransition?: number;
+  private shownColor: LottieColor;
+  private colorTimeout: number;
 
   constructor(options: {
     width: number,
     height: number,
     skipAnimation?: boolean,
-    getPart: (state: Options['PartState'], prevState?: Options['PartState']) => SuperRLottieIconGetInfoResult,
-    getColor?: (state: Options['ColorState'], prevState?: Options['ColorState']) => RLottieColor,
+    getPart: (state: Options['PartState'], prevState?: Options['PartState']) => SuperLottieIconGetInfoResult,
+    getColor?: (state: Options['ColorState'], prevState?: Options['ColorState']) => LottieColor,
+    colorTransition?: number
   }) {
     super({
       width: options.width,
@@ -58,6 +68,7 @@ export class SuperRLottieIcon<Options extends {
     const item = part.item;
     item.initFrame = part.endFrame;
     item.color = color;
+    this.shownColor = color || undefined;
 
     const promises = [...this.items.values()].map((item) => item.load());
     return Promise.all(promises).then(noop);
@@ -105,7 +116,30 @@ export class SuperRLottieIcon<Options extends {
     const item = this.getItem();
     const color = this.getColor(state, prevState);
     const invoke = () => {
-      item.player.setColor(color, renderIfPaused);
+      if(this.colorTimeout !== undefined) {
+        clearTimeout(this.colorTimeout);
+        this.colorTimeout = undefined;
+      }
+
+      const from = this.shownColor;
+      if(!this.colorTransition || !from || !liteMode.isAvailable('animations')) {
+        this.shownColor = color;
+        item.player.setColor(color, renderIfPaused);
+        return;
+      }
+
+      // Re-tinted a few times on the way, not every frame: a paused icon is rendered again by
+      // the lottie worker for each step, a playing one takes the colour of the moment with its
+      // next frame.
+      const start = performance.now();
+      const step = () => {
+        const progress = Math.min(1, (performance.now() - start) / this.colorTransition);
+        const eased = progress * (2 - progress);
+        this.shownColor = mixColors(color, from, eased);
+        item.player.setColor(this.shownColor, true);
+        this.colorTimeout = progress < 1 ? window.setTimeout(step, this.colorTransition / COLOR_TRANSITION_STEPS) : undefined;
+      };
+      step();
     };
 
     if(item.player) {
@@ -118,6 +152,10 @@ export class SuperRLottieIcon<Options extends {
   }
 
   public destroy() {
+    if(this.colorTimeout !== undefined) {
+      clearTimeout(this.colorTimeout);
+    }
+
     this.items.forEach((item) => {
       item.loadPromise.then(() => {
         item.player.remove();

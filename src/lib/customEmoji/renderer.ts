@@ -7,6 +7,7 @@ import findUpClassName from '@helpers/dom/findUpClassName';
 import getViewportSlice from '@helpers/dom/getViewportSlice';
 import replaceContent from '@helpers/dom/replaceContent';
 import framesCache from '@helpers/framesCache';
+import {getHeavyAnimationPromise} from '@hooks/useHeavyAnimationCheck';
 import {MediaSize} from '@helpers/mediaSize';
 import mediaSizes from '@helpers/mediaSizes';
 import liteMode from '@helpers/liteMode';
@@ -15,8 +16,8 @@ import {Middleware, MiddlewareHelper, getMiddleware} from '@helpers/middleware';
 import noop from '@helpers/noop';
 import {DocumentAttribute} from '@layer';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
-import RLottiePlayer, {applyColorOnContext, getLottiePixelRatio} from '@lib/rlottie/rlottiePlayer';
-import SHOULD_RENDER_OFFSCREEN from '@lib/rlottie/shouldRenderOffscreen';
+import LottiePlayer, {applyColorOnContext, getLottiePixelRatio} from '@lib/lottie/lottiePlayer';
+import SHOULD_RENDER_OFFSCREEN from '@lib/lottie/shouldRenderOffscreen';
 import compositorMessagePort, {EmojiCompositorMethods} from '@lib/customEmoji/compositorMessagePort';
 import {ensureCompositor} from '@lib/customEmoji/compositorChannels';
 import rootScope from '@lib/rootScope';
@@ -25,7 +26,7 @@ import assumeType from '@helpers/assumeType';
 import {IS_WEBM_SUPPORTED} from '@environment/videoSupport';
 import {observeResize, unobserveResize} from '@components/resizeObserver';
 import {CUSTOM_EMOJI_FADE_IN_DURATION, CUSTOM_EMOJI_FRAME_INTERVAL, PAID_REACTION_EMOJI_DOCID} from '@lib/customEmoji/constants';
-import lottieLoader from '@lib/rlottie/lottieLoader';
+import lottieLoader from '@lib/lottie/lottieLoader';
 import StickerType from '@config/stickerType';
 import {Accessor, createEffect, createMemo, createRoot, createSignal, Setter} from 'solid-js';
 import readValue from '@helpers/solid/readValue';
@@ -40,11 +41,12 @@ export class CustomEmojiRendererElement extends HTMLElement {
 
   public offscreen: boolean;
   public rendererId: number;
+  private selfRef: WeakRef<CustomEmojiRenderer>; // its own entry in emojiRenderers, and the "am I registered" flag
   public lastSentOffsets: Map<DocId, number[]>;
   private lastSentSize: {width: number, height: number};
   private lastSentSuspended: boolean;
 
-  public playersSynced: Map<CustomEmojiElements, RLottiePlayer | HTMLVideoElement>;
+  public playersSynced: Map<CustomEmojiElements, LottiePlayer | HTMLVideoElement>;
   public textColored: Set<CustomEmojiElements>;
   public clearedElements: WeakSet<CustomEmojiElements>;
   public customEmojis: Parameters<typeof wrapRichText>[1]['customEmojis'];
@@ -63,9 +65,19 @@ export class CustomEmojiRendererElement extends HTMLElement {
 
   public forceRenderAfterSize: boolean;
 
+  // * the size a heavy animation asked for while it was running, whether it is already being waited
+  // * out, and whether the canvas is being held at the size its pixels are for - see `onResizeEntry`
+  private pendingRect: {width: number, height: number};
+  private pass: {removed: boolean, added: Set<DocId>, emptied: Map<DocId, CustomEmojiElements>};
+  private hold: {groups: Set<DocId>, timeout: number};
+  private takeOffTimeout: number;
+  private awaitsHeavyAnimation: boolean;
+  private pinnedCanvasSize: boolean;
+
   public middlewareHelper: MiddlewareHelper;
 
   public auto: boolean;
+  public destroyed: boolean;
   public textColor: Accessor<CustomProperty>;
   private _textColor: Accessor<CustomProperty>;
   private _setTextColor: Setter<CustomProperty>;
@@ -108,41 +120,157 @@ export class CustomEmojiRendererElement extends HTMLElement {
   }
 
   private onResizeEntry = (entry: ResizeObserverEntry) => {
-    this.setDimensionsFromRect(entry.contentRect);
+    // * A box of no size is not one to draw at no size: it is not laid out at all - the tab it is in
+    // * is hidden (`display: none`, settings opened over the chat list), or it is out of the
+    // * document. Taking that size would wipe the canvas, and the box comes back at the very size
+    // * it left with, so the canvas is left alone and the emoji are there the moment it is shown.
+    if(!hasSize(entry.contentRect)) {
+      return;
+    }
+
+    // * Taking a new size wipes the canvas, and while a heavy animation runs the emoji are paused -
+    // * nothing would draw it again until the animation is over, so the emoji would blink out for
+    // * its whole length, wherever an animation resizes what they are drawn in. So the pixels are
+    // * kept, the size is remembered, and it is taken once the animation ends - by then it has
+    // * settled, which also makes it one resize instead of one per frame. A renderer that has
+    // * nothing drawn yet has nothing to lose and is sized right away.
+    const heavyAnimation = getHeavyAnimationPromise();
+    const hasSomethingDrawn = this.isDimensionsSet && (this.offscreen || !this.isCanvasClean);
+    if(heavyAnimation.isFulfilled || !hasSomethingDrawn) {
+      this.setDimensionsFromRect(entry.contentRect);
+      return;
+    }
+
+    // * What is on the canvas was drawn for the size it had, so the box it is stretched over has to
+    // * be held at that size too - otherwise the picture is squashed for the length of the
+    // * animation instead of disappearing for it. When the renderer watches something else, the
+    // * canvas is laid out by its own style, which this is not updating either - so it holds itself.
+    // * An offscreen canvas is never stretched (`showsCommittedSize`), so it has nothing to hold.
+    if(this.observeResizeElement === undefined && !this.showsCommittedSize()) {
+      this.pinCanvasSize();
+    } else {
+      this.pendingRect = entry.contentRect;
+    }
+
+    if(this.awaitsHeavyAnimation) {
+      return;
+    }
+
+    this.awaitsHeavyAnimation = true;
+    heavyAnimation.then(() => {
+      this.awaitsHeavyAnimation = undefined;
+      const rect = this.pendingRect;
+      this.pendingRect = undefined;
+      if(this.destroyed) {
+        return;
+      }
+
+      // the new size comes up empty, so it is drawn again at once instead of on the next tick
+      this.forceRenderAfterSize = true;
+      if(rect) {
+        this.setDimensionsFromRect(rect);
+      } else {
+        // * letting the box go puts the canvas back under the layout. Its new size is taken in the
+        // * same frame rather than left to the resize that follows, or the picture would be
+        // * stretched over the new box for exactly one frame. `offsetWidth` is the laid out size,
+        // * which is what the observer reports as well - unlike a rect, no transform is in it
+        this.unpinCanvasSize();
+        const {canvas} = this;
+        const size = {width: canvas.offsetWidth, height: canvas.offsetHeight};
+        if(hasSize(size)) {
+          this.setDimensionsFromRect(size);
+        }
+      }
+    });
   };
 
+  /**
+   * An offscreen canvas laid out by its own style is shown at the size of the picture the compositor
+   * last committed to it, from the corner the offsets are measured from - not stretched over the
+   * renderer's box. That box changes a frame before the compositor draws for it, and every frame of
+   * a box that grows (a details opening, a quote expanding) would scale the picture over it, the
+   * emoji riding up and down with that. So the renderer's own box is what is watched then.
+   */
+  private showsCommittedSize() {
+    return this.offscreen && this.observeResizeElement === undefined;
+  }
+
+  private getObservedElement() {
+    return this.observeResizeElement ?? (this.showsCommittedSize() ? this : this.canvas);
+  }
+
+  /** Holds the canvas at the size the picture on it was drawn for, so nothing stretches it */
+  private pinCanvasSize() {
+    const rect = this.lastRect;
+    if(this.pinnedCanvasSize || !rect) {
+      return;
+    }
+
+    this.pinnedCanvasSize = true;
+    this.setCanvasCssSize(rect.width, rect.height);
+  }
+
+  /** Lays the canvas out at this size whatever its own style says */
+  private setCanvasCssSize(width: number, height: number) {
+    this.canvas.style.setProperty('width', width + 'px', 'important');
+    this.canvas.style.setProperty('height', height + 'px', 'important');
+  }
+
+  private unpinCanvasSize() {
+    if(!this.pinnedCanvasSize) {
+      return;
+    }
+
+    this.pinnedCanvasSize = undefined;
+    this.canvas.style.removeProperty('width');
+    this.canvas.style.removeProperty('height');
+  }
+
   public connectedCallback() {
-    if(emojiRenderers.has(this)) {
+    // * Custom element reactions are read off the prototype once, when customElements.define runs, so
+    // * assigning to this.connectedCallback never stopped the browser from calling it again. A renderer
+    // * that got destroyed and then re-inserted used to re-register here with its destroy() already
+    // * nulled out, which left it in emojiRenderers with no way to ever be reclaimed - keep it out.
+    if(this.destroyed || this.selfRef) {
       return;
     }
 
     // this.setDimensions();
     // animationIntersector.addAnimation(this, this.animationGroup);
-    const observeElement = this.observeResizeElement ?? this.canvas;
+    const observeElement = this.getObservedElement();
     if(observeElement) {
       observeResize(observeElement, this.onResizeEntry);
     }
-    emojiRenderers.add(this);
-
-    this.connectedCallback = undefined;
+    const ref = this.selfRef = new WeakRef(this);
+    emojiRenderers.add(ref);
+    collectedRenderers.register(this, () => emojiRenderers.delete(ref), this);
   }
 
   public disconnectedCallback() {
-    if(this.isConnected || !this.auto) {
+    if(this.isConnected || this.destroyed) {
       return;
     }
 
-    this.destroy?.();
-
-    this.disconnectedCallback = undefined;
+    // * Not auto: the lifetime is delegated to the owner's middleware (see create). Deliberately no
+    // * fallback here - a renderer can be legitimately detached and kept for re-insertion (the chat
+    // * list unmounts rows out of the virtual window and re-mounts them on scroll back), and there is
+    // * no way from here to tell that apart from an owner that was dropped without cleaning. The
+    // * owner has to release it; see SortedDialogList's onItemDiscard.
+    if(this.auto) {
+      this.destroy();
+    }
   }
 
   public destroy() {
-    // if(this.isConnected) {
-    //   return;
-    // }
+    // * Idempotent: the owner's middleware onDestroy and an explicit destroy() can both land here,
+    // * and clean() below re-enters through that same onDestroy
+    if(this.destroyed) {
+      return;
+    }
 
-    const observeElement = this.observeResizeElement ?? this.canvas;
+    this.destroyed = true;
+
+    const observeElement = this.getObservedElement();
     if(observeElement) {
       unobserveResize(observeElement, this.onResizeEntry);
     }
@@ -158,15 +286,24 @@ export class CustomEmojiRendererElement extends HTMLElement {
       offscreenRenderers.delete(this.rendererId);
     }
 
-    emojiRenderers.delete(this);
+    if(this.selfRef) {
+      emojiRenderers.delete(this.selfRef);
+      this.selfRef = undefined;
+    }
+
+    collectedRenderers.unregister(this); // off both registries already - do not let a finalizer re-run
+    clearTimeout(this.takeOffTimeout);
+    if(this.hold) {
+      clearTimeout(this.hold.timeout);
+      this.hold = undefined;
+    }
+
     this.playersSynced.clear();
     this.middlewareHelper?.clean();
     this.customEmojis.clear();
     this.textColored.clear();
 
-    this.destroy =
-      this.lastPausedVideo =
-      undefined;
+    this.lastPausedVideo = undefined;
   }
 
   public getOffsets(offsetsMap: Map<CustomEmojiElements, {top: number, left: number, width: number}[]> = new Map()) {
@@ -188,7 +325,7 @@ export class CustomEmojiRendererElement extends HTMLElement {
       const {visible} = getViewportSlice({
         overflowElement,
         overflowRect,
-        elements: placeholders.filter(el => !(el instanceof CustomEmojiElement) || !el.syncedPlayer?.pausedElements?.has(el)),
+        elements: placeholders.filter((el) => !isHeldStill(el)),
         extraSize: this.size.height * 2.5 // let's add some margin
       });
 
@@ -309,6 +446,38 @@ export class CustomEmojiRendererElement extends HTMLElement {
       this.lastSentSuspended = suspended;
       this.sendCompositor('suspendRenderer', {suspended});
     }
+  }
+
+  /**
+   * Whether the renderer is laid out right now - not in a tab hidden with `display: none`, not out
+   * of the document. One that is not has nowhere to measure its emoji at, so it is left as it is.
+   */
+  public hasLayout() {
+    return !!this.canvas.getClientRects().length;
+  }
+
+  /**
+   * Whether every emoji it draws is held still - in the sense `getOffsets` leaves an element out
+   * for, so a static emoji (no synced player) is never among them. Such a renderer has nothing new
+   * to draw, and none of its emoji has gone anywhere either.
+   */
+  public isEveryElementHeldStill() {
+    if(this.isSelectable) { // * `getOffsets` measures the placeholders then, which are never held
+      return false;
+    }
+
+    let any = false;
+    for(const elements of this.playersSynced.keys()) {
+      for(const element of elements) {
+        if(!isHeldStill(element)) {
+          return false;
+        }
+
+        any = true;
+      }
+    }
+
+    return any;
   }
 
   public clearCanvas() {
@@ -487,19 +656,23 @@ export class CustomEmojiRendererElement extends HTMLElement {
     }
   }
 
-  public checkForAnyFrame() {
+  private hasFrame(player: LottiePlayer | HTMLVideoElement) {
     if(this.offscreen) { // frames never land UI-side - the player tracks its first ack
-      for(const player of this.playersSynced.values()) {
-        if(player instanceof RLottiePlayer && player.offscreen === 'emoji' && player.hasRenderedFirstFrame) {
-          return true;
-        }
-      }
-
-      return false;
+      return player instanceof LottiePlayer && player.offscreen === 'emoji' && player.hasRenderedFirstFrame;
     }
 
+    return syncedPlayersFrames.has(player) || player instanceof HTMLVideoElement;
+  }
+
+  /** Whether a group is on the canvas: its placeholders cleared for a player that has a frame. */
+  public isGroupDrawn(elements: CustomEmojiElements) {
+    const player = this.playersSynced.get(elements);
+    return this.clearedElements.has(elements) && !!player && this.hasFrame(player);
+  }
+
+  public checkForAnyFrame() {
     for(const player of this.playersSynced.values()) {
-      if(syncedPlayersFrames.has(player) || player instanceof HTMLVideoElement) {
+      if(this.hasFrame(player)) {
         return true;
       }
     }
@@ -563,8 +736,7 @@ export class CustomEmojiRendererElement extends HTMLElement {
     this.isCanvasClean = true;
 
     if(this.observeResizeElement || this.observeResizeElement === false) {
-      this.canvas.style.setProperty('width', width + 'px', 'important');
-      this.canvas.style.setProperty('height', height + 'px', 'important');
+      this.setCanvasCssSize(width, height);
     }
 
     if(this.forceRenderAfterSize || (this.isSelectable && forceRenderAfter)) {
@@ -578,7 +750,7 @@ export class CustomEmojiRendererElement extends HTMLElement {
       return;
     }
 
-    if(!renderEmojis(new Set([this]))) {
+    if(!renderEmojis([this])) {
       if(this.offscreen) {
         this.sendCompositor('clearRenderer');
       } else {
@@ -586,6 +758,137 @@ export class CustomEmojiRendererElement extends HTMLElement {
       }
     }
   }
+
+  // * What the canvas draws changes in passes: a text drawn anew takes its emoji off and puts others
+  // * on in one go, and what a pass did is looked at once it is over
+  private getPass() {
+    if(!this.pass) {
+      this.pass = {removed: false, added: new Set(), emptied: new Map()};
+      queueMicrotask(this.endPass);
+    }
+
+    return this.pass;
+  }
+
+  public onElementCleared(docId: DocId, elements: CustomEmojiElements) {
+    if(this.destroyed) {
+      return;
+    }
+
+    const pass = this.getPass();
+    pass.removed = true;
+    if(!elements.size) {
+      pass.emptied.set(docId, elements);
+    }
+  }
+
+  private onGroupAdded(docId: DocId) {
+    if(!this.isSelectable) {
+      this.getPass().added.add(docId);
+    }
+  }
+
+  private endPass = () => {
+    const {removed, added, emptied} = this.pass;
+    this.pass = undefined;
+    if(this.destroyed) {
+      return;
+    }
+
+    // * The last emoji of a document gone is often gone for another of the same emoji drawn in the same
+    // * pass: a piece moved to another square of a board, every square a text of its own. The group is
+    // * kept till here, so that one joins it and is drawn on the next frame, in the frame that takes the
+    // * old one off, instead of loading anew from its placeholder with the square left empty in between
+    emptied.forEach((elements, docId) => {
+      if(!elements.size && this.customEmojis.get(docId) === elements) {
+        this.customEmojis.delete(docId);
+        this.textColored.delete(elements);
+        this.playersSynced.delete(elements);
+      }
+    });
+
+    // * Emoji taken off and emoji the canvas has not drawn yet put on: one thing replaced with another
+    // * (a piece picked up, drawn as another emoji). The new ones would load from their placeholders,
+    // * with the old ones taken off before - so the canvas keeps what it shows until they can be drawn,
+    // * and then changes all of it in one frame
+    const groups = removed && this.isShowingPicture() ? [...added].filter((docId) => this.customEmojis.has(docId)) : [];
+    if(groups.length) {
+      this.hold ??= {groups: new Set(), timeout: window.setTimeout(this.endHold, PASS_HOLD_TIMEOUT)};
+      groups.forEach((docId) => this.hold.groups.add(docId));
+    }
+
+    if(!this.hold) {
+      this.scheduleTakeOffGoneGroups();
+    }
+  };
+
+  private isShowingPicture() {
+    return this.offscreen ? !!this.lastSentOffsets.size : !this.isCanvasClean;
+  }
+
+  /** Whether a group that came in a pass is waited for (wrap: drawn without a placeholder or a fade) */
+  public isHeld(docId: DocId) {
+    return !!this.hold?.groups.has(docId);
+  }
+
+  public unhold(docId: DocId) {
+    this.hold?.groups.delete(docId);
+  }
+
+  /** Whether the canvas still keeps its picture for groups that are loading (asked by the tick) */
+  public isHolding() {
+    if(!this.hold) {
+      return false;
+    }
+
+    for(const docId of this.hold.groups) {
+      const elements = this.customEmojis.get(docId);
+      const player = elements && this.playersSynced.get(elements);
+      if(elements && !(player && this.hasFrame(player))) {
+        return true;
+      }
+    }
+
+    clearTimeout(this.hold.timeout);
+    this.hold = undefined;
+    return false; // * the tick goes on and sends all of it in one message
+  }
+
+  private endHold = () => {
+    this.hold = undefined;
+    this.scheduleTakeOffGoneGroups();
+  };
+
+  // * A group gone is taken off by the next tick, in the message that draws what came instead - taken
+  // * off before, that place stayed empty for a frame. Whatever the tick has not taken off by then is
+  // * taken off here: it skips a canvas left with nothing to draw, and the emoji stayed painted over
+  // * whatever text took its place (a quote edited from one that starts with an icon into one without it)
+  private scheduleTakeOffGoneGroups() {
+    clearTimeout(this.takeOffTimeout);
+    this.takeOffTimeout = window.setTimeout(this.takeOffGoneGroups, CUSTOM_EMOJI_FRAME_INTERVAL * 2);
+  }
+
+  private takeOffGoneGroups = () => {
+    if(this.destroyed) {
+      return;
+    }
+
+    if(this.offscreen) {
+      const groups: {groupId: DocId, offsets: number[]}[] = [];
+      for(const groupId of this.lastSentOffsets.keys()) {
+        if(!this.customEmojis.has(groupId)) {
+          this.lastSentOffsets.delete(groupId);
+          groups.push({groupId, offsets: []});
+        }
+      }
+
+      if(groups.length) {
+        compositorMessagePort.invokeCompositorVoid('setOffsets', {batch: [{rendererId: this.rendererId, groups}]});
+      }
+    } else if(!this.playersSynced.size) {
+      this.clearCanvas();
+    }
+  };
 
   private onElementCleanup = (element: CustomEmojiElement, syncedPlayer: SyncedPlayer, middleware: Middleware) => {
     element.clear(); // * it is correct
@@ -597,7 +900,25 @@ export class CustomEmojiRendererElement extends HTMLElement {
       return;
     }
 
+    // * The last element of a player is often gone for another of the same emoji: a text drawn anew -
+    // * a board's piece moved to another square, a message edited. Torn down at once, the player
+    // * would be loaded again for the new one and faded in from nothing, so it is given a moment to be
+    // * taken over first (`wrap` finds it in `syncedPlayers` and joins it).
+    const {docId} = element;
+    setTimeout(() => this.releaseSyncedPlayer(syncedPlayer, docId), SYNCED_PLAYER_RELEASE_DELAY);
+  };
+
+  private releaseSyncedPlayer(syncedPlayer: SyncedPlayer, docId: DocId) {
+    if(syncedPlayer.middlewares.size) {
+      return;
+    }
+
     if(syncedPlayer.player) {
+      // * a group left with it (cleared and added again in one go) is not drawn by it any more
+      this.playersSynced.forEach((player, elements) => {
+        if(player === syncedPlayer.player) this.playersSynced.delete(elements);
+      });
+
       const frame = syncedPlayersFrames.get(syncedPlayer.player);
       if(frame) {
         (frame as ImageBitmap).close?.();
@@ -605,15 +926,15 @@ export class CustomEmojiRendererElement extends HTMLElement {
       }
 
       syncedPlayersFrames.delete(syncedPlayer.player);
-      if(syncedPlayer.player instanceof RLottiePlayer) {
+      if(syncedPlayer.player instanceof LottiePlayer) {
         if(this.offscreen) {
-          this.sendCompositor('detachGroup', {groupId: element.docId});
+          compositorMessagePort.invokeCompositorVoid('detachPlayer', {playerReqId: syncedPlayer.player.reqId});
         }
 
         syncedPlayer.player.overrideRender = noop;
         syncedPlayer.player.remove();
       } else if(syncedPlayer.player instanceof HTMLVideoElement) {
-        const cacheName = framesCache.generateName('' + element.docId, 0, 0, undefined, undefined);
+        const cacheName = framesCache.generateName('' + docId, 0, 0, undefined, undefined);
         delete videosCache[cacheName];
       }
 
@@ -627,7 +948,7 @@ export class CustomEmojiRendererElement extends HTMLElement {
     ) {
       clearRenderInterval();
     }
-  };
+  }
 
   private async wrapPaidReactionEmoji(element: CustomEmojiElement): ReturnType<typeof wrapSticker> {
     const size = this.size;
@@ -707,6 +1028,17 @@ export class CustomEmojiRendererElement extends HTMLElement {
       (stickerType === StickerType.Static || onlyThumb || isStatic || !isAlreadyAvailable) &&
       liteMode.isAvailable('emoji_appear');
 
+    // * Joining a group that is drawn already (see add), or one waited for in place of what it replaces
+    // * (endPass): no placeholder, and drawn at once, with no fade. A thumbnail alone is never drawn
+    // * by the group, and a group whose player is gone draws nothing
+    const joinsDrawnGroup = !onlyThumb && renderer.isGroupDrawn(customEmojis);
+    const held = willHaveSyncedPlayer && renderer.isHeld(docId);
+    if(!willHaveSyncedPlayer) {
+      renderer.unhold(docId); // * drawn by the page, not by the canvas
+    } else if(held) {
+      elementsFadeInStartTimes.set(customEmojis, 0);
+    }
+
     const _loadPromises: Promise<any>[] = [];
     const promise = isPaidReactionEmoji ? this.wrapPaidReactionEmoji(newElementsArray[0]) : wrapSticker({
       div: newElementsArray,
@@ -725,7 +1057,7 @@ export class CustomEmojiRendererElement extends HTMLElement {
       loadStickerMiddleware,
       static: isStatic,
       onlyThumb,
-      withThumb: withThumb ?? (renderer.clearedElements.has(customEmojis) ? false : undefined),
+      withThumb: withThumb ?? (joinsDrawnGroup || held ? false : undefined),
       syncedVideo: this.isSelectable,
       textColor: renderer.textColor,
       keepThumb: willDomFade,
@@ -796,15 +1128,26 @@ export class CustomEmojiRendererElement extends HTMLElement {
           return;
         }
 
-        const players = Array.isArray(_p) ? _p as HTMLVideoElement[] : [_p as RLottiePlayer];
+        const players = Array.isArray(_p) ? _p as HTMLVideoElement[] : [_p as LottiePlayer];
         const player = Array.isArray(players) ? players[0] : players;
-        assumeType<RLottiePlayer | HTMLVideoElement>(player);
+        assumeType<LottiePlayer | HTMLVideoElement>(player);
         newElementsArray.forEach((element, idx) => {
+          if(element.clean) { // * gone while it loaded: the text it was in was drawn anew without it
+            return;
+          }
+
           const player = players[idx] || players[0];
           element.player = player;
 
           if(syncedPlayer) {
             element.syncedPlayer = syncedPlayer;
+            // * it plays with its group: held still until IntersectionObserver first speaks for it, it
+            // * would be left off the canvas with nothing under it, and the group taken for gone and
+            // * faded in anew - the observer pauses it if it is out of view after all
+            if(joinsDrawnGroup || held) {
+              element.paused = false;
+            }
+
             if(element.paused) {
               element.syncedPlayer.pausedElements.add(element);
             } else if(player.paused) {
@@ -823,12 +1166,20 @@ export class CustomEmojiRendererElement extends HTMLElement {
           }
         });
 
-        if(player instanceof RLottiePlayer || (player instanceof HTMLVideoElement && this.isSelectable)) {
+        if(player instanceof LottiePlayer || (player instanceof HTMLVideoElement && this.isSelectable)) {
           syncedPlayer.player = player;
+
+          // * all of them are gone (deleteGroup): nothing to draw, and the player goes too unless
+          // * the emoji is still shown somewhere else
+          if(renderer.customEmojis.get(docId) !== customEmojis) {
+            this.releaseSyncedPlayer(syncedPlayer, docId);
+            return;
+          }
+
           renderer.playersSynced.set(customEmojis, player);
         }
 
-        if(player instanceof RLottiePlayer) {
+        if(player instanceof LottiePlayer) {
           player.group = renderer.animationGroup;
 
           if(renderer.offscreen && player.offscreen === 'emoji') {
@@ -841,7 +1192,7 @@ export class CustomEmojiRendererElement extends HTMLElement {
               groupId: docId,
               playerReqId: player.reqId,
               textColored: renderer.textColored.has(customEmojis),
-              skipFade: hasRasterThumbPlaceholder(customEmojis) // same DOM read the legacy fade does
+              skipFade: held || hasRasterThumbPlaceholder(customEmojis) // same DOM read the legacy fade does
             });
           } else {
             if(renderer.offscreen) {
@@ -918,7 +1269,7 @@ export class CustomEmojiRendererElement extends HTMLElement {
 
     let syncedPlayer: SyncedPlayer;
     // the delivery mode is part of the key: a legacy (isSelectable) renderer and an offscreen one
-    // must NOT share a SyncedPlayer - the loader segregates them into two RLottiePlayers, and a
+    // must NOT share a SyncedPlayer - the loader segregates them into two LottiePlayers, and a
     // shared entry would cross-couple the pause refcounts and leak whichever player onRender
     // assigned first (sync players have no other removal path)
     const key = [docId, size.width, size.height, +!!this.offscreen].join('-');
@@ -961,8 +1312,14 @@ export class CustomEmojiRendererElement extends HTMLElement {
 
     addCustomEmojis.forEach((addElements, docId) => { // prevent adding old elements
       let elements = this.customEmojis.get(docId);
-      if(!elements) this.customEmojis.set(docId, elements = new Set());
-      else this.clearedElements.delete(elements);
+      if(!elements) {
+        this.customEmojis.set(docId, elements = new Set());
+        this.onGroupAdded(docId);
+      }
+      // * One joining a group that is drawn already is drawn with it on the next frame, so it gets no
+      // * placeholder (wrap leaves the thumb out of a cleared group): one under the canvas until it is
+      // * painted showed through it for a frame or two - a translucent emoji darkened, a thin one bold
+      else if(this.isSelectable) this.clearedElements.delete(elements);
 
       for(const el of addElements) {
         if(elements.has(el)) {
@@ -1076,7 +1433,8 @@ export class CustomEmojiRendererElement extends HTMLElement {
       if(lazyLoadQueue) {
         lazyLoadQueue.push({
           div: renderer.canvas,
-          load
+          load,
+          middleware
         });
       } else {
         load();
@@ -1103,7 +1461,9 @@ export class CustomEmojiRendererElement extends HTMLElement {
     renderer.offscreen = SHOULD_RENDER_OFFSCREEN && !options.isSelectable;
     if(renderer.offscreen) {
       renderer.rendererId = ++nextRendererId;
-      offscreenRenderers.set(renderer.rendererId, renderer);
+      const rendererId = renderer.rendererId;
+      offscreenRenderers.set(rendererId, new WeakRef(renderer));
+      collectedRenderers.register(renderer, () => offscreenRenderers.delete(rendererId), renderer);
       const dpr = renderer.canvas.dpr = getLottiePixelRatio(renderer.size.width, renderer.size.height);
       ensureCompositor();
       renderer.canvas.dataset.offscreen = '1';
@@ -1116,6 +1476,11 @@ export class CustomEmojiRendererElement extends HTMLElement {
     }
     [renderer._textColor, renderer._setTextColor] = createSignal();
     renderer.observeResizeElement = options.observeResizeElement;
+    if(renderer.showsCommittedSize()) {
+      renderer.classList.add('custom-emoji-renderer-committed-size');
+      renderer.canvas.classList.add('custom-emoji-canvas-committed-size');
+      renderer.canvas.style.setProperty('--dpr', '' + renderer.canvas.dpr);
+    }
     renderer.renderNonSticker = options.renderNonSticker;
     if(options.wrappingDraft) {
       renderer.contentEditable = 'false';
@@ -1156,12 +1521,12 @@ export class CustomEmojiRendererElement extends HTMLElement {
 
 export type CustomEmojiRenderer = CustomEmojiRendererElement;
 export type SyncedPlayer = {
-  player: RLottiePlayer | HTMLVideoElement,
+  player: LottiePlayer | HTMLVideoElement,
   middlewares: Set<Middleware>,
   pausedElements: Set<CustomEmojiElement>,
   key: string
 };
-export type CustomEmojiFrame = Parameters<RLottiePlayer['overrideRender']>[0] | HTMLVideoElement;
+export type CustomEmojiFrame = Parameters<LottiePlayer['overrideRender']>[0] | HTMLVideoElement;
 
 export type CustomEmojiRendererElementOptions = Partial<{
   loadPromises: Promise<any>[],
@@ -1175,6 +1540,20 @@ export type CustomEmojiRendererElementOptions = Partial<{
 }> & WrapSomethingOptions;
 
 const CUSTOM_EMOJI_INSTANT_PLAY = true; // do not wait for animationIntersector
+
+// how long a player with no elements left waits for one of the same emoji (see onElementCleanup)
+const SYNCED_PLAYER_RELEASE_DELAY = 1000;
+// how long a canvas keeps its picture for emoji that replace some of it (see endPass): one drawn
+// already loads in a few frames, one never shown before has its file to get first
+const PASS_HOLD_TIMEOUT = 1000;
+
+/** Whether an element is kept out of what is drawn anew: paused, while its synced player plays on */
+const isHeldStill = (element: HTMLElement) => {
+  return element instanceof CustomEmojiElement && !!element.syncedPlayer?.pausedElements?.has(element);
+};
+
+/** Whether a box is laid out at all: one hidden with `display: none` measures as no size */
+const hasSize = (size: {width: number, height: number}) => !!(size.width && size.height);
 
 const isAnyElementVisible = (elements: CustomEmojiElements) => {
   for(const element of elements) {
@@ -1191,19 +1570,53 @@ const hasRasterThumbPlaceholder = (elements: CustomEmojiElements) => {
 };
 
 let emojiRenderInterval: number;
-const emojiRenderers: Set<CustomEmojiRenderer> = new Set();
+
+// * These registries must NOT own renderers. A renderer whose owner dropped it without calling
+// * destroy() used to sit here for the tab's lifetime, holding its canvas, its custom-emoji map and
+// * its players - a heap snapshot of a day-old tab charged 9 211 detached nodes to this set. The
+// * tracked object IS the element, so a weak ref is enough: whoever legitimately keeps it - the DOM,
+// * or an owner holding a detached renderer to re-insert later - stays its only owner, and one that
+// * was dropped for good is collected and swept from here.
+const emojiRenderers: Set<WeakRef<CustomEmojiRenderer>> = new Set();
+const collectedRenderers = new FinalizationRegistry<() => void>((release) => release());
+
+// * Deref + prune in one pass; never holds a strong ref longer than the caller's loop
+const liveEmojiRenderers = () => {
+  const live: CustomEmojiRenderer[] = [];
+  for(const ref of emojiRenderers) {
+    const renderer = ref.deref();
+    if(!renderer) {
+      emojiRenderers.delete(ref);
+      continue;
+    }
+
+    live.push(renderer);
+  }
+
+  return live;
+};
 const syncedPlayers: Map<string, SyncedPlayer> = new Map();
-const syncedPlayersFrames: Map<RLottiePlayer | HTMLVideoElement, CustomEmojiFrame> = new Map();
+const syncedPlayersFrames: Map<LottiePlayer | HTMLVideoElement, CustomEmojiFrame> = new Map();
 const elementsFadeInStartTimes: WeakMap<CustomEmojiElements, number> = new WeakMap();
 
 let nextRendererId = 0;
-const offscreenRenderers: Map<number, CustomEmojiRendererElement> = new Map();
+const offscreenRenderers: Map<number, WeakRef<CustomEmojiRendererElement>> = new Map();
+
+const getOffscreenRenderer = (rendererId: number) => {
+  const ref = offscreenRenderers.get(rendererId);
+  const renderer = ref?.deref();
+  if(ref && !renderer) {
+    offscreenRenderers.delete(rendererId);
+  }
+
+  return renderer;
+};
 
 // Placeholder-clear parity with the legacy render() path: clear the layout children once
 // the compositor reports the group is fully faded in (fired immediately when the fade was
 // skipped/disabled), so the thumb never lingers past the moment the canvas fully covers it.
 compositorMessagePort.addEventListener('groupPainted', ({rendererId, groupId}) => {
-  const renderer = offscreenRenderers.get(rendererId);
+  const renderer = getOffscreenRenderer(rendererId);
   const elements = renderer?.customEmojis.get(groupId);
   if(!elements || !renderer.isConnected || renderer.clearedElements.has(elements)) {
     return;
@@ -1214,8 +1627,9 @@ compositorMessagePort.addEventListener('groupPainted', ({rendererId, groupId}) =
 
 // CSS-var resolution is not reactive to theme swaps - re-resolve and re-ship the color.
 rootScope.addEventListener('theme_changed', () => {
-  for(const renderer of offscreenRenderers.values()) {
-    const property = renderer.textColor();
+  for(const rendererId of Array.from(offscreenRenderers.keys())) {
+    const renderer = getOffscreenRenderer(rendererId);
+    const property = renderer?.textColor();
     if(!property) {
       continue;
     }
@@ -1226,9 +1640,8 @@ rootScope.addEventListener('theme_changed', () => {
   }
 });
 
-export const renderEmojis = (renderers = emojiRenderers) => {
-  const r = Array.from(renderers);
-  const t = r.filter((r) => r.isConnected && r.checkForAnyFrame() && !r.ignoreSettingDimensions);
+export const renderEmojis = (renderers: CustomEmojiRenderer[] = liveEmojiRenderers()) => {
+  const t = renderers.filter((r) => r.isConnected && r.checkForAnyFrame() && !r.ignoreSettingDimensions);
   if(!t.length) {
     return false;
   }
@@ -1236,6 +1649,10 @@ export const renderEmojis = (renderers = emojiRenderers) => {
   const legacy: [CustomEmojiRendererElement, ReturnType<CustomEmojiRendererElement['getOffsets']>][] = [];
   const batch: {rendererId: number, groups: {groupId: DocId, offsets: number[]}[]}[] = [];
   for(const renderer of t) {
+    if(renderer.isHolding()) {
+      continue; // * keeps its picture (endPass)
+    }
+
     if(renderer.offscreen) {
       renderer.updateSuspended();
     }
@@ -1243,6 +1660,17 @@ export const renderEmojis = (renderers = emojiRenderers) => {
     const paused = [...renderer.playersSynced.values()].reduce((acc, v) => acc + +!!v.paused, 0);
     if(renderer.playersSynced.size === paused) {
       continue; // all paused: no offsets sent, no arrivals, pixels frozen - matches today
+    }
+
+    // * Frozen as well: a renderer whose every emoji is held still, and one that is not laid out
+    // * (its tab is hidden, settings opened over the chat list). The first, coming back into view,
+    // * is still held until the animation that brings it back is over, while IntersectionObserver
+    // * still says it is out of view; the second measures every emoji as a box of no size at the
+    // * corner - either way the emoji would be taken for gone, taken off the canvas and faded in
+    // * anew once they are drawn again, instead of being there all along. The flags are asked
+    // * first: they cost nothing, while the layout is a read of it
+    if(renderer.isEveryElementHeldStill() || !renderer.hasLayout()) {
+      continue;
     }
 
     const offsets = renderer.getOffsets(); // the layout reads stay UI-side

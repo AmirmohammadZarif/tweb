@@ -324,6 +324,11 @@
     --multiplier: .642857;
   }
 
+  &-80 {
+    --size: 80px;
+    --multiplier: .675;
+  }
+
   &-75 {
     --size: 75px;
     --multiplier: .72;
@@ -468,5 +473,4 @@
   object-fit: cover;
   border-radius: inherit;
   pointer-events: none;
-  z-index: 1;
 }

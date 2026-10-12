@@ -1,4 +1,4 @@
-import {Component, onMount} from 'solid-js';
+import {Component, createResource, onMount} from 'solid-js';
 import assumeType from '@helpers/assumeType';
 import createContextMenu from '@helpers/dom/createContextMenu';
 import positionElementByIndex from '@helpers/dom/positionElementByIndex';
@@ -8,44 +8,41 @@ import {StickerSet, MessagesAllStickers} from '@layer';
 import {i18n, LangPackKey} from '@lib/langPack';
 import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
 import rootScope from '@lib/rootScope';
-import CheckboxField from '@components/checkboxField';
+import CheckboxFieldTsx from '@components/checkboxFieldTsx';
 import LazyLoadQueue from '@components/lazyLoadQueue';
 import showStickersPopup from '@components/popups/stickers';
-import Row from '@components/row';
-import SettingSection from '@components/settingSection';
+import Row from '@components/rowTsx';
+import Section, {appendSectionContent} from '@components/section';
 import wrapStickerSetThumb from '@components/wrappers/stickerSetThumb';
-import wrapStickerToRow from '@components/wrappers/stickerToRow';
+import ReactionStickerPreview from '@components/reactionStickerPreview';
 import {AppQuickReactionTab} from '@components/solidJsTabs/tabs';
 import {useAppSettings} from '@stores/appSettings';
 import {getStickerSetInputById} from '@lib/appManagers/utils/stickers/getStickerSetInput';
 import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
 import {usePromiseCollector} from '@components/solidJsTabs/promiseCollector';
+import {IconTsx} from '@components/iconTsx';
+import {mountSolidComponent, unwrapSolidElement} from '@helpers/solid/wrapSolidComponent';
 
 const StickersAndEmoji: Component = () => {
   const [tab] = useSuperTab();
   const [appSettings, setAppSettings] = useAppSettings();
   const promiseCollector = usePromiseCollector();
+  const [quickReactionDoc, {refetch: refetchQuickReaction}] = createResource(async() => {
+    const reaction = await tab.managers.appReactionsManager.getQuickReaction();
+    return reaction._ === 'availableReaction' ?
+      reaction.static_icon :
+      tab.managers.appEmojiManager.getCustomEmojiDocument(reaction.document_id);
+  });
 
   onMount(() => {
     tab.container.classList.add('stickers-emoji-container');
 
-    let p = {
-      allStickers: tab.managers.appStickersManager.getAllStickers(),
-      quickReaction: tab.managers.appReactionsManager.getQuickReaction()
-    };
+    const allStickersPromise = tab.managers.appStickersManager.getAllStickers();
 
     const promises: Promise<any>[] = [];
 
     {
-      const section = new SettingSection({caption: 'LoopAnimatedStickersInfo'});
-
-      const suggestStickersRow = new Row({
-        icon: 'lamp',
-        titleLangKey: 'Stickers.SuggestStickers',
-        clickable: true,
-        listenerSetter: tab.listenerSetter,
-        titleRightSecondary: true
-      });
+      let suggestStickersRow: HTMLElement;
 
       const map: {[k in typeof appSettings.stickers.suggest]: LangPackKey} = {
         all: 'SuggestStickersAll',
@@ -53,17 +50,41 @@ const StickersAndEmoji: Component = () => {
         none: 'SuggestStickersNone'
       };
 
-      const setStickersSuggestDescription = () => {
-        suggestStickersRow.titleRight.replaceChildren(i18n(map[appSettings.stickers.suggest]));
-      };
-
-      setStickersSuggestDescription();
-
       const setStickersSuggest = (value: typeof appSettings.stickers.suggest) => {
         if(appSettings.stickers.suggest === value) return;
         setAppSettings('stickers', 'suggest', value);
-        setStickersSuggestDescription();
       };
+
+      const section = unwrapSolidElement(
+        <Section caption="LoopAnimatedStickersInfo">
+          <Row
+            havePadding
+            clickable={() => tab.slider.createTab(AppQuickReactionTab).open()}
+          >
+            <Row.Title>{i18n('DoubleTapSetting')}</Row.Title>
+            <ReactionStickerPreview sticker={quickReactionDoc()} />
+          </Row>
+          <Row ref={suggestStickersRow} clickable>
+            <Row.Icon icon="lamp_filled" />
+            <Row.Title
+              titleRight={i18n(map[appSettings.stickers.suggest])}
+              titleRightSecondary
+            >
+              {i18n('Stickers.SuggestStickers')}
+            </Row.Title>
+          </Row>
+          <Row>
+            <Row.Icon icon="flip" />
+            <Row.CheckboxFieldToggle>
+              <CheckboxFieldTsx
+                stateKey={joinDeepPath('settings', 'stickers', 'loop')}
+                toggle
+              />
+            </Row.CheckboxFieldToggle>
+            <Row.Title>{i18n('InstalledStickers.LoopAnimated')}</Row.Title>
+          </Row>
+        </Section>
+      ) as HTMLElement;
 
       createContextMenu({
         buttons: [{
@@ -79,169 +100,109 @@ const StickersAndEmoji: Component = () => {
           text: 'SuggestStickersNone',
           onClick: setStickersSuggest.bind(null, 'none')
         }],
-        listenTo: suggestStickersRow.container,
+        listenTo: suggestStickersRow,
         middleware: tab.middlewareHelper.get(),
         listenForClick: true
       });
 
-      const reactionsRow = new Row({
-        titleLangKey: 'DoubleTapSetting',
-        havePadding: true,
-        clickable: () => {
-          tab.slider.createTab(AppQuickReactionTab).open();
-        },
-        listenerSetter: tab.listenerSetter
-      });
-
-      const renderQuickReaction = () => {
-        p.quickReaction.then((reaction) => {
-          if(reaction._ === 'availableReaction') {
-            return reaction.static_icon;
-          } else {
-            return tab.managers.appEmojiManager.getCustomEmojiDocument(reaction.document_id);
-          }
-        }).then((doc) => {
-          wrapStickerToRow({
-            row: reactionsRow,
-            doc,
-            size: 'small'
-          });
-        });
-      };
-
-      renderQuickReaction();
-
       tab.listenerSetter.add(rootScope)('quick_reaction', () => {
-        p = {
-          allStickers: tab.managers.appStickersManager.getAllStickers(),
-          quickReaction: tab.managers.appReactionsManager.getQuickReaction()
-        };
-        renderQuickReaction();
+        refetchQuickReaction();
       });
 
-      const loopStickersRow = new Row({
-        icon: 'flip',
-        titleLangKey: 'InstalledStickers.LoopAnimated',
-        checkboxField: new CheckboxField({
-          name: 'loop',
-          stateKey: joinDeepPath('settings', 'stickers', 'loop'),
-          listenerSetter: tab.listenerSetter,
-          toggle: true
-        }),
-        listenerSetter: tab.listenerSetter
-      });
-
-      section.content.append(
-        reactionsRow.container,
-        suggestStickersRow.container,
-        loopStickersRow.container
-      );
-
-      tab.scrollable.append(section.container);
+      tab.scrollable.append(section);
     }
 
-    {
-      const section = new SettingSection({name: 'Emoji'});
+    tab.scrollable.append(unwrapSolidElement(
+      <Section name="Emoji">
+        <Row>
+          <Row.Icon icon="lamp_filled" />
+          <Row.CheckboxFieldToggle>
+            <CheckboxFieldTsx
+              stateKey={joinDeepPath('settings', 'emoji', 'suggest')}
+              toggle
+            />
+          </Row.CheckboxFieldToggle>
+          <Row.Title>{i18n('GeneralSettings.EmojiPrediction')}</Row.Title>
+        </Row>
+        <Row>
+          <Row.Icon icon="emoji_filled" />
+          <Row.CheckboxFieldToggle>
+            <CheckboxFieldTsx
+              stateKey={joinDeepPath('settings', 'emoji', 'big')}
+              toggle
+            />
+          </Row.CheckboxFieldToggle>
+          <Row.Title>{i18n('GeneralSettings.BigEmoji')}</Row.Title>
+        </Row>
+      </Section>
+    ) as HTMLElement);
 
-      const suggestEmojiRow = new Row({
-        icon: 'lamp',
-        titleLangKey: 'GeneralSettings.EmojiPrediction',
-        checkboxField: new CheckboxField({
-          name: 'suggest-emoji',
-          stateKey: joinDeepPath('settings', 'emoji', 'suggest'),
-          listenerSetter: tab.listenerSetter,
-          toggle: true
-        }),
-        listenerSetter: tab.listenerSetter
-      });
-      const bigEmojiRow = new Row({
-        icon: 'smile',
-        titleLangKey: 'GeneralSettings.BigEmoji',
-        checkboxField: new CheckboxField({
-          name: 'emoji-big',
-          stateKey: joinDeepPath('settings', 'emoji', 'big'),
-          listenerSetter: tab.listenerSetter,
-          toggle: true
-        }),
-        listenerSetter: tab.listenerSetter
-      });
-
-      section.content.append(
-        suggestEmojiRow.container,
-        bigEmojiRow.container
-      );
-
-      tab.scrollable.append(section.container);
-    }
-
-    {
-      const section = new SettingSection({name: 'DynamicPackOrder', caption: 'DynamicPackOrderInfo'});
-
-      const dynamicPackOrderRow = new Row({
-        titleLangKey: 'DynamicPackOrder',
-        icon: 'replace',
-        checkboxField: new CheckboxField({
-          name: 'dynamic-pack-order',
-          stateKey: joinDeepPath('settings', 'stickers', 'dynamicPackOrder'),
-          listenerSetter: tab.listenerSetter,
-          toggle: true
-        }),
-        listenerSetter: tab.listenerSetter
-      });
-
-      section.content.append(
-        dynamicPackOrderRow.container
-      );
-
-      tab.scrollable.append(section.container);
-    }
+    tab.scrollable.append(unwrapSolidElement(
+      <Section name="DynamicPackOrder" caption="DynamicPackOrderInfo">
+        <Row>
+          <Row.Icon icon="replace_squares" />
+          <Row.CheckboxFieldToggle>
+            <CheckboxFieldTsx
+              stateKey={joinDeepPath('settings', 'stickers', 'dynamicPackOrder')}
+              toggle
+            />
+          </Row.CheckboxFieldToggle>
+          <Row.Title>{i18n('DynamicPackOrder')}</Row.Title>
+        </Row>
+      </Section>
+    ) as HTMLElement);
 
     {
-      const section = new SettingSection({name: 'Telegram.InstalledStickerPacksController', caption: 'StickersBotInfo'});
+      const section = unwrapSolidElement(
+        <Section
+          name="Telegram.InstalledStickerPacksController"
+          caption="StickersBotInfo"
+        />
+      ) as HTMLElement;
 
-      const stickerSets: {[id: string]: Row} = {};
+      const stickerSets: {[id: string]: {container: HTMLElement, dispose: VoidFunction}} = {};
 
-      const stickersContent = section.generateContentElement();
+      // the sortable list gets a content element of its own: reordering reads the
+      // element's children, so the section's title must not be among them
+      const stickersContent = appendSectionContent(section);
 
       const lazyLoadQueue = new LazyLoadQueue();
       const renderStickerSet = (stickerSet: StickerSet.stickerSet, method: 'append' | 'prepend' = 'append') => {
-        const row = new Row({
-          title: wrapEmojiText(stickerSet.title),
-          subtitleLangKey: 'Stickers',
-          subtitleLangArgs: [stickerSet.count],
-          havePadding: true,
-          clickable: () => {
-            showStickersPopup(getStickerSetInputById(stickerSet));
-          },
-          listenerSetter: tab.listenerSetter
-        });
+        const media = document.createElement('div');
+        const mounted = mountSolidComponent((middleware) => {
+          wrapStickerSetThumb({
+            set: stickerSet,
+            container: media,
+            group: 'GENERAL-SETTINGS',
+            lazyLoadQueue,
+            width: 36,
+            height: 36,
+            autoplay: true,
+            middleware
+          });
 
-        row.container.dataset.id = '' + stickerSet.id;
+          return (
+            <Row
+              class="row-sortable"
+              havePadding
+              clickable={() => showStickersPopup(getStickerSetInputById(stickerSet))}
+            >
+              <Row.Title>{wrapEmojiText(stickerSet.title)}</Row.Title>
+              <Row.Subtitle>{i18n('Stickers', [stickerSet.count])}</Row.Subtitle>
+              <Row.Media element={media} />
+              <IconTsx icon="menu" class="row-sortable-icon" />
+            </Row>
+          );
+        }, tab.middlewareHelper.get());
+        const row = mounted.element;
 
-        row.makeSortable();
+        row.dataset.id = '' + stickerSet.id;
+        stickerSets[stickerSet.id] = {container: row, dispose: mounted.dispose};
 
-        stickerSets[stickerSet.id] = row;
-
-        const div = document.createElement('div');
-        div.classList.add('row-media');
-
-        wrapStickerSetThumb({
-          set: stickerSet,
-          container: div,
-          group: 'GENERAL-SETTINGS',
-          lazyLoadQueue,
-          width: 36,
-          height: 36,
-          autoplay: true,
-          middleware: tab.middlewareHelper.get()
-        });
-
-        row.container.append(div);
-
-        stickersContent[method](row.container);
+        stickersContent[method](row);
       };
 
-      const promise = p.allStickers.then((allStickers) => {
+      const promise = allStickersPromise.then((allStickers) => {
         assumeType<MessagesAllStickers.messagesAllStickers>(allStickers);
         const promises = allStickers.sets.map((stickerSet) => renderStickerSet(stickerSet));
         return Promise.all(promises);
@@ -256,8 +217,10 @@ const StickersAndEmoji: Component = () => {
       });
 
       tab.listenerSetter.add(rootScope)('stickers_deleted', (set) => {
-        if(stickerSets[set.id]) {
-          stickerSets[set.id].container.remove();
+        const row = stickerSets[set.id];
+        if(row) {
+          row.dispose();
+          row.container.remove();
           delete stickerSets[set.id];
         }
       });
@@ -295,7 +258,7 @@ const StickersAndEmoji: Component = () => {
         }
       });
 
-      tab.scrollable.append(section.container);
+      tab.scrollable.append(section);
     }
 
     promiseCollector.collect(Promise.all(promises));

@@ -41,6 +41,7 @@ function changeVersion(langVersion) {
 
 function applyNewLang() {
   const child = spawn(npmCmd, ['run', 'apply-new-lang'], {shell: true});
+  child.stderr.pipe(process.stderr);
   let data = '';
   child.stdout.on('data', (chunk) => {
     data += chunk.toString();
@@ -64,7 +65,7 @@ function formatLang() {
     console.log(chunk.toString());
   });
 
-  return new Promise((resolve, reject) => { 
+  return new Promise((resolve, reject) => {
     child.on('close', (code) => {
       if(code != 0) {
         reject(new Error('Failed to format lang'));

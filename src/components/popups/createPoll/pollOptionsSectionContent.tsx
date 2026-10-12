@@ -3,23 +3,25 @@ import {AutoHeight} from '@components/autoHeight';
 import Button from '@components/buttonTsx';
 import {IconTsx} from '@components/iconTsx';
 import InputField from '@components/inputField';
+import RadioFieldTsx from '@components/radioFieldTsx';
+import Row from '@components/rowTsx';
 import SimpleFormField from '@components/simpleFormField';
 import Space from '@components/space';
 import {StaticCheckbox} from '@components/staticCheckbox';
-import StaticRadio from '@components/staticRadio';
+import Modes from '@config/modes';
 import lastItem from '@helpers/array/lastItem';
 import blurActiveElement from '@helpers/dom/blurActiveElement';
 import focusInput from '@helpers/dom/focusInput';
+import attachPlainMessageEditor from '@components/chat/inputEditor/plainField';
 import getRichValueWithCaret from '@helpers/dom/getRichValueWithCaret';
 import {createDelayed} from '@helpers/solid/createDelayed';
-import createMiddleware from '@helpers/solid/createMiddleware';
 import {createSortableList} from '@helpers/solid/createSortableList';
+import buttonKeyDown from '@helpers/solid/buttonKeyDown';
 import {I18nTsx} from '@helpers/solid/i18n';
 import {subscribeOn} from '@helpers/solid/subscribeOn';
 import classNames from '@helpers/string/classNames';
 import I18n from '@lib/langPack';
-import wrapDraftText from '@lib/richTextProcessor/wrapDraftText';
-import {batch, children, createEffect, createMemo, createSignal, For, JSX, mapArray, Match, on, Ref, Show, Switch} from 'solid-js';
+import {batch, children, createEffect, createMemo, createSignal, For, JSX, mapArray, Match, on, onCleanup, Ref, Show, Switch} from 'solid-js';
 import {Transition, TransitionGroup} from 'solid-transition-group';
 import {EmojiButtonWithOpacity as EmojiDropdownButton} from './emojiButtonWithOpacity';
 import {MediaAttachment} from './mediaAttachment';
@@ -55,17 +57,6 @@ export const PollOptionsSectionContent = (props: {
 
   const optionsLeft = createMemo(() => Math.max(0, maxOptions() - mappedItems().length));
 
-  const visibleOptionsLeft = createMemo(() => {
-    if(context.store.pollOptions.length === 2 && !checkOptionHasValue(context.store.pollOptions[0])) {
-      return maxOptions();
-    }
-
-    return (
-      optionsLeft() +
-      (context.store.pollOptions.length && checkOptionHasValue(lastItem(context.store.pollOptions)) ? 0 : 1)
-    );
-  });
-
   const canShowAddOption = createMemo(() => optionsLeft() > 0);
 
   const sortable = createSortableList({
@@ -81,7 +72,7 @@ export const PollOptionsSectionContent = (props: {
 
   // const delayedCanShowAddOption = createDelayed(canShowAddOption, canShowAddOption(), value => value ? 200 : 0);
 
-  const TransitionGroupWhenNotDragging = (props: { children: JSX.Element }) => {
+  const TransitionGroupWhenNotDragging = (props: {children: JSX.Element}) => {
     const resolved = children(() => props.children);
     return (
       <Show when={!isDragging()} fallback={resolved()}>
@@ -92,23 +83,17 @@ export const PollOptionsSectionContent = (props: {
     );
   };
 
-  type MappedItemOrOptionsLeft = MappedItem | {
-    type: 'optionsLeft';
-  } | {
+  type MappedItemOrAddOption = MappedItem | {
     type: 'addOption'
   };
 
-  const optionsLeftItem: MappedItemOrOptionsLeft = {
-    type: 'optionsLeft'
-  };
-
   // Discarded add button
-  // const addOptionItem: MappedItemOrOptionsLeft = {
+  // const addOptionItem: MappedItemOrAddOption = {
   //   type: 'addOption'
   // };
 
   const items = createMemo(() => {
-    const result: MappedItemOrOptionsLeft[] = [...mappedItems(), optionsLeftItem];
+    const result: MappedItemOrAddOption[] = [...mappedItems()];
 
     // if(delayedCanShowAddOption()) {
     //   result.push(addOptionItem);
@@ -146,14 +131,6 @@ export const PollOptionsSectionContent = (props: {
                   </>
                 )}
               </Match>
-              <Match when={item.type === 'optionsLeft'}>
-                <SimpleFormField.Caption class={styles.captionOverride}>
-                  <Space amount='0.5rem' />
-                  <Show when={visibleOptionsLeft() > 0} fallback={<I18nTsx key='NewPoll.MaxOptions' />}>
-                    <I18nTsx key='NewPoll.OptionsLeft' args={visibleOptionsLeft().toString()} />
-                  </Show>
-                </SimpleFormField.Caption>
-              </Match>
               <Match when={item.type === 'addOption'}>
                 <div style={{height: !canShowAddOption() ? '0' : undefined}}>
                   <Button class={styles.addOptionButton} primary onClick={onAdd}>
@@ -178,7 +155,6 @@ const PollOptionFullField = (props: {
   optionsLeft: number;
 }) => {
   const {store, setStore} = useCreatePollContext();
-  const middleware = createMiddleware().get();
 
   const [container, setContainer] = createSignal<HTMLElement>();
   const value = () => props.mappedItem.option.text;
@@ -230,12 +206,28 @@ const PollOptionFullField = (props: {
         <div class={styles.pollOptionCheckWrapper} classList={{[styles.disabled]: !canBeReordered()}}>
           <Transition name='t-zoom' duration={200} mode='outin'>
             <Show when={!store.allowMultipleAnswers}>
-              <div class={styles.checkButtonWrapper} onClick={onRadioClick}>
-                <StaticRadio checked={props.mappedItem.option.checked} />
-              </div>
+              <Row class={styles.checkButtonWrapper} noRipple>
+                <Row.RadioField>
+                  <RadioFieldTsx
+                    ariaLabel={props.mappedItem.option.text || I18n.format('NewPoll.SetCorrectAnswer', true)}
+                    checked={props.mappedItem.option.checked}
+                    name="new-poll-correct-answer"
+                    value={String(props.mappedItem.id)}
+                    onChange={(checked) => checked && onRadioClick()}
+                  />
+                </Row.RadioField>
+              </Row>
             </Show>
             <Show when={store.allowMultipleAnswers}>
-              <div class={styles.checkButtonWrapper} onClick={() => setStore('pollOptions', props.index, 'checked', (v) => !v)}>
+              <div
+                class={styles.checkButtonWrapper}
+                role='checkbox'
+                tabindex={Modes.a11y ? (canBeReordered() ? 0 : -1) : undefined}
+                aria-checked={!!props.mappedItem.option.checked}
+                aria-label={I18n.format('NewPoll.SetCorrectAnswer', true)}
+                onClick={() => setStore('pollOptions', props.index, 'checked', (v) => !v)}
+                onKeyDown={buttonKeyDown}
+              >
                 <StaticCheckbox checked={props.mappedItem.option.checked} />
               </div>
             </Show>
@@ -260,7 +252,7 @@ const PollOptionFullField = (props: {
         inputFieldRef={(inputField) => {
           props.mappedItem.inputField = inputField;
           if(import.meta.hot) {
-            inputField.setValueSilently(wrapDraftText(value(), {entities: props.mappedItem.option.entities, middleware}));
+            inputField.setValueSilently({text: value(), entities: props.mappedItem.option.entities});
           }
         }}
         onChange={(option) => {
@@ -321,7 +313,7 @@ const PollOptionInputField = (props: {
     canWrapCustomEmojis: true,
     onRawInput: () => {
       const {value, entities} = getRichValueWithCaret(inputField.input);
-      props.onChange({text: value, entities});
+      props.onChange(value ? {text: value, entities} : {text: value, entities, attachment: undefined});
     }
   });
 
@@ -331,6 +323,12 @@ const PollOptionInputField = (props: {
       element.update({key: props.isAdd ? 'NewPoll.OptionsAddOption' : 'NewPoll.Option'});
     }
   }, {defer: true}));
+
+  // An option travels as text plus entities and holds one line; the composer's
+  // engine on that schema gives it the same clipboard and custom emoji as the
+  // chat input.
+  const inputFieldEditor = attachPlainMessageEditor(inputField.input);
+  onCleanup(() => inputFieldEditor.destroy());
 
   props.inputFieldRef?.(inputField);
 
@@ -407,7 +405,7 @@ const PollOptionInputField = (props: {
             <EmojiDropdownButton class={interactableClass} inputField={inputField} />
           </SimpleFormField.SideContent>
         </Show>
-        <Show when={!props.noAttachment && (supportsMedia('photo') || supportsMedia('video') || supportsMedia('sticker'))}>
+        <Show when={!props.noAttachment && (supportsMedia('photo') || supportsMedia('video') || supportsMedia('sticker') || supportsMedia('link'))}>
           <SimpleFormField.WithAutoLengthCounter
             maxLength={maxOptionLength()}
             first={!props.attachment}
@@ -420,10 +418,14 @@ const PollOptionInputField = (props: {
                 ...(supportsMedia('photo') ? ['photo'] as const : []),
                 ...(supportsMedia('video') ? ['video'] as const : []),
                 ...(supportsMedia('gif') ? ['gif'] as const : []), // GIF is additional to photo
-                ...(supportsMedia('sticker') ? ['sticker'] as const : [])
+                ...(supportsMedia('sticker') ? ['sticker'] as const : []),
+                ...(supportsMedia('link') ? ['link'] as const : [])
               ]}
               imgClass={styles.mediaAttachmentImage}
               attachedMedia={props.attachment}
+              onLinkPopupClose={() => {
+                if(inputField.input.isConnected) inputField.input.focus();
+              }}
               onAttach={(value) => {
                 props.onChange?.({attachment: value});
               }}

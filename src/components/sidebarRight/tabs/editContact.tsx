@@ -1,19 +1,21 @@
-import {Component} from 'solid-js';
+import {Component, createSignal, type Signal} from 'solid-js';
 import InputField from '@components/inputField';
 import EditPeer from '@components/editPeer';
-import Row, {CreateRowFromCheckboxField} from '@components/row';
-import CheckboxField from '@components/checkboxField';
+import CheckboxFieldTsx from '@components/checkboxFieldTsx';
 import Button from '@components/button';
 import PeerTitle from '@components/peerTitle';
+import Row from '@components/rowTsx';
 import rootScope from '@lib/rootScope';
-import PopupPeer from '@components/popups/peer';
-import PopupElement, {addCancelButton} from '@components/popups';
+import confirmDeleteContacts from '@components/popups/deleteContacts';
+import noop from '@helpers/noop';
 import {i18n} from '@lib/langPack';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
 import toggleDisability from '@helpers/dom/toggleDisability';
+import {renderComponent} from '@helpers/solid/renderComponent';
 import getPeerId from '@appManagers/utils/peers/getPeerId';
 import formatUserPhone from '@components/wrappers/formatUserPhone';
-import SettingSection from '@components/settingSection';
+import Section from '@components/section';
+import {wrapSolidComponent} from '@helpers/solid/wrapSolidComponent';
 import wrapPeerTitle from '@components/wrappers/peerTitle';
 import {InputFieldEmoji} from '@components/inputFieldEmoji';
 import {toastNew} from '@components/toast';
@@ -43,9 +45,9 @@ const EditContact: Component = () => {
     let lastNameInputField: InputField;
     let noteInputField: InputFieldEmoji;
     let editPeer: EditPeer;
-    let sharePhoneCheckboxField: CheckboxField;
+    let sharePhoneSignal: Signal<boolean>;
 
-    let suggestBirthdayRow: Row | undefined;
+    let canSuggestBirthday = false;
 
     // Tracks the personal/suggest photo section so it can be re-rendered in place
     // after the personal photo is set/suggested/reset.
@@ -61,8 +63,6 @@ const EditContact: Component = () => {
       ]);
       const hasPersonal = !!fullUser?.personal_photo;
       const firstName = user.first_name || '';
-
-      const photoSection = new SettingSection({caption: 'UserInfo.CustomPhotoHelp'});
 
       const btnSetPhoto = Button('btn-primary btn-transparent', {
         icon: 'cameraadd',
@@ -96,10 +96,9 @@ const EditContact: Component = () => {
         });
       }, {listenerSetter: tab.listenerSetter});
 
-      photoSection.content.append(btnSetPhoto, btnSuggestPhoto);
-
+      let btnResetPhoto: HTMLElement;
       if(hasPersonal) {
-        const btnResetPhoto = Button('btn-primary btn-transparent danger', {
+        btnResetPhoto = Button('btn-primary btn-transparent danger', {
           icon: 'delete',
           text: 'UserInfo.RemovePersonalPhoto'
         });
@@ -115,10 +114,15 @@ const EditContact: Component = () => {
           toastNew({langPackKey: 'UserInfo.PhotoResetToast'});
           refreshPhotoSection();
         }, {listenerSetter: tab.listenerSetter});
-        photoSection.content.append(btnResetPhoto);
       }
 
-      return photoSection.container;
+      return wrapSolidComponent(() => (
+        <Section caption="UserInfo.CustomPhotoHelp">
+          {btnSetPhoto}
+          {btnSuggestPhoto}
+          {btnResetPhoto}
+        </Section>
+      ), tab.middlewareHelper.get());
     }
 
     async function refreshPhotoSection() {
@@ -137,8 +141,8 @@ const EditContact: Component = () => {
     }
 
     {
-      const section = new SettingSection({noDelimiter: true});
       const inputFields: InputField[] = [];
+      let rowsContainer: HTMLElement;
 
       const inputWrapper = document.createElement('div');
       inputWrapper.classList.add('input-wrapper');
@@ -181,24 +185,15 @@ const EditContact: Component = () => {
           maxLength: 128,
           withLinebreaks: true
         });
+        // The field owns an editor and an emoji dropdown; both go with the tab.
+        tab.middlewareHelper.get().onClean(() => noteInputField.cleanup());
         if(fullUser?.note) {
           noteInputField.setRichOriginalValue(fullUser.note);
         }
         inputFields.push(noteInputField);
         inputWrapper.append(noteInputField.container);
 
-        if(!fullUser?.birthday) {
-          suggestBirthdayRow = new Row({
-            title: i18n('SuggestBirthdayRow'),
-            icon: 'gift',
-            clickable: () => {
-              showBirthdayPopup({
-                suggestForPeer: peerId,
-                onSave: (it) => suggestUserBirthday(userId, it)
-              });
-            }
-          });
-        }
+        canSuggestBirthday = !fullUser?.birthday;
       }
 
       editPeer = new EditPeer({
@@ -215,26 +210,14 @@ const EditContact: Component = () => {
         div.classList.add('avatar-edit');
         div.append(editPeer.avatarElem.node);
 
-        const notificationsCheckboxField = new CheckboxField({
-          text: 'Notifications'
-        });
-
-        notificationsCheckboxField.input.addEventListener('change', (e) => {
-          if(!e.isTrusted) {
-            return;
-          }
-
-          tab.managers.appMessagesManager.togglePeerMute({peerId});
-        });
+        const notificationsSignal = createSignal(false);
 
         tab.listenerSetter.add(rootScope)('notify_settings', async(update) => {
           if(update.peer._ !== 'notifyPeer') return;
-          const peerId = getPeerId(update.peer.peer);
-          if(peerId === peerId) {
+          const updatePeerId = getPeerId(update.peer.peer);
+          if(updatePeerId === peerId) {
             const enabled = !(await tab.managers.appNotificationsManager.isMuted(update.notify_settings));
-            if(enabled !== notificationsCheckboxField.checked) {
-              notificationsCheckboxField.checked = enabled;
-            }
+            notificationsSignal[1](enabled);
           }
         });
 
@@ -249,92 +232,115 @@ const EditContact: Component = () => {
         profileSubtitleDiv.append(i18n('EditContact.OriginalName'));
 
         tab.scrollable.append(div, profileNameDiv, profileSubtitleDiv);
-        section.content.append(inputWrapper);
+        rowsContainer = document.createElement('div');
 
         if(!isNew) {
-          const notificationsRow = new Row({
-            checkboxField: notificationsCheckboxField,
-            withCheckboxSubtitle: true,
-            listenerSetter: tab.listenerSetter
-          });
-
           const enabled = !(await tab.managers.appNotificationsManager.isPeerLocalMuted({peerId, respectType: false}));
-          notificationsCheckboxField.checked = enabled;
+          notificationsSignal[1](enabled);
 
-          section.content.append(notificationsRow.container);
-
-          if(suggestBirthdayRow) {
-            section.content.append(suggestBirthdayRow.container);
-          }
+          renderComponent({
+            element: rowsContainer,
+            Component: () => (
+              <>
+                <Row>
+                  <Row.CheckboxFieldToggle>
+                    <CheckboxFieldTsx
+                      signal={notificationsSignal}
+                      toggle
+                      onChange={() => tab.managers.appMessagesManager.togglePeerMute({peerId})}
+                    />
+                  </Row.CheckboxFieldToggle>
+                  <Row.Title>{i18n('Notifications')}</Row.Title>
+                  <Row.Subtitle>{i18n(notificationsSignal[0]() ? 'Checkbox.Enabled' : 'Checkbox.Disabled')}</Row.Subtitle>
+                </Row>
+                {canSuggestBirthday && (
+                  <Row
+                    clickable={() => {
+                      showBirthdayPopup({
+                        suggestForPeer: peerId,
+                        onSave: (it) => suggestUserBirthday(userId, it)
+                      });
+                    }}
+                  >
+                    <Row.Icon icon="gift_filled" />
+                    <Row.Title>{i18n('SuggestBirthdayRow')}</Row.Title>
+                  </Row>
+                )}
+              </>
+            ),
+            middleware: tab.middlewareHelper.get()
+          });
         } else {
           const user = await tab.managers.appUsersManager.getUser(userId);
-
-          const phoneRow = new Row({
-            icon: 'phone',
-            titleLangKey: user.phone ? undefined : 'MobileHidden',
-            title: user.phone ? formatUserPhone(user.phone) : undefined,
-            subtitleLangKey: user.phone ? 'Phone' : 'MobileHiddenExceptionInfo',
-            subtitleLangArgs: user.phone ? undefined : [new PeerTitle({peerId: peerId}).element]
+          renderComponent({
+            element: rowsContainer,
+            Component: () => (
+              <Row>
+                <Row.Icon icon="phone_filled" />
+                <Row.Title>{user.phone ? formatUserPhone(user.phone) : i18n('MobileHidden')}</Row.Title>
+                <Row.Subtitle>{
+                  user.phone ?
+                    i18n('Phone') :
+                    i18n('MobileHiddenExceptionInfo', [new PeerTitle({peerId}).element])
+                }</Row.Subtitle>
+              </Row>
+            ),
+            middleware: tab.middlewareHelper.get()
           });
-
-          section.content.append(phoneRow.container);
         }
-      } else {
-        section.content.append(inputWrapper);
       }
 
-      tab.scrollable.append(section.container);
+      tab.scrollable.append(wrapSolidComponent(() => (
+        <Section noDelimiter>
+          {inputWrapper}
+          {rowsContainer}
+        </Section>
+      ), tab.middlewareHelper.get()));
     }
 
     if(!isNew) {
       photoSectionContainer = await buildPhotoSection();
       tab.scrollable.append(photoSectionContainer);
 
-      const section = new SettingSection();
-
       const btnDelete = Button('btn-primary btn-transparent danger', {icon: 'delete', text: 'PeerInfo.DeleteContact'});
 
       attachClickEvent(btnDelete, () => {
-        PopupElement.createPopup(PopupPeer, 'popup-delete-contact', {
-          peerId: peerId,
-          titleLangKey: 'DeleteContact',
-          descriptionLangKey: 'AreYouSureDeleteContact',
-          buttons: addCancelButton([{
-            langKey: 'Delete',
-            callback: () => {
-              const toggle = toggleDisability([btnDelete], true);
+        confirmDeleteContacts([peerId]).then(() => {
+          const toggle = toggleDisability([btnDelete], true);
 
-              tab.managers.appUsersManager.deleteContacts([userId]).then(() => {
-                tab.close();
-              }, () => {
-                toggle();
-              });
-            },
-            isDanger: true
-          }])
-        }).show();
+          tab.managers.appUsersManager.deleteContacts([userId]).then(() => {
+            tab.close();
+          }, () => {
+            toggle();
+          });
+        }, noop);
       }, {listenerSetter: tab.listenerSetter});
 
-      section.content.append(btnDelete);
-
-      tab.scrollable.append(section.container);
+      tab.scrollable.append(wrapSolidComponent(() => (
+        <Section>
+          {btnDelete}
+        </Section>
+      ), tab.middlewareHelper.get()));
     } else if(
       privacy.some((privacyRule) => privacyRule._ === 'privacyValueDisallowAll') &&
       !privacy.some((privacyRule) => privacyRule._ === 'privacyValueAllowUsers' && privacyRule.users.includes(userId))
     ) {
-      const section = new SettingSection({
-        caption: 'NewContact.Exception.ShareMyPhoneNumber.Desc',
-        captionArgs: [await wrapPeerTitle({peerId})]
-      });
-      const checkboxField = sharePhoneCheckboxField = new CheckboxField({
-        text: 'NewContact.Exception.ShareMyPhoneNumber',
-        checked: true
-      });
-      const row = CreateRowFromCheckboxField(checkboxField);
+      const peerTitle = await wrapPeerTitle({peerId});
+      sharePhoneSignal = createSignal(true);
 
-      section.content.append(row.container);
-
-      tab.scrollable.append(section.container);
+      tab.scrollable.append(wrapSolidComponent(() => (
+        <Section
+          caption="NewContact.Exception.ShareMyPhoneNumber.Desc"
+          captionArgs={[peerTitle]}
+        >
+          <Row>
+            <Row.CheckboxField>
+              <CheckboxFieldTsx signal={sharePhoneSignal} />
+            </Row.CheckboxField>
+            <Row.Title>{i18n('NewContact.Exception.ShareMyPhoneNumber')}</Row.Title>
+          </Row>
+        </Section>
+      ), tab.middlewareHelper.get()));
     }
 
     attachClickEvent(editPeer.nextBtn, async() => {
@@ -346,7 +352,7 @@ const EditContact: Component = () => {
           nameInputField.value,
           lastNameInputField.value,
           (await tab.managers.appUsersManager.getUser(userId)).phone,
-          sharePhoneCheckboxField?.checked
+          sharePhoneSignal?.[0]()
         );
 
         if(noteInputField.isChanged()) {

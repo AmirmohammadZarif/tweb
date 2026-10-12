@@ -53,6 +53,11 @@ interface CloseTask extends SuperMessagePortTask {
   type: 'close'
 }
 
+type DataCloneError = {
+  type: 'DATA_CLONE_ERROR',
+  message: string
+};
+
 // interface OpenTask extends SuperMessagePortTask {
 //   type: 'open'
 // }
@@ -99,6 +104,48 @@ const STUCK_WARN_PERSIST_MS = 30000;
 // const PING_INTERVAL = DEBUG && false ? 0x7FFFFFFF : 5000;
 // const PING_TIMEOUT = DEBUG && false ? 0x7FFFFFFF : 10000;
 
+// A task payload holds the raw arguments of the call it carries — for 'computeSRP'
+// argument 0 is the user's plaintext cloud password, the one credential SRP exists to
+// keep on the device. logger.error always reaches console.error (LogTypes.Error survives
+// DEBUG being off) and, in the worker realm, the exportable log ring buffer, so a task
+// must never be logged whole: identify it instead.
+function describeTask(task: Task) {
+  return {
+    id: task?.id,
+    type: task?.type,
+    invoke: task?.type === 'invoke' ? (task as InvokeTask).payload?.type : undefined
+  };
+}
+
+// The parts a pending invoke is identified by, kept apart so the readable name is only
+// built where it is actually printed.
+type AwaitingTaskName = {
+  taskType: string,
+  taskName?: string,
+  taskMethod?: string
+};
+
+function getInvokeTaskName(type: string, value: unknown): AwaitingTaskName {
+  const payload = value as {
+    name?: string,
+    method?: string
+  };
+
+  return {
+    taskType: type,
+    taskName: payload?.name,
+    taskMethod: payload?.method
+  };
+}
+
+function formatAwaitingName(entry: AwaitingTaskName) {
+  return [
+    entry.taskType,
+    entry.taskName,
+    entry.taskMethod
+  ].filter(Boolean).join(':');
+}
+
 
 class SuperMessagePort<
   Workers extends Listeners,
@@ -112,11 +159,13 @@ class SuperMessagePort<
   protected pingResolves: Map<SendPort, () => void>;
 
   protected taskId: number;
+  // * the task name is stored unjoined on purpose: every invoke allocates this entry,
+  // * but only the stuck watchdog and the debug log ever read it, so building the
+  // * string here would be per-call garbage for something almost nobody looks at
   protected awaiting: {
-    [id: number]: {
+    [id: number]: AwaitingTaskName & {
       resolve: any,
       reject: any,
-      taskType: string,
       port?: SendPort,
       createdAt: number,
       warned?: boolean
@@ -181,9 +230,9 @@ class SuperMessagePort<
       const age = now - entry.createdAt;
       if(!entry.warned && age >= STUCK_WARN_FIRST_MS) {
         entry.warned = true;
-        this.log.warn(`[STUCK] ${entry.taskType} pending ${age}ms (id=${id})`);
+        this.log.warn(`[STUCK] ${formatAwaitingName(entry)} pending ${age}ms (id=${id})`);
       } else if(entry.warned && age >= STUCK_WARN_PERSIST_MS && age % STUCK_WARN_PERSIST_MS < STUCK_WATCHDOG_INTERVAL_MS) {
-        this.log.error(`[STUCK] ${entry.taskType} still pending after ${age}ms (id=${id}) — likely no listener on peer or port not started`);
+        this.log.error(`[STUCK] ${formatAwaitingName(entry)} still pending after ${age}ms (id=${id}) — likely no listener on peer or port not started`);
       }
     }
   };
@@ -388,15 +437,7 @@ class SuperMessagePort<
         //   this.log(`batching ${task.payload.length} tasks`);
         // }
 
-        try {
-          // if(IS_SERVICE_WORKER && !port) {
-          //   notifyAll(task);
-          // } else {
-          this.postMessage(ports, task);
-          // }
-        } catch(err) {
-          this.log.error('postMessage error:', err, task, ports);
-        }
+        this.sendTask(ports, task);
       });
 
       this.pending.delete(port);
@@ -407,6 +448,98 @@ class SuperMessagePort<
     this.releasingPending = false;
   }
 
+  private createDataCloneError(): DataCloneError {
+    return {
+      type: 'DATA_CLONE_ERROR',
+      message: 'Message port task payload could not be cloned'
+    };
+  }
+
+  private isDataCloneError(error: unknown) {
+    return (error as {name?: string})?.name === 'DataCloneError';
+  }
+
+  private sendDataCloneError(port: SendPort, taskId: number) {
+    const task = this.createTask('result', {
+      taskId,
+      error: this.createDataCloneError()
+    });
+
+    try {
+      this.postMessage(port, task);
+    } catch(error) {
+      this.log.error('postMessage clone-error fallback failed:', error, task.type, task.id);
+    }
+  }
+
+  private rejectUnsentInvoke(task: InvokeTask, error: unknown) {
+    const deferred = this.awaiting[task.id];
+    if(!deferred) {
+      return;
+    }
+
+    delete this.awaiting[task.id];
+    deferred.reject(error);
+  }
+
+  private getTaskDebugName(task: Task) {
+    return task.type === 'invoke' ?
+      formatAwaitingName(getInvokeTaskName(task.payload.type, task.payload.payload)) :
+      task.type;
+  }
+
+  private sendTask(ports: SendPort[], task: Task, deliveredElsewhere = false) {
+    const failedPorts: SendPort[] = [];
+    const cloneFailedPorts: SendPort[] = [];
+    let firstError: unknown;
+    let sent = false;
+
+    ports.forEach((port) => {
+      try {
+        this.postMessage(port, task);
+        sent = true;
+      } catch(error) {
+        failedPorts.push(port);
+        firstError ??= error;
+        if(this.isDataCloneError(error)) {
+          cloneFailedPorts.push(port);
+        } else {
+          this.log.error('postMessage error:', error, task.type, task.id);
+        }
+      }
+    });
+
+    if(!failedPorts.length) {
+      return;
+    }
+
+    if(cloneFailedPorts.length) {
+      this.log.error(
+        'postMessage data clone error:',
+        this.getTaskDebugName(task),
+        task.id
+      );
+    }
+
+    if(task.type === 'batch') {
+      const wasDelivered = deliveredElsewhere || sent;
+      task.payload.forEach((innerTask) => {
+        this.sendTask(failedPorts, innerTask, wasDelivered);
+      });
+    } else if(task.type === 'result' || task.type === 'ack') {
+      cloneFailedPorts.forEach((port) => {
+        this.sendDataCloneError(port, task.payload.taskId);
+      });
+    } else if(task.type === 'invoke' && !task.payload.void && !sent && !deliveredElsewhere) {
+      this.rejectUnsentInvoke(
+        task,
+        cloneFailedPorts.length === failedPorts.length ?
+          this.createDataCloneError() :
+          firstError
+      );
+    }
+  }
+
   protected processResultTask = (task: ResultTask) => {
     const {taskId, result, error} = task.payload;
     const deferred = this.awaiting[taskId];
@@ -414,7 +547,7 @@ class SuperMessagePort<
       return;
     }
 
-    this.debug && this.log.debug('done', deferred.taskType, result, error);
+    this.debug && this.log.debug('done', formatAwaitingName(deferred), result, error);
     'error' in task.payload ? deferred.reject(error) : deferred.resolve(result);
     delete this.awaiting[taskId];
   };
@@ -571,7 +704,7 @@ class SuperMessagePort<
 
       resultTaskPayload.result = result;
     } catch(error) {
-      this.log.error('worker task error:', error, task);
+      this.log.error('worker task error:', error, describeTask(task));
       if(innerTask.void) {
         return;
       }
@@ -643,24 +776,40 @@ class SuperMessagePort<
     let task: InvokeTask;
     const promise = new Promise<Awaited<ReturnType<Send[T]>>>((resolve, reject) => {
       task = this.createInvokeTask(type as string, payload, withAck, undefined, transfer);
-      this.awaiting[task.id] = {resolve, reject, taskType: type as string, port, createdAt: Date.now()};
+      this.awaiting[task.id] = {
+        ...getInvokeTaskName(type as string, payload),
+        resolve,
+        reject,
+        port,
+        createdAt: Date.now()
+      };
       this.pushTask(task, port);
     });
 
     if(timeout) {
-      const {reject} = this.awaiting[task.id];
-      setTimeout(() => {
-        reject(makeError('TIMEOUT'));
+      const deferred = this.awaiting[task.id];
+      const timeoutId = setTimeout(() => {
+        if(this.awaiting[task.id] !== deferred) {
+          return;
+        }
+
+        delete this.awaiting[task.id];
+        deferred.reject(makeError('TIMEOUT'));
       }, timeout);
+      promise.then(
+        () => clearTimeout(timeoutId),
+        () => clearTimeout(timeoutId)
+      );
     }
 
     if(IS_WORKER/*  || true */) {
-      promise.finally(() => {
+      const clearLogInterval = () => {
         clearInterval(interval);
-      });
+      };
+      promise.then(clearLogInterval, clearLogInterval);
 
       const interval = ctx.setInterval(() => {
-        this.log.error('task still has no result', task, port);
+        this.log.error('task still has no result', describeTask(task), port);
       }, IS_WORKER ? 60e3 : 5e3);
     } else if(false) {
       // let timedOut = false;
@@ -668,7 +817,7 @@ class SuperMessagePort<
       promise.finally(() => {
         const elapsedTime = Date.now() - startTime;
         if(elapsedTime >= TIMEOUT) {
-          this.log.error(`task was processing ${Date.now() - startTime}ms`, task.payload.payload, port);
+          this.log.error(`task was processing ${Date.now() - startTime}ms`, describeTask(task), port);
         }/*  else {
           clearTimeout(timeout);
         } */

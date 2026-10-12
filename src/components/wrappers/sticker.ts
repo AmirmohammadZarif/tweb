@@ -1,4 +1,4 @@
-import type RLottiePlayer from '@lib/rlottie/rlottiePlayer';
+import type LottiePlayer from '@lib/lottie/lottiePlayer';
 import type {ThumbCache} from '@lib/storages/thumbs';
 import type {MyDocument} from '@appManagers/appDocsManager';
 import IS_WEBP_SUPPORTED from '@environment/webpSupport';
@@ -22,7 +22,7 @@ import appDownloadManager from '@lib/appDownloadManager';
 import {AppManagers} from '@lib/managers';
 import choosePhotoSize from '@appManagers/utils/photos/choosePhotoSize';
 import getStickerEffectThumb from '@appManagers/utils/stickers/getStickerEffectThumb';
-import lottieLoader from '@lib/rlottie/lottieLoader';
+import lottieLoader from '@lib/lottie/lottieLoader';
 import rootScope from '@lib/rootScope';
 import webpWorkerController from '@lib/webp/webpWorkerController';
 import {getEmojiToneIndex} from '@vendor/emoji';
@@ -76,7 +76,7 @@ export default async function wrapSticker({doc, div, middleware, loadStickerMidd
   width?: number,
   height?: number,
   withThumb?: boolean,
-  loop?: RLottiePlayer['loop'],
+  loop?: LottiePlayer['loop'],
   loadPromises?: Promise<any>[],
   needFadeIn?: boolean,
   needUpscale?: boolean,
@@ -132,8 +132,6 @@ export default async function wrapSticker({doc, div, middleware, loadStickerMidd
     lottieLoader.loadLottieWorkers();
   }
 
-  loop = !!(!emoji || isCustomEmoji) && loop;
-
   div.forEach((div) => {
     div.dataset.docId = '' + doc.id;
     if(emoji) {
@@ -169,10 +167,12 @@ export default async function wrapSticker({doc, div, middleware, loadStickerMidd
     if(videoRes.thumb) {
       if(videoRes.thumb.images.thumb) {
         videoRes.thumb.images.thumb.classList.add('media-sticker', 'thumbnail');
+        videoRes.thumb.images.thumb.setAttribute('alt', '');
       }
 
       if(videoRes.thumb.images.full) {
         videoRes.thumb.images.full.classList.add('media-sticker');
+        videoRes.thumb.images.full.setAttribute('alt', '');
       }
     }
 
@@ -392,7 +392,7 @@ export default async function wrapSticker({doc, div, middleware, loadStickerMidd
       };
 
       if(lazyLoadQueue && onlyThumb) {
-        lazyLoadQueue.push({div: div[0], load});
+        lazyLoadQueue.push({div: div[0], load, middleware});
         loadThumbPromise.resolve();
         return ret;
       } else {
@@ -551,6 +551,7 @@ export default async function wrapSticker({doc, div, middleware, loadStickerMidd
         }
 
         media.classList.add('media-sticker');
+        media.setAttribute('alt', '');
         return media;
       });
 
@@ -733,7 +734,7 @@ export default async function wrapSticker({doc, div, middleware, loadStickerMidd
   }
 
   const loadPromise: Promise<Awaited<ReturnType<typeof load>> | void> = lazyLoadQueue && (!downloaded || isAnimated) ?
-    (lazyLoadQueue.push({div: div[0], load}), Promise.resolve()) :
+    (lazyLoadQueue.push({div: div[0], load, middleware}), Promise.resolve()) :
     load();
 
   if(downloaded && (asStatic/*  || stickerType === 3 */)) {
@@ -832,7 +833,7 @@ export function StickerTsx(props: {
   autoStyle?: boolean
   class?: string
   extraOptions?: StickerTsxExtraOptions
-  onRender?: (player: RLottiePlayer | HTMLVideoElement[] | HTMLImageElement[]) => void
+  onRender?: (player: LottiePlayer | HTMLVideoElement[] | HTMLImageElement[]) => void
 }) {
   const div = document.createElement('div');
   props.class && div.classList.add(props.class);

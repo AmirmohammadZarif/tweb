@@ -39,15 +39,26 @@ export default abstract class CallConnectionInstanceBase {
   }
 
   public createDataChannel(dict?: RTCDataChannelInit) {
-    return this.dataChannel || (this.dataChannel = createDataChannel(this.connection, dict, this.log.bindPrefix('data')));
+    return this.dataChannel || (this.dataChannel = createDataChannel(
+      this.connection,
+      dict,
+      this.log.bindPrefix('data'),
+      (message) => this.onDataChannelMessage(message)
+    ));
   }
+
+  /** A parsed JSON object received on the data channel. */
+  protected onDataChannelMessage(message: Record<string, unknown>): void {}
 
   public createDescription() {
     return this.description || (this.description = new LocalConferenceDescription(this.connection));
   }
 
-  public appendStreamToConference(onSenderCreated?: (sender: RTCRtpSender) => void) {
-    return this.streamManager.appendToConference(this.description, onSenderCreated);
+  public appendStreamToConference(
+    onSenderCreated?: (sender: RTCRtpSender) => void,
+    throwOnReplaceError = false
+  ) {
+    return this.streamManager.appendToConference(this.description, onSenderCreated, throwOnReplaceError);
   }
 
   public closeConnection() {
@@ -83,7 +94,7 @@ export default abstract class CallConnectionInstanceBase {
   }
 
   public sendDataChannelData(data: any) {
-    if(this.dataChannel.readyState !== 'open') {
+    if(this.dataChannel?.readyState !== 'open') {
       return;
     }
 

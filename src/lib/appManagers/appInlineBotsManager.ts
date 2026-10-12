@@ -222,11 +222,30 @@ export class AppInlineBotsManager extends AppManager {
     this.appDraftsManager.setDraft(peerId, threadId, message);
   }
 
-  public callbackButtonClick(peerId: PeerId, mid: number, button?: any, game?: boolean) {
+  public callbackButtonClick(peerId: PeerId, mid: number, data?: Uint8Array, game?: boolean) {
+    const message = this.appMessagesManager.getMessageByPeer(peerId, mid);
+    // An anchored ephemeral message keeps the anchor's real mid, but the keyboard it shows is the
+    // bot's — its buttons have to answer by ephemeral id, exactly like a standalone one.
+    if(
+      this.appMessagesManager.isEphemeralMessageId(mid) ||
+      this.appMessagesManager.isEphemeralMessage(message) ||
+      this.appMessagesManager.isAnchoredEphemeralMessage(message)
+    ) {
+      if(game) {
+        return Promise.resolve(undefined);
+      }
+
+      if(!message) {
+        return Promise.resolve(undefined);
+      }
+
+      return this.appMessagesManager.getEphemeralCallbackAnswer(peerId, mid, data);
+    }
+
     return this.apiManager.invokeApi('messages.getBotCallbackAnswer', {
       peer: this.appPeersManager.getInputPeerById(peerId),
       msg_id: getServerMessageId(mid),
-      data: button?.data,
+      data,
       game
     }, {/* timeout: 1,  */stopTime: -1, noErrorBox: true});
   }
@@ -244,6 +263,10 @@ export class AppInlineBotsManager extends AppManager {
       return;
     }
 
+    if(options.ephemeral) {
+      return;
+    }
+
     this.pushPopularBot(botId);
     const splitted = queryAndResultIds.split('_');
     const queryId = splitted.shift();
@@ -251,8 +274,20 @@ export class AppInlineBotsManager extends AppManager {
     options.viaBotId = botId;
     options.queryId = queryId;
     options.resultId = resultId;
+    options.peerId = peerId;
+    options.forceOrdinary = true;
+    this.appMessagesManager.stripEphemeralReply(options);
     if(inlineResult.send_message.reply_markup) {
       options.replyMarkup = inlineResult.send_message.reply_markup;
+    }
+
+    // picking a gif out of an inline bot's results counts as using it, exactly like sending one
+    // from the panel does — tdesktop and iOS catch both at the sent message, Android at each
+    // send path. A game is left out of it the same way they do: its animation is not a gif the
+    // user picked (tdesktop's MediaGame has no document at all for checkSavedGif to look at)
+    const inlineDocument = (inlineResult as BotInlineResult.botInlineMediaResult).document as MyDocument;
+    if(inlineResult.type !== 'game' && inlineDocument?.type === 'gif') {
+      this.appGifsManager.addRecentGif(inlineDocument.id);
     }
 
     if(inlineResult.send_message._ === 'botInlineMessageText') {
@@ -413,6 +448,8 @@ export class AppInlineBotsManager extends AppManager {
 
       this.appMessagesManager.sendOther({...options, peerId, inputMedia});
     }
+
+    return true;
   }
 
   /* function checkGeoLocationAccess (botID) {

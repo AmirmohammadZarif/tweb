@@ -1,5 +1,8 @@
 import {Layouter, RectPart} from '@components/groupedLayout';
 
+// the gap between an album's items, in px — a message's album and a rich message's collage alike
+export const ALBUM_ITEM_SPACING = 1;
+
 export default function prepareAlbum(options: {
   container: HTMLElement,
   items: {w: number, h: number}[],
@@ -10,7 +13,13 @@ export default function prepareAlbum(options: {
   forMedia?: true,
   noGroupedItem?: boolean
 }) {
-  const layouter = new Layouter(options.items, options.maxWidth, options.minWidth, options.spacing, options.maxHeight);
+  const layouter = new Layouter(
+    options.items,
+    options.maxWidth,
+    options.minWidth,
+    options.spacing,
+    options.maxHeight
+  );
   const layout = layouter.layout();
 
   const widthItem = layout.find((item) => item.sides & RectPart.Right);

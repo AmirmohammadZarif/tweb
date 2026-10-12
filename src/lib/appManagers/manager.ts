@@ -17,6 +17,7 @@ import type {ApiUpdatesManager} from '@appManagers/apiUpdatesManager';
 import type {AppAvatarsManager} from '@appManagers/appAvatarsManager';
 import type {AppCallsManager} from '@appManagers/appCallsManager';
 import type {AppChatsManager} from '@appManagers/appChatsManager';
+import type {AppCommunitiesManager} from '@appManagers/appCommunitiesManager';
 import type {AppDocsManager} from '@appManagers/appDocsManager';
 import type {AppDraftsManager} from '@appManagers/appDraftsManager';
 import type {AppEmojiManager} from '@appManagers/appEmojiManager';
@@ -52,6 +53,7 @@ import type AppTranslationsManager from '@appManagers/appTranslationsManager';
 import type {AppManagers} from '@lib/managers';
 import type AppGifsManager from '@appManagers/appGifsManager';
 import type AppGiftsManager from '@appManagers/appGiftsManager';
+import type AppSavedMusicManager from '@appManagers/appSavedMusicManager';
 import type AppGamesManager from '@appManagers/appGamesManager';
 import type {AppLangPackManager} from '@appManagers/appLangPackManager';
 import type {ActiveAccountNumber} from '@lib/accounts/types';
@@ -68,6 +70,7 @@ export class AppManager {
 
   protected appPeersManager: AppPeersManager;
   protected appChatsManager: AppChatsManager;
+  protected appCommunitiesManager: AppCommunitiesManager;
   protected appDocsManager: AppDocsManager;
   protected appPhotosManager: AppPhotosManager;
   protected appPollsManager: AppPollsManager;
@@ -120,6 +123,7 @@ export class AppManager {
   protected appTranslationsManager: AppTranslationsManager;
   protected appGifsManager: AppGifsManager;
   protected appGiftsManager: AppGiftsManager;
+  protected appSavedMusicManager: AppSavedMusicManager;
   protected appGamesManager: AppGamesManager;
   protected monoforumDialogsStorage: MonoforumDialogsStorage;
   protected appPromoManager: AppPromoManager;

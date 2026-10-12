@@ -5,7 +5,8 @@ WORKDIR /app
 
 COPY . .
 
-RUN npm install -g pnpm
+# install pnpm
+RUN npm install -g pnpm@11.16.0
 
 RUN pnpm install
 

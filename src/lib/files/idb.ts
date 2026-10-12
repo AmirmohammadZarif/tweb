@@ -423,13 +423,8 @@ class IDBStorage<T extends Database<any>, StoreName extends string = T['stores']
       this.log(log + ': start');
     }
 
-    // Declared as `let` so the timeout closure below can safely reference it even
-    // if db.transaction() throws before initialization (avoids TDZ ReferenceError).
+    // Declared up front so the catch below and the watchdog can both reference it.
     let transaction: IDBTransaction;
-
-    const timeout = setTimeout(() => {
-      this.log.error('transaction not finished', transaction, log);
-    }, 10000);
 
     const _db = this.idb.openDatabase();
     const db = _db instanceof Promise ? await _db : _db;
@@ -440,14 +435,22 @@ class IDBStorage<T extends Database<any>, StoreName extends string = T['stores']
     // * https://developer.chrome.com/blog/indexeddb-durability-mode-now-defaults-to-relaxed
     // The DB connection can be closing during window teardown — catch the
     // InvalidStateError so it surfaces as a rejected promise instead of an
-    // uncaught exception, and clear the timeout to avoid the deferred ReferenceError.
+    // uncaught exception.
     try {
       transaction = db.transaction([storeName], mode, {durability: 'relaxed'});
     } catch(err) {
-      clearTimeout(timeout);
       reject(err);
       return promise;
     }
+
+    // the watchdog starts only once there is a transaction to watch: it used to
+    // be armed before the database was even awaited, and its callback reads
+    // `transaction` — so whenever opening the database was itself what hung (a
+    // blocked upgrade, say), the timeout fired against the temporal dead zone
+    // and the ReferenceError killed the worker instead of logging the stall
+    const timeout = setTimeout(() => {
+      this.log.error('transaction not finished', transaction, log);
+    }, 10000);
 
     const onError = () => {
       clearTimeout(timeout);

@@ -339,7 +339,14 @@
   }
 
   &-button {
-    background-color: rgba(255, 255, 255, .15);
+    // A native <button> does NOT inherit `color` from `.call` — the UA
+    // stylesheet pins it to the `buttontext` system colour, which follows
+    // `color-scheme` and turns black in the day theme. The button sits on the
+    // call's dark gradient in every theme, so spell the colour out (the same
+    // way `.group-call-button` does with `--gc-primary-text-color`).
+    color: #fff;
+    // fuller than it was under a backdrop blur, which no longer thickens it
+    background-color: rgba(255, 255, 255, .25);
 
     &-red {
       background-color: var(--danger-color) !important;
@@ -370,16 +377,18 @@
       // `filter: brightness(0)` clamps every non-transparent pixel to black
       // — matches the icon-font glyphs above without needing to touch the
       // Lottie palette logic in microphoneIconMini.
-      .rlottie,
-      .rlottie-icon {
+      .lottie,
+      .lottie-icon {
         filter: brightness(0);
       }
     }
+  }
 
-    &,
-    &-text {
-      opacity: 0;
-    }
+  // Hidden over the video until the pointer comes (`.show-controls`; `.no-video` keeps them shown).
+  // Inside the panel only: the button itself is shared with the video chat's.
+  .call-button,
+  .call-button-text {
+    opacity: 0;
   }
 
   // ===== Video tiles =====
@@ -455,7 +464,6 @@
     display: flex;
     align-items: center;
     margin-top: 1rem;
-    backdrop-filter: var(--blur-off, blur(25px));
     font-weight: var(--font-weight-bold);
     opacity: 0;
     transform: scale(0) translateY(0);
@@ -465,7 +473,7 @@
       transition: opacity var(--transition-standard-in), transform var(--transition-standard-in);
     }
 
-    .rlottie-icon {
+    .lottie-icon {
       width: 1.875rem !important;
       height: 1.875rem !important;
       margin-right: .25rem;
@@ -483,6 +491,48 @@
   &-party-state-text,
   &-title {
     max-width: 100%;
+    @include text-overflow();
+  }
+
+  // ===== Ringing conference invitation =====
+  //
+  // No media row to place next to the decline / accept row, so centre that row
+  // instead of leaving it in the right-hand slot it takes next to the (absent)
+  // first row. The pill under the status mirrors tdesktop's
+  // `Panel::initConferenceInvite`.
+  &.is-conference-invite {
+    .call-buttons.is-second {
+      .call-button { // ! fix backdrop-filter transition
+        &,
+        &-text {
+          transform: translateX(0);
+        }
+      }
+    }
+  }
+
+  &-participants {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    margin-top: .75rem;
+    padding: .25rem .75rem .25rem .25rem;
+    border-radius: 1.25rem;
+    background: rgba(255, 255, 255, .15);
+    opacity: 1;
+
+    .stacked-avatars {
+      // The stack sits on the gradient, not on `--surface-color`, so the ring
+      // that separates overlapping faces has to be tinted for a dark backdrop.
+      --border-color: rgba(0, 0, 0, .16);
+      --border-size: 1.5px;
+      --margin-right: -.375rem;
+      flex: 0 0 auto;
+    }
+  }
+
+  &-participants-label {
+    font-size: .875rem;
     @include text-overflow();
   }
 

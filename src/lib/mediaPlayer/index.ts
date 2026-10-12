@@ -17,7 +17,7 @@ import debounce from '@helpers/schedulers/debounce';
 import overlayCounter from '@helpers/overlayCounter';
 import onMediaLoad from '@helpers/onMediaLoad';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
-import safePlay from '@helpers/dom/safePlay';
+import playOrPlayMuted from '@helpers/dom/playOrPlayMuted';
 import ButtonIcon from '@components/buttonIcon';
 import Button from '@components/button';
 import Icon from '@components/icon';
@@ -27,7 +27,7 @@ import {numberThousandSplitterForWatching} from '@helpers/number/numberThousandS
 import createCanvasStream from '@helpers/canvas/createCanvasStream';
 import simulateEvent from '@helpers/dom/dispatchEvent';
 import indexOfAndSplice from '@helpers/array/indexOfAndSplice';
-import {VideoTimestamp} from '@components/appMediaViewerBase';
+import {VideoTimestamp} from '@components/mediaViewer/base';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import {Accessor, createSignal, Setter} from 'solid-js';
 
@@ -254,13 +254,7 @@ export default class VideoPlayer extends ControlsHover {
     }
 
     if(play/*  && video.paused */) {
-      video.play().catch((err: Error) => {
-        if(err.name === 'NotAllowedError') {
-          video.muted = true;
-          video.autoplay = true;
-          safePlay(video);
-        }
-      }).finally(() => { // due to autoplay, play will not call
+      playOrPlayMuted(video).finally(() => { // due to autoplay, play will not call
         this.setIsPlaying(!this.video.paused);
       });
     } else {
@@ -291,7 +285,7 @@ export default class VideoPlayer extends ControlsHover {
 
     this.wrapper.classList.toggle('is-playing', isPlaying);
     this.toggles.forEach((toggle) => {
-      toggle.replaceChildren(Icon(isPlaying ? 'pause' : 'play'));
+      toggle.replaceChildren(Icon(isPlaying ? 'pause_filled' : 'play_filled'));
     });
   }
 
@@ -308,7 +302,7 @@ export default class VideoPlayer extends ControlsHover {
     const onPlayCallbacks: (() => void)[] = [], onPauseCallbacks: (() => void)[] = [];
     if(skin === 'default') {
       if(this.canPause) {
-        const mainToggle = this.mainToggle = Button(`${skin}__button--big toggle`, {noRipple: true, icon: 'play'});
+        const mainToggle = this.mainToggle = Button(`${skin}__button--big toggle`, {noRipple: true, icon: 'play_filled'});
         wrapper.firstElementChild.after(mainToggle);
       }
 

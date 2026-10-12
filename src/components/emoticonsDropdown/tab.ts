@@ -10,16 +10,17 @@ import Animated from '@helpers/solid/animations';
 import windowSize from '@helpers/windowSize';
 import {EmojiGroup, StickerSet} from '@layer';
 import {AppManagers} from '@lib/managers';
-import lottieLoader from '@lib/rlottie/lottieLoader';
+import lottieLoader from '@lib/lottie/lottieLoader';
 import {LangPackKey, i18n} from '@lib/langPack';
 import {AnyFunction} from '@types';
 import {createSignal, createMemo, createResource, createEffect, untrack} from 'solid-js';
 import {render, Portal} from 'solid-js/web';
 import Icon from '@components/icon';
 import Scrollable, {ScrollableX} from '@components/scrollable';
-import attachStickerViewerListeners from '@components/stickerViewer';
+import attachMediaPeekListeners from '@components/mediaPeek';
 import VisibilityIntersector from '@components/visibilityIntersector';
 import StickersTabCategory, {EmoticonsTabStyles, StickersTabStyles} from '@components/emoticonsDropdown/category';
+import Tabs from '@components/tabs';
 import EmoticonsSearch from '@components/emoticonsDropdown/search';
 import wrapStickerSetThumb from '@components/wrappers/stickerSetThumb';
 import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
@@ -58,24 +59,29 @@ export default class EmoticonsTabC<Category extends StickersTabCategory<any, any
 
   public managers: AppManagers;
   protected noMenu: boolean;
-  protected additionalStickerViewerClass: string;
-  protected searchFetcher?: (value: string) => Promise<T>;
-  protected groupFetcher?: (group: EmojiGroup) => Promise<T>;
+  protected mediaPeekClass: string;
+  // * returning the results directly (not a promise) renders them without a repaint gap
+  protected searchFetcher?: (value: string) => MaybePromise<T>;
+  protected groupFetcher?: (group: EmojiGroup) => MaybePromise<T>;
   protected processSearchResult?: (result: {data: T, searching: boolean, grouping: boolean}) => Promise<HTMLElement>;
   protected searchNoLoader: boolean;
   protected searchPlaceholder?: LangPackKey;
   protected searchType: Parameters<typeof EmoticonsSearch>[0]['type'];
+  protected searchDebounceTime?: number;
+  protected searchVerifyDebounce?: Parameters<typeof EmoticonsSearch>[0]['verifyDebounce'];
 
   constructor(options: {
     managers: AppManagers,
     noMenu?: boolean,
-    additionalStickerViewerClass?: string,
+    mediaPeekClass?: string,
     searchFetcher?: EmoticonsTabC<Category, T>['searchFetcher'],
     groupFetcher?: EmoticonsTabC<Category, T>['groupFetcher'],
     processSearchResult?: EmoticonsTabC<Category, T>['processSearchResult'],
     searchNoLoader?: boolean,
     searchPlaceholder?: LangPackKey,
-    searchType?: Parameters<typeof EmoticonsSearch>[0]['type']
+    searchType?: Parameters<typeof EmoticonsSearch>[0]['type'],
+    searchDebounceTime?: number,
+    searchVerifyDebounce?: EmoticonsTabC<Category, T>['searchVerifyDebounce']
   }) {
     safeAssign(this, options);
     this.categories = {};
@@ -126,8 +132,7 @@ export default class EmoticonsTabC<Category extends StickersTabCategory<any, any
     this.menuWrapper = document.createElement('div');
     this.menuWrapper.classList.add('menu-wrapper', 'emoticons-menu-wrapper', 'emoticons-will-move-up');
 
-    this.menu = document.createElement('nav');
-    this.menu.className = 'menu-horizontal-div no-stripe justify-start emoticons-menu';
+    this.menu = Tabs.Menu({class: 'no-stripe justify-start emoticons-menu'}) as HTMLElement;
 
     this.menuWrapper.append(this.menu);
     this.menuScroll = new ScrollableX(this.menuWrapper);
@@ -172,9 +177,14 @@ export default class EmoticonsTabC<Category extends StickersTabCategory<any, any
 
       createEffect(() => {
         const useData = group() ? groupData : data;
-        if(!useData.loading) {
-          setLoadedData(() => useData());
+        if(useData.loading) {
+          return;
         }
+
+        // * reading a rejected resource throws, which would abort this effect before it
+        // * ever sets the data - the previous query's results would stay on screen with no
+        // * spinner and no error, making every following query look like it never ran
+        setLoadedData(() => useData.error === undefined ? useData() : undefined);
       });
 
       createEffect(() => {
@@ -184,6 +194,8 @@ export default class EmoticonsTabC<Category extends StickersTabCategory<any, any
       return EmoticonsSearch({
         type: this.searchType,
         placeholder: this.searchPlaceholder,
+        debounceTime: this.searchDebounceTime,
+        verifyDebounce: this.searchVerifyDebounce,
         loading,
         onValue: setQuery,
         onFocusChange: setFocused,
@@ -204,12 +216,19 @@ export default class EmoticonsTabC<Category extends StickersTabCategory<any, any
 
   public createCategory({
     stickerSet,
+    id,
     title,
     isLocal,
-    noMenuTab = !stickerSet,
+    noMenuTab = !stickerSet && !id,
     styles
   }: {
     stickerSet?: StickerSet,
+    /**
+     * Overrides the key the category is filed under. The group's own set needs one of these:
+     * keyed by the set id it would fight for the slot with the same set installed by the user,
+     * and with the events (install / delete / reorder) that address installed sets by id.
+     */
+    id?: string,
     title?: HTMLElement | DocumentFragment,
     isLocal?: boolean,
     noMenuTab?: boolean,
@@ -219,8 +238,9 @@ export default class EmoticonsTabC<Category extends StickersTabCategory<any, any
       noMenuTab = true;
     }
 
+    const categoryId = id ?? '' + stickerSet?.id;
     const category: Category = new StickersTabCategory({
-      id: '' + stickerSet?.id,
+      id: categoryId,
       title,
       overflowElement: this.content,
       getContainerSize: () => {
@@ -251,9 +271,9 @@ export default class EmoticonsTabC<Category extends StickersTabCategory<any, any
     const container = category.elements.container;
     container.classList.add('hide');
 
-    if(stickerSet) {
+    if(stickerSet || id) {
       category.set = stickerSet;
-      this.categories[stickerSet.id] = category;
+      this.categories[categoryId] = category;
       this.categoriesMap.set(container, category);
       this.categoriesIntersector.observe(container);
     }
@@ -374,6 +394,9 @@ export default class EmoticonsTabC<Category extends StickersTabCategory<any, any
       category.elements.container.remove();
       category.elements.menuTab?.remove();
       this.categoriesIntersector.unobserve(category.elements.container);
+      // mirrors the observe in createCategory; without it the sticky observer keeps
+      // reporting a container that no longer resolves to a category
+      this.menuOnClickResult?.stickyIntersector?.unobserve(category.elements.container);
       delete this.categories[category.id];
       this.categoriesMap.delete(category.elements.container);
       this.categoriesByMenuTabMap.delete(category.elements.menuTab);
@@ -422,9 +445,15 @@ export default class EmoticonsTabC<Category extends StickersTabCategory<any, any
     this.disposeSearch?.();
   }
 
+  /**
+   * Holds an event back until the panel is off screen. The check is `isDisplayed` rather than
+   * `isActive`: sending closes the dropdown, which drops the `active` class right away while
+   * the panel keeps fading out for another animation frame or two — an update landing in that
+   * window would be seen rearranging the panel, which is exactly what postponing avoids.
+   */
   protected postponedEvent = <K>(cb: (...args: K[]) => void) => {
     return (...args: K[]) => {
-      if(this.emoticonsDropdown.isActive()) {
+      if(this.emoticonsDropdown?.isDisplayed()) {
         this.postponedEvents.push({cb, args});
       } else {
         cb(...args);
@@ -432,14 +461,15 @@ export default class EmoticonsTabC<Category extends StickersTabCategory<any, any
     };
   };
 
-  protected attachHelpers({getTextColor, verifyRecent, canHaveEmojiTimer, isGif}: {
+  protected attachHelpers({getTextColor, verifyRecent, canHaveEmojiTimer, isGif, onContextMenu}: {
     getTextColor?: () => string,
     verifyRecent?: (target: HTMLElement) => boolean,
     canHaveEmojiTimer?: boolean,
-    isGif?: boolean
+    isGif?: boolean,
+    onContextMenu?: Parameters<typeof createStickersContextMenu>[0]['onContextMenu']
   } = {}) {
-    attachStickerViewerListeners({
-      additionalClass: this.additionalStickerViewerClass,
+    attachMediaPeekListeners({
+      class: this.mediaPeekClass,
       listenTo: this.content,
       listenerSetter: this.listenerSetter,
       getTextColor
@@ -454,6 +484,7 @@ export default class EmoticonsTabC<Category extends StickersTabCategory<any, any
       isGif,
       canHaveEmojiTimer,
       canViewPack: true,
+      onContextMenu,
       onOpen: () => {
         this.emoticonsDropdown.setIgnoreMouseOut(type, true);
       },

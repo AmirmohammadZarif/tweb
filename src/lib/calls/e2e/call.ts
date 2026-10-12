@@ -29,6 +29,7 @@ import {
   hydrateStateFromBlock
 } from './blockchain';
 import {
+  bytesToHex,
   concatBytes,
   constantTimeEqual,
   ed25519Verify,
@@ -37,7 +38,16 @@ import {
   randomBytes
 } from './crypto';
 import {VerificationChain, VerificationStateSnapshot} from './emoji';
-import {decryptData, decryptHeader, encryptData, encryptHeader} from './messageEncryption';
+import {pruneGroupState} from './conferenceMembership';
+import createSerializedQueue from '@helpers/createSerializedQueue';
+import {
+  decryptData,
+  decryptHeader,
+  decryptHeaderWithKey,
+  encryptData,
+  encryptHeaderWithKey,
+  importHeaderKey
+} from './messageEncryption';
 import {PrivateKey, PublicKey} from './keys';
 import {localToServer, serverToLocal, TLReader, TLWriter} from './tl';
 import {
@@ -61,7 +71,10 @@ const MAGIC_CALL_PACKET_LARGE_MSG_ID = 0x1ce56c2d;
 // referencing more than this in header_a.
 export const MAX_ACTIVE_EPOCHS = 15;
 
-// Replay-protection window per (sender, channel) — sliding set of seen seqnos.
+// Replay-protection window per (sender, channel) — the last REPLAY_WINDOW_SIZE
+// seqnos, like tdlib CallEncryption::check_not_seen / mark_as_seen
+// (Call.cpp:477-499): anything older than the window or already seen is
+// rejected.
 const REPLAY_WINDOW_SIZE = 1024;
 
 // Channel IDs are constrained to a 10-bit range.
@@ -76,6 +89,10 @@ function magicBytes(magic: number): Uint8Array {
   w.uint32(magic >>> 0);
   return w.finish();
 }
+
+// Every frame's MAC input and signed message start with these; never mutated.
+const MAGIC_CALL_PACKET_BYTES = magicBytes(MAGIC_CALL_PACKET);
+const MAGIC_CALL_PACKET_LARGE_MSG_ID_BYTES = magicBytes(MAGIC_CALL_PACKET_LARGE_MSG_ID);
 
 // ===== Active epoch =====
 //
@@ -94,6 +111,21 @@ export interface ActiveEpoch {
   // Snapshot of participants at this epoch — needed to verify Ed25519
   // signatures on packets that were encrypted with this epoch's key.
   participantKeysByUserId: Map<string, PublicKey>;
+  // `groupSharedKey`'s header key (importHeaderKey), filled in by
+  // epochHeaderKey on first use. Every frame sealed or opened under this epoch
+  // needs the same one, and it goes when the epoch does.
+  headerKey?: Promise<CryptoKey>;
+}
+
+function epochHeaderKey(epoch: ActiveEpoch): Promise<CryptoKey> {
+  if(!epoch.headerKey) {
+    const headerKey = epoch.headerKey = importHeaderKey(epoch.groupSharedKey);
+    // A failed derivation must not stick to the epoch: the next frame retries.
+    headerKey.catch(() => {
+      if(epoch.headerKey === headerKey) epoch.headerKey = undefined;
+    });
+  }
+  return epoch.headerKey;
 }
 
 // ===== Shared key derivation =====
@@ -192,48 +224,52 @@ export async function encryptPacket(opts: EncryptPacketOptions): Promise<Uint8Ar
 
   const unencryptedPrefix = opts.data.subarray(0, opts.unencryptedPrefixLength);
   const plaintext = opts.data.subarray(opts.unencryptedPrefixLength);
+  const epochsN = opts.epochs.length;
 
   // header_a = int32(epochs_n) || epoch_hash[0] || ... || epoch_hash[N-1]
-  const headerAWriter = new TLWriter();
-  headerAWriter.int32(opts.epochs.length);
-  for(const e of opts.epochs) headerAWriter.raw(e.epochHash);
-  const headerA = headerAWriter.finish();
+  const headerA = concatBytes(int32LeToBytes(epochsN), ...opts.epochs.map((e) => e.epochHash));
 
   // payload = LE_int32(channel_id) || LE_uint32(seqno) || plaintext
-  const payloadWriter = new TLWriter();
-  payloadWriter.int32(opts.channelId);
-  payloadWriter.uint32(opts.seqno);
-  payloadWriter.raw(plaintext);
-  const payload = payloadWriter.finish();
+  const payload = concatBytes(int32LeToBytes(opts.channelId), int32LeToBytes(opts.seqno), plaintext);
 
   // One-time secret: random per packet, encrypts the payload, then itself
   // encrypted per-epoch so receivers with any active epoch can recover it.
   const oneTimeSecret = opts.oneTimeSecret || randomBytes(32);
 
-  const extraData = concatBytes(magicBytes(MAGIC_CALL_PACKET), headerA, unencryptedPrefix);
+  const extraData = concatBytes(MAGIC_CALL_PACKET_BYTES, headerA, unencryptedPrefix);
   const {output: encryptedPayload, largeMsgId} = await encryptData(payload, oneTimeSecret, extraData);
 
   // Sign with our Ed25519 private — over (magic2 || large_msg_id), NOT over
   // the encrypted bytes (see notes/call.md gotcha #3).
-  const toSign = concatBytes(magicBytes(MAGIC_CALL_PACKET_LARGE_MSG_ID), largeMsgId);
-  const signature = opts.privateKey.sign(toSign);
+  const signature = opts.privateKey.sign(concatBytes(MAGIC_CALL_PACKET_LARGE_MSG_ID_BYTES, largeMsgId));
 
-  const encryptedPacket = concatBytes(encryptedPayload, signature);
+  // The wire layout (see the top of this file), written once into the buffer
+  // that is returned: unencrypted_prefix | header_a | header_b |
+  // encrypted_packet (= encrypted_payload || signature) | trailer.
+  const headerBOffset = unencryptedPrefix.length + headerA.length;
+  const packetOffset = headerBOffset + 32 * epochsN;
+  const packetEnd = packetOffset + encryptedPayload.length + signature.length;
+  const out = new Uint8Array(packetEnd + 4);
+  out.set(unencryptedPrefix);
+  out.set(headerA, unencryptedPrefix.length);
+  out.set(encryptedPayload, packetOffset);
+  out.set(signature, packetOffset + encryptedPayload.length);
+  // Trailer: 4-byte LE uint32 of unencrypted_prefix length.
+  out.set(int32LeToBytes(opts.unencryptedPrefixLength), packetEnd);
+  const encryptedPacket = out.subarray(packetOffset, packetEnd);
 
   // Per-epoch encrypted_header: encrypt the one-time secret with each
-  // epoch's group_shared_key. Receiver finds the matching epoch by hash.
-  const headerBParts: Uint8Array[] = [];
-  for(const epoch of opts.epochs) {
-    const enc = await encryptHeader(oneTimeSecret, encryptedPacket, epoch.groupSharedKey);
+  // epoch's group_shared_key. Receiver finds the matching epoch by hash. The
+  // slots do not depend on each other, so they are sealed concurrently.
+  const headerB = await Promise.all(opts.epochs.map(async(epoch) =>
+    encryptHeaderWithKey(oneTimeSecret, encryptedPacket, await epochHeaderKey(epoch))
+  ));
+  headerB.forEach((enc, i) => {
     if(enc.length !== 32) throw new Error(`encryptHeader produced ${enc.length} bytes, expected 32`);
-    headerBParts.push(enc);
-  }
-  const headerB = concatBytes(...headerBParts);
+    out.set(enc, headerBOffset + 32 * i);
+  });
 
-  // Trailer: 4-byte LE uint32 of unencrypted_prefix length.
-  const trailer = int32LeToBytes(opts.unencryptedPrefixLength);
-
-  return concatBytes(unencryptedPrefix, headerA, headerB, encryptedPacket, trailer);
+  return out;
 }
 
 // ===== Per-frame decrypt =====
@@ -262,33 +298,61 @@ export interface DecryptPacketOptions {
   replayState?: ReplayState;
 }
 
-export class ReplayState {
-  // Map keyed by `${publicKeyHex}:${channelId}` → sorted set of recent seqnos.
-  private seen: Map<string, number[]> = new Map();
-
-  public checkAndMark(senderPub: PublicKey, channelId: number, seqno: number): void {
-    const key = `${pkHex(senderPub)}:${channelId}`;
-    const window = this.seen.get(key);
-    if(!window || window.length === 0) {
-      this.seen.set(key, [seqno]);
-      return;
-    }
-    const oldest = window[0];
-    if(seqno < oldest) throw new Error(`replay: seqno ${seqno} older than oldest ${oldest}`);
-    if(window.includes(seqno)) throw new Error(`replay: seqno ${seqno} already seen`);
-    window.push(seqno);
-    window.sort((a, b) => a - b);
-    while(window.length > REPLAY_WINDOW_SIZE ||
-      (window.length > 0 && window[0] + REPLAY_WINDOW_SIZE < seqno)) {
-      window.shift();
-    }
-  }
+interface ReplayWindow {
+  // Hex of the sender's public key — what a prune matches on.
+  sender: string;
+  // Accepted seqnos in (max - REPLAY_WINDOW_SIZE, max]. Never more than
+  // REPLAY_WINDOW_SIZE entries: whatever the bound passes is deleted below.
+  seen: Set<number>;
+  max: number;
 }
 
-function pkHex(pk: PublicKey): string {
-  let s = '';
-  for(let i = 0; i < pk.bytes.length; i++) s += pk.bytes[i].toString(16).padStart(2, '0');
-  return s;
+export class ReplayState {
+  // Keyed by `${senderPublicKeyHex}:${channelId}`.
+  private readonly windows = new Map<string, ReplayWindow>();
+
+  public checkAndMark(senderPub: PublicKey, channelId: number, seqno: number): void {
+    const sender = bytesToHex(senderPub.bytes);
+    const key = `${sender}:${channelId}`;
+    const window = this.windows.get(key);
+    if(!window) {
+      this.windows.set(key, {sender, seen: new Set([seqno]), max: seqno});
+      return;
+    }
+    // tdlib erases every seqno at or below `max - 1024` once `max` is marked
+    // and rejects anything below the oldest survivor; on a dense stream that
+    // survivor sits right on this bound.
+    const oldest = window.max - REPLAY_WINDOW_SIZE;
+    if(seqno <= oldest) throw new Error(`replay: seqno ${seqno} older than window (max ${window.max})`);
+    if(window.seen.has(seqno)) throw new Error(`replay: seqno ${seqno} already seen`);
+    window.seen.add(seqno);
+    if(seqno <= window.max) return;
+    // The window moved: the seqnos that just fell out are exactly those in
+    // (old bound, new bound] — as many as the advance, so a steady stream
+    // pays one delete per frame instead of a sort of the whole window, and a
+    // jump past the window's width leaves nothing worth walking.
+    if(seqno - window.max >= REPLAY_WINDOW_SIZE) {
+      window.seen.clear();
+      window.seen.add(seqno);
+    } else {
+      for(let s = oldest + 1; s <= seqno - REPLAY_WINDOW_SIZE; s++) window.seen.delete(s);
+    }
+    window.max = seqno;
+  }
+
+  public has(senderPub: PublicKey, channelId: number): boolean {
+    return this.windows.has(`${bytesToHex(senderPub.bytes)}:${channelId}`);
+  }
+
+  // Drop the windows of every sender outside `activeSenders` (hex public keys).
+  // Run when an epoch is forgotten: a sender that is in no active epoch cannot
+  // produce a frame we would decrypt, so its windows are dead weight that a
+  // long call would otherwise keep for everyone who ever spoke.
+  public retainSenders(activeSenders: Set<string>): void {
+    for(const [key, window] of this.windows) {
+      if(!activeSenders.has(window.sender)) this.windows.delete(key);
+    }
+  }
 }
 
 // ===== High-level Call wrapper =====
@@ -304,9 +368,20 @@ const FORGET_EPOCH_DELAY_MS = 10_000;
 
 // Verification broadcasts (emoji commit/reveal) for a block we haven't applied
 // yet are buffered and replayed once the chain catches up (tdlib
-// delayed_broadcasts_). Bounded so a malicious server can't flood memory.
+// delayed_broadcasts_). One complete 200-member round can legitimately have
+// 200 commits followed by 200 reveals buffered before its main block arrives.
+// A broadcast cannot be authenticated before its block is applied (the
+// signer's key lives in that block's group state), so the bound is structural:
+// one commit and one reveal per (height, sender), heights within a short
+// horizon, and eviction (see evictDelayedBroadcast) once the total is hit.
+// Whatever does not fit is CONSUMED AND DROPPED — the indexed subchain cursor
+// always advances. Refusing an item used to park the cursor on it: every poll
+// re-delivered the same far-future commit, every later honest commit/reveal
+// queued behind it, and the emoji fingerprint never completed again.
 const MAX_DELAYED_FUTURE_HEIGHTS = 16;
-const MAX_DELAYED_BROADCASTS = 128;
+const MAX_DELAYED_BROADCASTS = 400;
+
+export type InboundMessageDisposition = 'consumed' | 'dropped';
 
 interface EpochCleanupEntry {
   epochHash: Uint8Array;
@@ -340,6 +415,15 @@ export class E2eCall {
   // Future-height verification broadcasts waiting for their block to arrive.
   private readonly delayedBroadcasts = new Map<number, GroupBroadcast[]>();
   private readonly now: () => number;
+  // Serialises the mutating entry points. Every one of them is a
+  // read-modify-write over `state`/`epochs`/`verification` with crypto awaits
+  // in the middle, and the two chain-delivery paths genuinely race (the
+  // `updateGroupCallChainBlocks` push is fire-and-forget, the 1.5s poll fetches
+  // the same window). tdlib gets this from a per-Call mutex taken by
+  // `call_apply_block` (Container.h:203-221); this is the JS equivalent, and it
+  // lives on the object rather than only in the worker so the invariant holds
+  // for every caller, tests included.
+  private opQueue = createSerializedQueue();
 
   private constructor(
     public readonly userId: bigint,
@@ -379,6 +463,9 @@ export class E2eCall {
     previousBlockServer: Uint8Array,
     self: GroupParticipant
   ): Promise<Uint8Array> {
+    if(!constantTimeEqual(self.publicKey, privateKey.publicKeyBytes)) {
+      throw new CallError('NOT_PARTICIPANT', 'self-add public key does not match the signing key');
+    }
     const previousBlock = decodeBlock(new TLReader(serverToLocal(previousBlockServer)));
     const priorState = await hydrateStateFromBlock(previousBlock);
 
@@ -398,9 +485,25 @@ export class E2eCall {
     userId: bigint,
     privateKey: PrivateKey,
     lastBlockServer: Uint8Array,
-    now: () => number = () => Date.now()
+    // Epoch grace periods are durations, not civil timestamps. Workers and
+    // windows both expose performance.now(), whose monotonic time origin is
+    // unaffected by manual/NTP wall-clock corrections.
+    now: () => number = () => performance.now()
   ): Promise<E2eCall> {
-    const lastBlock = decodeBlock(new TLReader(serverToLocal(lastBlockServer)));
+    const state = await E2eCall.hydrateForSelf(userId, privateKey, lastBlockServer);
+
+    const call = new E2eCall(userId, privateKey, state, now);
+    await call.updateGroupSharedKey();
+    await call.startVerification();
+    return call;
+  }
+
+  private static async hydrateForSelf(
+    userId: bigint,
+    privateKey: PrivateKey,
+    blockBytes: Uint8Array
+  ): Promise<ClientBlockchainState> {
+    const lastBlock = decodeBlock(new TLReader(serverToLocal(blockBytes)));
     const state = await hydrateStateFromBlock(lastBlock);
 
     const participant = state.groupState.participants.find((p) =>
@@ -416,10 +519,7 @@ export class E2eCall {
       );
     }
 
-    const call = new E2eCall(userId, privateKey, state, now);
-    await call.updateGroupSharedKey();
-    await call.startVerification();
-    return call;
+    return state;
   }
 
   // ===== State queries =====
@@ -456,7 +556,18 @@ export class E2eCall {
   // exact chain tip (hash match), instead of letting `applyBlock` reject them
   // as a fatal HEIGHT_MISMATCH that would drop us from the call. A genuine
   // forward gap (height > our height + 1) still fails the call.
-  public async applyBlockBytes(serverBlock: Uint8Array): Promise<void> {
+  public applyBlockBytes(serverBlock: Uint8Array): Promise<void> {
+    return this.enqueue(() => this.applyBlockBytesLocked(serverBlock));
+  }
+
+  // Runs `fn` after every previously-queued operation has settled. The queue
+  // itself never rejects, so one failed block cannot wedge the ones behind it;
+  // the caller still sees `fn`'s own rejection.
+  private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    return this.opQueue.enqueue(fn);
+  }
+
+  private async applyBlockBytesLocked(serverBlock: Uint8Array): Promise<void> {
     this.checkStatus();
     try {
       const block = decodeBlock(new TLReader(serverToLocal(serverBlock)));
@@ -480,14 +591,77 @@ export class E2eCall {
     }
   }
 
-  // Build a LOCAL-format block that swaps the group_state. Caller relays
-  // the bytes to the server, which then echoes back to all participants
-  // (including us) via applyBlockBytes.
-  public async buildChangeStateBlock(newGroupState: GroupState): Promise<Uint8Array> {
-    this.checkStatus();
-    const {changes} = await buildChangesForNewState(newGroupState);
-    const block = await buildBlock(this.state, changes, this.privateKey);
-    return serializeBlock(block);
+  // Build an only_left removal against the state that is current when this
+  // operation reaches the call queue. The main thread intentionally supplies
+  // identities, not a precomputed GroupState snapshot: a queued applyBlock may
+  // have added or removed peers before we get here.
+  public buildRemoveParticipantsBlock(userIds: bigint[]): Promise<{
+    block: Uint8Array;
+    removedUserIds: bigint[];
+  } | undefined> {
+    return this.enqueue(async() => {
+      this.checkStatus();
+      const currentState = this.state;
+      const currentIds = new Set(currentState.groupState.participants.map(({userId}) => userId));
+      const seen = new Set<bigint>();
+      const removedUserIds = userIds.filter((userId) => {
+        if(userId === this.userId || seen.has(userId) || !currentIds.has(userId)) return false;
+        seen.add(userId);
+        return true;
+      });
+      if(!removedUserIds.length) return;
+
+      const newGroupState = pruneGroupState(currentState.groupState, removedUserIds);
+      const {changes} = await buildChangesForNewState(newGroupState);
+      const block = await buildBlock(currentState, changes, this.privateKey);
+      return {block: serializeBlock(block), removedUserIds};
+    });
+  }
+
+  /**
+   * Replace the blockchain/epoch/verification anchor after a server-accepted
+   * rejoin while retaining the worker-owned private key and packet sequence
+   * counters. The input is the exact LOCAL-format self-add proposal that the
+   * server accepted; serverToLocal is intentionally tolerant of local bytes.
+   */
+  public reanchor(acceptedLocalBlock: Uint8Array): Promise<void> {
+    return this.enqueue(async() => {
+      const state = await E2eCall.hydrateForSelf(this.userId, this.privateKey, acceptedLocalBlock);
+      const replacement = new E2eCall(this.userId, this.privateKey, state, this.now);
+      await replacement.updateGroupSharedKey();
+      await replacement.startVerification();
+
+      this.status = null;
+      this.state = replacement.state;
+      this.epochs = replacement.epochs;
+      this.epochsToForget = replacement.epochsToForget;
+      this.verification = replacement.verification;
+      this.delayedBroadcasts.clear();
+      // Every pre-anchor epoch is gone; the replay windows of members who left
+      // with them go too. Windows of retained members survive (their seqnos
+      // continue under the new epoch).
+      this.pruneReplayWindows();
+    });
+  }
+
+  // Wipe every secret this object holds: epoch keys and the unrevealed
+  // verification nonce. The worker calls this from its `destroy` RPC before
+  // dropping its reference; the signing key is the worker's own and is
+  // destroyed there. Poisons the call so nothing in flight can emit a frame
+  // under a zeroed key.
+  public destroy(): void {
+    for(const epoch of this.epochs) {
+      epoch.groupSharedKey.fill(0);
+      // A CryptoKey cannot be wiped, only let go of.
+      epoch.headerKey = undefined;
+    }
+    this.epochs = [];
+    this.epochsToForget = [];
+    this.verification?.destroy();
+    this.verification = undefined;
+    this.delayedBroadcasts.clear();
+    this.pruneReplayWindows();
+    this.status = new CallError('CALL_FAILED', 'call destroyed');
   }
 
   // ===== Packet ops =====
@@ -509,14 +683,29 @@ export class E2eCall {
     const seqno = prev + 1;
     this.seqnoByChannel.set(channelId, seqno);
 
-    return encryptPacket({
+    const packet = await encryptPacket({
       channelId,
       data,
       unencryptedPrefixLength,
-      epochs: this.epochs,
+      // Snapshot the epoch list. encrypt/decrypt run on the media hot path and
+      // are deliberately NOT on opQueue (queuing every frame behind block
+      // application would stall the pipeline), so a queued applyBlock can push
+      // a new epoch while encryptPacket is mid-flight. encryptPacket reads
+      // opts.epochs twice across awaits — once for the header_a epoch count,
+      // again for the per-epoch header_b slots — so sharing the live array
+      // could emit a frame whose two halves disagree about how many epochs it
+      // carries, which no receiver can parse.
+      epochs: this.epochs.slice(),
       privateKey: this.privateKey,
       seqno
     });
+    // The snapshot shares the key buffers with `this.epochs`, and destroy()
+    // zeroes those in place while a frame may still be mid-encryption. A
+    // header_b slot sealed with an all-zero key would hand the frame's
+    // one-time secret to anyone, so a call that died underneath us drops the
+    // frame instead of returning it.
+    this.checkStatus();
+    return packet;
   }
 
   public async decrypt(
@@ -529,14 +718,28 @@ export class E2eCall {
     if(fromUserId === this.userId) {
       throw new CallError('SELF_PACKET', 'packet encrypted by us');
     }
-    void channelId; // currently informational; sender's channel_id wins
+    // The receiving transform's channel is deliberately NOT compared with the
+    // channel_id inside the frame. tdesktop encrypts AND decrypts every stream
+    // — mic, camera, screen share — under channel 0 (tde2e_api.cpp:88,
+    // `CallChannelId(0)`), and tdlib ignores expected_channel_id as well
+    // (Call.cpp:475 "currently ignore expected_channel_id"); enforcing it here
+    // would drop every tdesktop screen share. The frame's own channel_id keys
+    // the replay window, so a frame replayed onto another channel is still a
+    // duplicate. Do not "fix" this.
+    void channelId;
     const decoded = await decryptPacket({
       packet,
       fromUserId,
       selfUserId: this.userId,
-      epochs: this.epochs,
+      // Same reasoning as encrypt(): a stable view for the duration of the call.
+      epochs: this.epochs.slice(),
       replayState: this.replayState
     });
+    // A frame in flight used to fail its MAC once destroy() had zeroed the
+    // epoch key under it; with the header key cached on the epoch it no
+    // longer would, so a call that died underneath us drops it here instead,
+    // like encrypt().
+    this.checkStatus();
     return decoded.data;
   }
 
@@ -558,17 +761,21 @@ export class E2eCall {
 
   // Accept an inbound emoji broadcast (server-format). Failure is non-fatal
   // (we log + swallow per tdlib semantics).
-  public async receiveInbound(serverMessage: Uint8Array): Promise<void> {
+  public receiveInbound(serverMessage: Uint8Array): Promise<InboundMessageDisposition> {
+    return this.enqueue(() => this.receiveInboundLocked(serverMessage));
+  }
+
+  private async receiveInboundLocked(serverMessage: Uint8Array): Promise<InboundMessageDisposition> {
     this.checkStatus();
-    if(!this.verification) return;
+    if(!this.verification) return 'consumed';
     let broadcast: GroupBroadcast;
     try {
       broadcast = decodeGroupBroadcast(new TLReader(serverToLocal(serverMessage)));
     } catch{
       // Malformed — log + don't fail the call (tdlib logs; we drop silently).
-      return;
+      return 'consumed';
     }
-    await this.deliverBroadcast(broadcast);
+    return this.deliverBroadcast(broadcast);
   }
 
   // Route a decoded broadcast to the current verification round, or buffer it
@@ -578,11 +785,10 @@ export class E2eCall {
   // in delayed_broadcasts_ and replays them via on_new_main_block; without it a
   // reorder permanently drops the commit and the emoji fingerprint never
   // completes — silently denying the user the MITM backstop.
-  private async deliverBroadcast(broadcast: GroupBroadcast): Promise<void> {
-    if(!this.verification) return;
+  private async deliverBroadcast(broadcast: GroupBroadcast): Promise<InboundMessageDisposition> {
+    if(!this.verification) return 'consumed';
     if(broadcast.chainHeight > this.verification.height) {
-      this.bufferDelayedBroadcast(broadcast);
-      return;
+      return this.bufferDelayedBroadcast(broadcast) ? 'consumed' : 'dropped';
     }
     // Current-or-stale height: the verification chain validates height + hash
     // itself and drops stale ones.
@@ -591,21 +797,58 @@ export class E2eCall {
     } catch{
       // log + swallow
     }
+    return 'consumed';
   }
 
-  private bufferDelayedBroadcast(broadcast: GroupBroadcast): void {
-    if(!this.verification) return;
-    // Bound against a flood: ignore far-future heights and a full buffer.
-    if(broadcast.chainHeight > this.verification.height + MAX_DELAYED_FUTURE_HEIGHTS) return;
+  // Returns false when the broadcast was not retained (the caller reports it).
+  private bufferDelayedBroadcast(broadcast: GroupBroadcast): boolean {
+    if(!this.verification) return true;
+    const {chainHeight} = broadcast;
+    if(chainHeight > this.verification.height + MAX_DELAYED_FUTURE_HEIGHTS) return false;
+
+    let list = this.delayedBroadcasts.get(chainHeight);
+    // One commit and one reveal per sender is all a round can use of a height.
+    if(list?.some((b) => b.kind === broadcast.kind && b.userId === broadcast.userId)) return true;
+
     let total = 0;
-    for(const list of this.delayedBroadcasts.values()) total += list.length;
-    if(total >= MAX_DELAYED_BROADCASTS) return;
-    let list = this.delayedBroadcasts.get(broadcast.chainHeight);
+    for(const entries of this.delayedBroadcasts.values()) total += entries.length;
+    if(total >= MAX_DELAYED_BROADCASTS && !this.evictDelayedBroadcast(broadcast)) return false;
+
     if(!list) {
       list = [];
-      this.delayedBroadcasts.set(broadcast.chainHeight, list);
+      this.delayedBroadcasts.set(chainHeight, list);
     }
     list.push(broadcast);
+    return true;
+  }
+
+  // Make room for `incoming` in a full buffer. Nothing in it is authenticated
+  // yet, so drop what a flood is made of first: an entry whose sender is not a
+  // current member, farthest height first. Failing that, only a member's
+  // broadcast is worth displacing another member's — from the farthest height,
+  // and never when the newcomer is the farthest itself.
+  private evictDelayedBroadcast(incoming: GroupBroadcast): boolean {
+    const members = new Set(this.state.groupState.participants.map((p) => p.userId));
+    const heights = [...this.delayedBroadcasts.keys()].sort((a, b) => b - a);
+    for(const height of heights) {
+      const list = this.delayedBroadcasts.get(height)!;
+      const index = list.findIndex((b) => !members.has(b.userId));
+      if(index === -1) continue;
+      this.removeDelayedBroadcast(height, index);
+      return true;
+    }
+
+    if(!members.has(incoming.userId)) return false;
+    const farthest = heights[0];
+    if(farthest === undefined || farthest <= incoming.chainHeight) return false;
+    this.removeDelayedBroadcast(farthest, this.delayedBroadcasts.get(farthest)!.length - 1);
+    return true;
+  }
+
+  private removeDelayedBroadcast(height: number, index: number): void {
+    const list = this.delayedBroadcasts.get(height)!;
+    list.splice(index, 1);
+    if(!list.length) this.delayedBroadcasts.delete(height);
   }
 
   // After the chain advances to a new tip, replay buffered broadcasts for that
@@ -653,14 +896,27 @@ export class E2eCall {
   // Refresh the shared key after a state change. Adds a new epoch, schedules
   // any previously-active epoch for delayed eviction, and runs sync().
   private async updateGroupSharedKey(): Promise<void> {
-    if(!this.state.sharedKey) {
+    // Snapshot the state ONCE. Every value that ends up in the pushed epoch —
+    // the shared key it derives from, the height it claims, and the epoch_hash
+    // it is addressed by — must come from the SAME block, or the epoch pairs
+    // one block's key with another block's hash. That is not hypothetical: the
+    // pre-fix code read `sharedKey`/`lastBlockHash` as arguments before the
+    // `await` below and re-read `height`/`lastBlockHash` off `this.state`
+    // after it, so a block applied during the await produced exactly that
+    // mismatch — and because the torn entry already claimed the tip height,
+    // the forget-scheduling check below skipped it and the superseded key
+    // never expired. Worker RPCs are serialised now (encrypt.worker.ts), so the
+    // interleaving cannot occur; reading from one snapshot makes the epoch
+    // internally consistent regardless.
+    const state = this.state;
+    if(!state.sharedKey) {
       throw new CallError('NO_SHARED_KEY', 'state has no shared_key after applyBlock');
     }
 
     // tdlib add_shared_key re-verifies on EVERY new epoch that our key still
     // maps to our user_id in the (possibly server-rewritten) group_state — not
     // just once at create().
-    const self = this.state.groupState.participants.find((p) =>
+    const self = state.groupState.participants.find((p) =>
       constantTimeEqual(p.publicKey, this.privateKey.publicKeyBytes)
     );
     if(!self) {
@@ -672,7 +928,7 @@ export class E2eCall {
 
     if(this.epochs.length > 0) {
       const last = this.epochs[this.epochs.length - 1];
-      if(this.state.height > last.height) {
+      if(state.height > last.height) {
         this.epochsToForget.push({
           epochHash: last.epochHash,
           forgetAt: this.now() + FORGET_EPOCH_DELAY_MS
@@ -688,23 +944,42 @@ export class E2eCall {
     // every inbound frame fails its MAC. Hardcoding `true` here was the bug: it
     // was self-consistent for tweb↔tweb (both mixed) but incompatible with the
     // official iOS/Desktop/Android clients (which don't mix at version 0).
-    const v1OrLater = groupStateVersion(this.state.groupState) >= 1;
+    const v1OrLater = groupStateVersion(state.groupState) >= 1;
     const groupSharedKey = await deriveGroupSharedKey(
       this.userId,
       this.privateKey,
-      this.state.sharedKey,
-      this.state.lastBlockHash,
+      state.sharedKey,
+      state.lastBlockHash,
       v1OrLater
     );
 
     const participantKeys = new Map<string, PublicKey>();
-    for(const p of this.state.groupState.participants) {
+    for(const p of state.groupState.participants) {
       participantKeys.set(p.userId.toString(), new PublicKey(p.publicKey));
     }
 
+    // One epoch per epoch_hash, like tdlib's `epochs_` map keyed by height
+    // (Call.h:121) whose insert is a hard `CHECK(added)` (Call.cpp:274-277).
+    // An array append cannot express that invariant on its own, so enforce it:
+    // two entries sharing a hash but holding different keys mean one of them
+    // is addressed by a block it did not come from, and every frame we send
+    // would carry a header_b slot openable with the wrong-epoch key.
+    const existing = this.epochs.find((e) => constantTimeEqual(e.epochHash, state.lastBlockHash));
+    if(existing) {
+      if(!constantTimeEqual(existing.groupSharedKey, groupSharedKey)) {
+        throw new CallError(
+          'CALL_FAILED',
+          `epoch ${bytesToHex(state.lastBlockHash).slice(0, 16)} already active with a different shared key`
+        );
+      }
+      // Same block re-applied and re-derived to the same key — nothing to add.
+      this.sync();
+      return;
+    }
+
     this.epochs.push({
-      height: this.state.height,
-      epochHash: new Uint8Array(this.state.lastBlockHash),
+      height: state.height,
+      epochHash: new Uint8Array(state.lastBlockHash),
       groupSharedKey,
       participantKeysByUserId: participantKeys
     });
@@ -716,11 +991,24 @@ export class E2eCall {
   // decrypt (mirrors `CallEncryption::sync` in tdlib).
   private sync(): void {
     const now = this.now();
+    let forgotten = false;
     while(this.epochsToForget.length > 0 &&
       (this.epochsToForget[0].forgetAt <= now || this.epochs.length > MAX_ACTIVE_EPOCHS)) {
       const {epochHash} = this.epochsToForget.shift()!;
       this.epochs = this.epochs.filter((e) => !constantTimeEqual(e.epochHash, epochHash));
+      forgotten = true;
     }
+    if(forgotten) this.pruneReplayWindows();
+  }
+
+  // Keep replay windows only for senders that can still address one of our
+  // active epochs — the union of every active epoch's participants.
+  private pruneReplayWindows(): void {
+    const active = new Set<string>();
+    for(const epoch of this.epochs) {
+      for(const pk of epoch.participantKeysByUserId.values()) active.add(bytesToHex(pk.bytes));
+    }
+    this.replayState.retainSenders(active);
   }
 }
 
@@ -783,7 +1071,7 @@ export async function decryptPacket(opts: DecryptPacketOptions): Promise<Decrypt
     const epoch = opts.epochs.find((e) => constantTimeEqual(e.epochHash, epochHashes[i]));
     if(!epoch) continue;
     try {
-      oneTimeSecret = await decryptHeader(encryptedHeaders[i], encryptedPacket, epoch.groupSharedKey);
+      oneTimeSecret = await decryptHeaderWithKey(encryptedHeaders[i], encryptedPacket, await epochHeaderKey(epoch));
       chosenEpoch = epoch;
       break;
     } catch{
@@ -799,7 +1087,7 @@ export async function decryptPacket(opts: DecryptPacketOptions): Promise<Decrypt
   const signature = encryptedPacket.subarray(encryptedPacket.length - 64);
 
   const extraData = concatBytes(
-    magicBytes(MAGIC_CALL_PACKET),
+    MAGIC_CALL_PACKET_BYTES,
     headerA,
     unencryptedPrefix
   );
@@ -808,7 +1096,7 @@ export async function decryptPacket(opts: DecryptPacketOptions): Promise<Decrypt
   // Verify Ed25519 signature against the sender's public key.
   const senderPub = chosenEpoch.participantKeysByUserId.get(opts.fromUserId.toString());
   if(!senderPub) throw new Error(`decryptPacket: unknown sender user_id ${opts.fromUserId}`);
-  const toVerify = concatBytes(magicBytes(MAGIC_CALL_PACKET_LARGE_MSG_ID), largeMsgId);
+  const toVerify = concatBytes(MAGIC_CALL_PACKET_LARGE_MSG_ID_BYTES, largeMsgId);
   if(!ed25519Verify(senderPub.bytes, toVerify, signature)) {
     throw new Error('decryptPacket: signature verification failed');
   }

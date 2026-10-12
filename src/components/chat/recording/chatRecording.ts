@@ -26,12 +26,12 @@ import findUpClassName from '@helpers/dom/findUpClassName';
 import blurActiveElement from '@helpers/dom/blurActiveElement';
 import {attachClickEvent, simulateClickEvent} from '@helpers/dom/clickEvent';
 import {fastRaf} from '@helpers/schedulers';
-import PopupPeer from '@components/popups/peer';
+import showPeerPopup from '@components/popups/peer';
 import appMediaPlaybackController from '@components/appMediaPlaybackController';
 import toHHMMSS from '@helpers/string/toHHMMSS';
-import PopupElement from '@components/popups';
 import contextMenuController from '@helpers/contextMenuController';
 import {ChatRights} from '@appManagers/appChatsManager';
+import type {MessageSendingParams} from '@appManagers/appMessagesManager';
 import createContextMenu from '@helpers/dom/createContextMenu';
 import {PAYMENT_REJECTED} from '@components/chat/paidMessagesInterceptor';
 import {createPosterFromMedia} from '@helpers/createPoster';
@@ -93,6 +93,7 @@ export default class ChatRecording {
   // Set when a left-button long-press on the record button opens the mode-switch
   // menu, so the click that ends the press doesn't also start a recording.
   private recordModeLongPressed = false;
+  private pinnedEphemeralSendingParams: MessageSendingParams;
 
   private releaseMediaPlayback: () => void;
 
@@ -215,12 +216,19 @@ export default class ChatRecording {
         return;
       }
 
-      const sendingParams = this.input.chat.getMessageSendingParams();
+      const sendingParams = {
+        ...this.input.chat.getMessageSendingParams(),
+        ...this.pinnedEphemeralSendingParams
+      };
+      const isEphemeral = !!sendingParams.ephemeral;
+      this.pinnedEphemeralSendingParams = undefined;
 
-      const preparedPaymentResult = await this.input.paidMessageInterceptor.prepareStarsForPayment(1);
-      if(preparedPaymentResult === PAYMENT_REJECTED) return;
+      if(!isEphemeral) {
+        const preparedPaymentResult = await this.input.paidMessageInterceptor.prepareStarsForPayment(1);
+        if(preparedPaymentResult === PAYMENT_REJECTED) return;
 
-      sendingParams.confirmedPaymentResult = preparedPaymentResult;
+        sendingParams.confirmedPaymentResult = preparedPaymentResult;
+      }
 
       const duration = this.getRecordingElapsedMs() / 1000 | 0;
       const dataBlob = new Blob([typedArray as BlobPart], {type: 'audio/ogg'});
@@ -235,11 +243,11 @@ export default class ChatRecording {
           isMedia: true,
           duration,
           waveform,
-          objectURL: result.url,
+          objectURLBlob: result.blob,
           clearDraft: true
         });
 
-        this.input.onMessageSent(false, true);
+        this.input.onMessageSent(false, true, isEphemeral);
       });
     };
 
@@ -285,17 +293,23 @@ export default class ChatRecording {
         // instead of a black circle while the upload runs.
         const thumbPromise = this.captureVideoPoster();
 
-        const sendingParams = this.input.chat.getMessageSendingParams();
-        const preparedPaymentResult = await this.input.paidMessageInterceptor.prepareStarsForPayment(1);
-        if(preparedPaymentResult === PAYMENT_REJECTED) return;
-        sendingParams.confirmedPaymentResult = preparedPaymentResult;
+        const sendingParams = {
+          ...this.input.chat.getMessageSendingParams(),
+          ...this.pinnedEphemeralSendingParams
+        };
+        const isEphemeral = !!sendingParams.ephemeral;
+        this.pinnedEphemeralSendingParams = undefined;
+        if(!isEphemeral) {
+          const preparedPaymentResult = await this.input.paidMessageInterceptor.prepareStarsForPayment(1);
+          if(preparedPaymentResult === PAYMENT_REJECTED) return;
+          sendingParams.confirmedPaymentResult = preparedPaymentResult;
+        }
 
         const duration = this.getRecordingElapsedMs() / 1000 | 0;
         const thumb = await thumbPromise;
         // The Blob already carries the recorder's mime type. We hand it to
         // sendFile with isRoundMessage=true so the documentAttributeVideo flag
         // gets `round_message=true` (see appMessagesManager.sendFile).
-        const objectURL = URL.createObjectURL(blob);
         this.input.managers.appMessagesManager.sendFile({
           ...sendingParams,
           file: blob,
@@ -307,12 +321,12 @@ export default class ChatRecording {
           // the optimistic message render correctly.
           width: 400,
           height: 400,
-          objectURL,
+          objectURLBlob: blob,
           thumb,
           clearDraft: true
         });
 
-        this.input.onMessageSent(false, true);
+        this.input.onMessageSent(false, true, isEphemeral);
       };
     }
   }
@@ -672,7 +686,8 @@ export default class ChatRecording {
     this.stopPlayback();
 
     try {
-      const {url} = await opusDecodeController.decode(snapshot, false);
+      const {blob} = await opusDecodeController.decode(snapshot, false);
+      const url = URL.createObjectURL(blob);
       this.playbackObjectUrl = url;
     } catch(err) {
       console.error('[ChatInput] voice playback decode error:', err);
@@ -790,6 +805,8 @@ export default class ChatRecording {
       return;
     }
 
+    if(value) this.input.setMessageInputExpanded(false);
+
     this.active = value;
     this.input.inputState.set({isRecording: value});
     this.input.setShrinking(this.active, ['is-recording']);
@@ -863,7 +880,7 @@ export default class ChatRecording {
         onClick: () => this.setRecordingMediaType('voice'),
         verify: () => this.canSwitchRecordingMode() && this.getActiveRecordingMediaType() !== 'voice'
       }, {
-        icon: 'recordround',
+        icon: 'recordround_filled',
         text: 'Chat.Input.Record.Video',
         onClick: () => this.setRecordingMediaType('video'),
         verify: () => this.canSwitchRecordingMode() && this.getActiveRecordingMediaType() !== 'video'
@@ -927,6 +944,16 @@ export default class ChatRecording {
     // Guard it explicitly.
     if(this.active || this.isStartingRecording) return;
     if(type === 'video' && !this.videoRecorder) return;
+    if(!this.input.verifyEphemeralCommand()) return;
+    const sendingParams = this.input.chat.getMessageSendingParams();
+    this.pinnedEphemeralSendingParams = sendingParams.ephemeral ? {
+      ephemeral: true,
+      ephemeralReceiverId: sendingParams.ephemeralReceiverId,
+      peerId: sendingParams.peerId,
+      threadId: sendingParams.threadId,
+      replyToMsgId: sendingParams.replyToMsgId,
+      replyTo: sendingParams.replyTo
+    } : undefined;
     this.isStartingRecording = true;
     const promise = type === 'video' ? this.startVideoRecording() : this.startVoiceRecording();
     Promise.resolve(promise).catch(() => {}).finally(() => {
@@ -936,13 +963,14 @@ export default class ChatRecording {
 
   private async startVoiceRecording() {
     const isAnyChat = this.input.chat.peerId.isAnyChat();
+    const isEphemeral = this.input.isEphemeralComposerMode();
     const flag: ChatRights = 'send_voices';
-    if(isAnyChat && !(await this.input.chat.canSend(flag))) {
+    if(!isEphemeral && isAnyChat && !(await this.input.chat.canSend(flag))) {
       toastNew({langPackKey: POSTING_NOT_ALLOWED_MAP[flag]});
       return;
     }
 
-    if(await this.input.showSlowModeTooltipIfNeeded()) {
+    if(!isEphemeral && await this.input.showSlowModeTooltipIfNeeded()) {
       return;
     }
 
@@ -992,7 +1020,7 @@ export default class ChatRecording {
       opusDecodeController.setKeepAlive(true);
 
       const showDiscardPopup = () => {
-        PopupElement.createPopup(PopupPeer, 'popup-cancel-record', {
+        showPeerPopup('popup-cancel-record', {
           titleLangKey: 'DiscardVoiceMessageTitle',
           descriptionLangKey: 'DiscardVoiceMessageDescription',
           buttons: [{
@@ -1004,7 +1032,7 @@ export default class ChatRecording {
             langKey: 'Continue',
             isCancel: true
           }]
-        }).show();
+        });
       };
 
       this.recordingOverlayListener = this.input.listenerSetter.add(getOverlayRoot())('mousedown', (e) => {
@@ -1073,15 +1101,16 @@ export default class ChatRecording {
   private async startVideoRecording() {
     if(!this.videoRecorder) return;
     const isAnyChat = this.input.chat.peerId.isAnyChat();
+    const isEphemeral = this.input.isEphemeralComposerMode();
     // Round video notes go through the same restriction set as voice (the
     // server-side flag is shared; clients gate on `send_voices`).
     const flag: ChatRights = 'send_voices';
-    if(isAnyChat && !(await this.input.chat.canSend(flag))) {
+    if(!isEphemeral && isAnyChat && !(await this.input.chat.canSend(flag))) {
       toastNew({langPackKey: POSTING_NOT_ALLOWED_MAP[flag]});
       return;
     }
 
-    if(await this.input.showSlowModeTooltipIfNeeded()) {
+    if(!isEphemeral && await this.input.showSlowModeTooltipIfNeeded()) {
       return;
     }
 
@@ -1144,7 +1173,7 @@ export default class ChatRecording {
     this.setupVideoWaveform();
 
     const showDiscardPopup = () => {
-      PopupElement.createPopup(PopupPeer, 'popup-cancel-record', {
+      showPeerPopup('popup-cancel-record', {
         titleLangKey: 'DiscardVoiceMessageTitle',
         descriptionLangKey: 'DiscardVoiceMessageDescription',
         buttons: [{
@@ -1156,7 +1185,7 @@ export default class ChatRecording {
           langKey: 'Continue',
           isCancel: true
         }]
-      }).show();
+      });
     };
 
     this.recordingOverlayListener = this.input.listenerSetter.add(getOverlayRoot())('mousedown', (e) => {
@@ -1241,15 +1270,14 @@ export default class ChatRecording {
 
   // Snapshot the current round-preview frame as a JPEG poster for the optimistic
   // message. Must be called while the camera is still live (we keep it alive
-  // through the stop fade-out). Returns the {blob, url, size} shape sendFile's
-  // `thumb` expects, or undefined on failure (sending still works without it).
-  private async captureVideoPoster(): Promise<{blob: Blob, url: string, size: MediaSize} | undefined> {
+  // through the stop fade-out).
+  private async captureVideoPoster(): Promise<{blob: Blob, size: MediaSize} | undefined> {
     const v = this.videoRecordingPanel?.previewVideo;
     if(!v || !v.videoWidth || !v.videoHeight) return undefined;
     try {
       const poster = await createPosterFromMedia(v);
       if(!poster?.blob) return undefined;
-      return {blob: poster.blob, url: URL.createObjectURL(poster.blob), size: poster.size};
+      return {blob: poster.blob, size: poster.size};
     } catch(e) {
       return undefined;
     }

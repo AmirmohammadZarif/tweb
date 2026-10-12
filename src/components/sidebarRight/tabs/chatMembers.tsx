@@ -1,15 +1,16 @@
-import {Component} from 'solid-js';
+import {Component, createSignal} from 'solid-js';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
 import createParticipantContextMenu from '@helpers/dom/createParticipantContextMenu';
+import {wrapSolidComponent} from '@helpers/solid/wrapSolidComponent';
 import {Chat, ChatFull} from '@layer';
 import hasRights from '@appManagers/utils/chats/hasRights';
 import {i18n} from '@lib/langPack';
 import addChatUsers from '@components/addChatUsers';
 import AppSelectPeers from '@components/appSelectPeers';
 import ButtonCorner from '@components/buttonCorner';
-import CheckboxField from '@components/checkboxField';
-import Row from '@components/row';
-import SettingSection from '@components/settingSection';
+import CheckboxFieldTsx from '@components/checkboxFieldTsx';
+import Row from '@components/rowTsx';
+import Section from '@components/section';
 import {handleChannelsTooMuch} from '@components/popups/channelsTooMuch';
 import {createSelectorForParticipants} from './participantsSelector';
 import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
@@ -31,7 +32,7 @@ const ChatMembers: Component = () => {
     tab.title.replaceChildren(i18n(isBroadcast ? 'PeerInfo.Subscribers' : 'GroupMembers'));
 
     const canAddMembers = hasRights(chat, 'invite_users');
-    const addBtn = ButtonCorner({icon: 'addmember_filled', className: 'is-visible'});
+    const addBtn = ButtonCorner({icon: 'addmember_filled', className: 'is-visible', ariaLabel: 'GroupAddMembers'});
     if(canAddMembers) tab.content.append(addBtn);
 
     attachClickEvent(addBtn, () => {
@@ -57,41 +58,47 @@ const ChatMembers: Component = () => {
     selector = _selector;
 
     if(canHideMembers) {
-      const section = new SettingSection({
-        noDelimiter: true,
-        caption: 'ChannelHideMembersInfo'
-      });
-
       const checked = !!channelFull?.pFlags?.participants_hidden;
-      const row = new Row({
-        titleLangKey: 'ChannelHideMembers',
-        icon: 'hide',
-        checkboxField: new CheckboxField({
-          name: 'hide-members',
-          toggle: true,
-          listenerSetter: tab.listenerSetter,
-          checked
-        }),
-        listenerSetter: tab.listenerSetter
-      });
+      const hiddenSignal = createSignal(checked);
+      const [busy, setBusy] = createSignal(false);
+      let confirmedHidden = checked;
 
-      tab.listenerSetter.add(row.checkboxField.input)('change', () => {
-        const _checked = row.checkboxField.checked;
-        if(_checked === checked) {
+      const onHiddenChange = (hidden: boolean) => {
+        if(hidden === confirmedHidden) {
           return;
         }
 
-        const promise = handleChannelsTooMuch(() => tab.managers.appChatsManager.toggleParticipantsHidden(chatId, _checked))
+        const previous = confirmedHidden;
+        setBusy(true);
+        handleChannelsTooMuch(() => tab.managers.appChatsManager.toggleParticipantsHidden(chatId, hidden))
+        .then(() => {
+          confirmedHidden = hidden;
+        })
         .catch((err) => {
           console.error('toggleParticipantsHidden error', err);
-          row.checkboxField.setValueSilently(!_checked);
-        });
-        row.disableWithPromise(promise);
-      });
+          hiddenSignal[1](previous);
+        })
+        .finally(() => setBusy(false));
+      };
 
-      section.content.append(row.container);
+      const section = wrapSolidComponent(() => (
+        <Section noDelimiter caption="ChannelHideMembersInfo">
+          <Row disabled={busy()}>
+            <Row.Icon icon="hide" />
+            <Row.CheckboxFieldToggle>
+              <CheckboxFieldTsx
+                disabled={busy()}
+                signal={hiddenSignal}
+                toggle
+                onChange={onHiddenChange}
+              />
+            </Row.CheckboxFieldToggle>
+            <Row.Title>{i18n('ChannelHideMembers')}</Row.Title>
+          </Row>
+        </Section>
+      ), tab.middlewareHelper.get());
 
-      selector.scrollable.append(section.container, selector.scrollable.container.lastElementChild);
+      selector.scrollable.append(section, selector.scrollable.container.lastElementChild);
     }
 
     createParticipantContextMenu({

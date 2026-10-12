@@ -1,11 +1,13 @@
 import {Accessor, createEffect, createSignal, onCleanup, For, on} from 'solid-js';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
 import placeCaretAtEnd from '@helpers/dom/placeCaretAtEnd';
+import buttonKeyDown from '@helpers/solid/buttonKeyDown';
 import fastSmoothScroll, {fastSmoothScrollToStart} from '@helpers/fastSmoothScroll';
 import createMiddleware from '@helpers/solid/createMiddleware';
 import {EmojiGroup} from '@layer';
 import {AppEmojiManager} from '@appManagers/appEmojiManager';
-import {LangPackKey} from '@lib/langPack';
+import I18n, {LangPackKey} from '@lib/langPack';
+import Modes from '@config/modes';
 import rootScope from '@lib/rootScope';
 import InputSearch from '@components/inputSearch';
 import Scrollable from '@components/scrollable2';
@@ -49,9 +51,14 @@ function addSearchCategories(props: {
         class="emoticons-search-input-category"
         classList={{active: selected() === group}}
         title={group.title}
+        role="button"
+        tabindex={Modes.a11y ? 0 : undefined}
+        aria-label={group.title}
+        aria-pressed={selected() === group}
         onClick={[onEmojiGroupClick, group]}
+        onKeyDown={buttonKeyDown}
       >
-        <div ref={stickerContainer} class="emoticons-search-input-category-sticker"></div>
+        <div ref={stickerContainer} class="emoticons-search-input-category-sticker" aria-hidden={true}></div>
       </div>
     );
 
@@ -99,6 +106,7 @@ function addSearchCategories(props: {
   inputSearch.currentPlaceholder.classList.remove('will-animate');
 
   const arrowButton = inputSearch.createButtonIcon('arrow_prev', 'will-animate', 'emoticons-search-input-arrow');
+  arrowButton.setAttribute('aria-label', I18n.format('StarsRating.Back', true));
   inputSearch.searchIcon.classList.add('will-animate');
   inputSearch.searchIcon.after(arrowButton);
 
@@ -132,6 +140,11 @@ function addSearchCategories(props: {
 export default function EmoticonsSearch(props: {
   type: 'emoji' | 'stickers' | 'gifs'
   placeholder?: LangPackKey,
+  // * defaults to 0 - local searches (emoji, stickers) can run on every keystroke,
+  // * server-backed ones must not or the API floods the client out
+  debounceTime?: number,
+  // * return false to answer a value right away, e.g. one the tab already has results for
+  verifyDebounce?: ConstructorParameters<typeof InputSearch>[0]['verifyDebounce'],
   loading?: Accessor<boolean>,
   onValue: (value: string) => void,
   onFocusChange?: ConstructorParameters<typeof InputSearch>[0]['onFocusChange'],
@@ -152,7 +165,8 @@ export default function EmoticonsSearch(props: {
     onDebounce: setDebounced,
     noBorder: true,
     noFocusEffect: true,
-    debounceTime: 0
+    debounceTime: props.debounceTime ?? 0,
+    verifyDebounce: props.verifyDebounce
   });
   inputSearch.container.classList.add('emoticons-search-input-container');
   inputSearch.input.classList.add('emoticons-search-input');

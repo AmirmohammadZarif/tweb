@@ -1,12 +1,14 @@
 import editableFieldStyles from '@/scss/modulePartials/editableFieldContent.module.scss';
 import {createAutoDeleteIcon} from '@components/autoDeleteIcon';
 import {getOverlayRoot} from '@helpers/appWindow';
-import {IconTsx} from '@components/iconTsx';
+import getPollCountryName from '@helpers/getPollCountryName';
+import attachPlainMessageEditor from '@components/chat/inputEditor/plainField';
 import InputField from '@components/inputField';
 import showDatePickerPopup from '@components/popups/datePicker';
+import showPickCountryPopup from '@components/popups/pickCountry';
 import SimpleFormField from '@components/simpleFormField';
 import Space from '@components/space';
-import StaticSwitch from '@components/staticSwitch';
+import CheckboxFieldTsx from '@components/checkboxFieldTsx';
 import {wrapFormattedDuration} from '@components/wrappers/wrapDuration';
 import contextMenuController from '@helpers/contextMenuController';
 import {formatFullSentTime} from '@helpers/date';
@@ -20,14 +22,14 @@ import {requestRAF} from '@helpers/solid/requestRAF';
 import classNames from '@helpers/string/classNames';
 import {useIsCleaned} from '@hooks/useIsCleaned';
 import {oneDayInSeconds, oneHourInSeconds, oneWeekInSeconds} from '@lib/constants';
-import {LangPackKey} from '@lib/langPack';
+import I18n, {LangPackKey, i18n} from '@lib/langPack';
 import {useHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
 import {FilterBooleanKeys} from '@types';
-import {Accessor, createEffect, createSignal, JSX, on, onCleanup, Show} from 'solid-js';
+import {Accessor, createEffect, createSignal, on, onCleanup, Show} from 'solid-js';
 import {supportedDescriptionFormattingTypes} from './config';
 import {EmojiButtonWithOpacity as EmojiDropdownButton} from './emojiButtonWithOpacity';
 import {MediaAttachment} from './mediaAttachment';
-import {CreatePollStore, useCreatePollContext} from './storeContext';
+import {CreatePollStore, QUIZ_POLL_SETTINGS, useCreatePollContext} from './storeContext';
 import styles from './styles.module.scss';
 import {useCreatePollLimits} from './useCreatePollLimits';
 import {createFormFieldClickHandler, interactableClass, useSupportsMedia} from './utils';
@@ -36,9 +38,11 @@ type BooleanSettingKey = FilterBooleanKeys<CreatePollStore>;
 
 const minEndTimeFromNowMinutes = 5;
 
-export const PollSettingsSectionContent = () => {
+export const PollSettingsSectionContent = (props: {
+  countriesElementRef?: (element: HTMLElement) => void
+}) => {
   const {Row} = useHotReloadGuard();
-  const {maxExplanationLength} = useCreatePollLimits();
+  const {countriesMax, maxExplanationLength} = useCreatePollLimits();
   const context = useCreatePollContext();
   const supportsMedia = useSupportsMedia();
 
@@ -46,6 +50,24 @@ export const PollSettingsSectionContent = () => {
   const [explanationElement, setExplanationElement] = createSignal<HTMLElement>();
   const [pollDurationRowElement, setPollDurationRowElement] = createSignal<HTMLElement>();
   const [isDurationMenuOpen, setIsDurationMenuOpen] = createSignal(false);
+
+  const getCountriesLabel = () => {
+    const countries = context.store.countriesIso2;
+    if(countries.length === 1) return getPollCountryName(countries[0]);
+
+    if(countries.length > 1) return i18n('NewPoll.CountriesCount', [countries.length]);
+  };
+
+  const openCountriesPicker = () => {
+    showPickCountryPopup({
+      initial: context.store.countriesIso2,
+      limit: countriesMax(),
+      limitReachedLangKey: 'BoostingSelectUpToWarningCountriesPlural',
+      naming: 'poll',
+      onSelect: (countriesIso2) => context.setStore('countriesIso2', countriesIso2),
+      titleLangKey: 'BoostingSelectCountry'
+    });
+  };
 
 
   const explanationInput = new InputField({
@@ -61,7 +83,13 @@ export const PollSettingsSectionContent = () => {
     }
   });
 
+  // The description travels as text plus entities; the composer's engine on
+  // the plain schema gives it the same formatting as the chat input.
+  const explanationInputEditor = attachPlainMessageEditor(explanationInput.input);
+  onCleanup(() => explanationInputEditor.destroy());
+
   explanationInput.input.classList.replace('input-field-input', editableFieldStyles.editableFieldContent);
+  explanationInput.input.setAttribute('aria-label', I18n.format('NewPoll.Explanation.Placeholder', true));
 
   const formatTimeInSpan = (timestamp: number) => {
     // Without the span, solid will throw an error when the state is updated
@@ -92,8 +120,7 @@ export const PollSettingsSectionContent = () => {
         <SettingsOption
           title='NewPoll.ShowWhoVoted'
           subtitle='NewPoll.ShowWhoVotedSubtitle'
-          mediaStyle={getGradientStyle(0)}
-          icon='eye1'
+          icon='eye1_filled'
           checked={context.store.showWhoVoted}
           onClick={() => {
             if(context.store.showWhoVoted) {
@@ -112,8 +139,7 @@ export const PollSettingsSectionContent = () => {
       <SettingsOption
         title='NewPoll.AllowMultipleAnswers'
         subtitle='NewPoll.AllowMultipleAnswersSubtitle'
-        mediaStyle={getGradientStyle(1)}
-        icon='poll_multiple_answers'
+        icon='poll_multiple_answers_filled'
         checked={context.store.allowMultipleAnswers}
         onClick={handleSettingsFlag('allowMultipleAnswers')}
       />
@@ -121,7 +147,6 @@ export const PollSettingsSectionContent = () => {
         <SettingsOption
           title='NewPoll.AllowAddingOptions'
           subtitle='NewPoll.AllowAddingOptionsSubtitle'
-          mediaStyle={getGradientStyle(2)}
           icon='checklist_add'
           checked={context.store.allowAddingOptions}
           disabled={context.store.hasCorrectAnswer || !context.store.showWhoVoted}
@@ -131,7 +156,6 @@ export const PollSettingsSectionContent = () => {
       <SettingsOption
         title='NewPoll.AllowRevoting'
         subtitle='NewPoll.AllowRevotingSubtitle'
-        mediaStyle={getGradientStyle(3)}
         icon='flip'
         checked={context.store.allowRevoting}
         onClick={handleSettingsFlag('allowRevoting')}
@@ -139,24 +163,19 @@ export const PollSettingsSectionContent = () => {
       <SettingsOption
         title='NewPoll.ShuffleOptions'
         subtitle='NewPoll.ShuffleOptionsSubtitle'
-        mediaStyle={getGradientStyle(4)}
-        icon='replace'
+        icon='replace_circles'
         checked={context.store.shuffleOptions}
         onClick={handleSettingsFlag('shuffleOptions')}
       />
       <SettingsOption
         title='NewPoll.SetCorrectAnswer'
         subtitle={context.store.allowMultipleAnswers ? 'NewPoll.SetMultipleCorrectAnswerSubtitle' : 'NewPoll.SetCorrectAnswerSubtitle'}
-        mediaStyle={getGradientStyle(5)}
         icon='checklist_done'
         checked={context.store.hasCorrectAnswer}
+        disabled={context.quiz !== undefined}
         onClick={() => {
           if(!context.store.hasCorrectAnswer) {
-            context.setStore({
-              hasCorrectAnswer: true,
-              allowAddingOptions: false,
-              allowRevoting: false
-            });
+            context.setStore(QUIZ_POLL_SETTINGS);
           } else {
             context.setStore({
               hasCorrectAnswer: false
@@ -164,11 +183,40 @@ export const PollSettingsSectionContent = () => {
           }
         }}
       />
+      <Show when={context.isBroadcast()}>
+        <SettingsOption
+          title='NewPoll.RestrictToSubscribers'
+          subtitle='NewPoll.RestrictToSubscribersSubtitle'
+          icon='group'
+          checked={context.store.restrictToSubscribers}
+          onClick={handleSettingsFlag('restrictToSubscribers')}
+        />
+        <SettingsOption
+          title='NewPoll.LimitByCountry'
+          subtitle='NewPoll.LimitByCountrySubtitle'
+          icon='location'
+          checked={context.store.limitByCountry}
+          onClick={handleSettingsFlag('limitByCountry')}
+        />
+        <HeightTransition>
+          <Show when={context.store.limitByCountry}>
+            <div style={{overflow: 'hidden'}}>
+              <Row ref={props.countriesElementRef} clickable={openCountriesPicker}>
+                <Row.Title>
+                  <I18nTsx key='NewPoll.AllowedCountries' />
+                </Row.Title>
+                <Row.RightContent class={styles.pollDuration}>
+                  {getCountriesLabel()}
+                </Row.RightContent>
+              </Row>
+            </div>
+          </Show>
+        </HeightTransition>
+      </Show>
       <SettingsOption
         title='NewPoll.LimitDuration'
         subtitle='NewPoll.LimitDurationSubtitle'
-        mediaStyle={getGradientStyle(6)}
-        icon='timer'
+        icon='timer_filled'
         checked={context.store.durationLimited}
         onClick={handleSettingsFlag('durationLimited')}
       />
@@ -197,18 +245,20 @@ export const PollSettingsSectionContent = () => {
                 </Row.RightContent>
               </Row>
             </div>
-            <Row clickable={handleSettingsFlag('hideResults')}>
+            <Row>
+              <Row.CheckboxFieldToggle>
+                <CheckboxFieldTsx
+                  toggle
+                  checked={context.store.hideResults}
+                  onChange={handleSettingsFlag('hideResults')}
+                />
+              </Row.CheckboxFieldToggle>
               <Row.Title>
                 <I18nTsx key='NewPoll.HideResults' />
               </Row.Title>
               <Row.Subtitle>
                 <I18nTsx key='NewPoll.HideResultsSubtitle' />
               </Row.Subtitle>
-              <Row.RightContent>
-                <StaticSwitch
-                  checked={context.store.hideResults}
-                />
-              </Row.RightContent>
             </Row>
           </div>
         </Show>
@@ -250,17 +300,11 @@ export const PollSettingsSectionContent = () => {
                     ]}
                     imgClass={styles.mediaAttachmentImage}
                     attachedMedia={context.store.explanationAttachment}
-                    onAttach={(value) => {
-                      context.setStore('explanationAttachment', value);
-                    }}
+                    onAttach={(value) => context.setStore('explanationAttachment', value)}
                   />
                 </SimpleFormField.WithAutoLengthCounter>
               </Show>
             </SimpleFormField>
-
-            <SimpleFormField.Caption class={styles.captionOverride}>
-              <I18nTsx key='AddAnExplanationInfo' />
-            </SimpleFormField.Caption>
           </div>
         </Show>
       </HeightTransition>
@@ -268,26 +312,9 @@ export const PollSettingsSectionContent = () => {
   );
 };
 
-const gradients = [
-  ['#1ba0eb', '#2294e6'],
-  ['#ee9b19', '#e48e16'],
-  ['#2fbacc', '#2aa5ca'],
-  ['#bd69f0', '#a459e1'],
-  ['#f0842c', '#e36b1c'],
-  ['#4ec643', '#2fb837'],
-  ['#ef4e54', '#e33d55']
-] as const;
-
-const getGradientStyle = (index: number): JSX.CSSProperties => ({
-  '--gradient-start': gradients[index][0],
-  '--gradient-end': gradients[index][1]
-});
-
-
 const SettingsOption = (props: {
   title: LangPackKey;
   subtitle: LangPackKey;
-  mediaStyle: JSX.CSSProperties;
   icon: Icon;
   disabled?: boolean;
   checked?: boolean;
@@ -296,17 +323,21 @@ const SettingsOption = (props: {
   const {Row} = useHotReloadGuard();
 
   return (
-    <Row clickable={props.onClick} disabled={props.disabled}>
-      <Row.Media class={styles.mediaIcon} size='small' style={props.mediaStyle}>
-        <IconTsx icon={props.icon} />
-      </Row.Media>
+    <Row disabled={props.disabled}>
+      <Row.CheckboxFieldToggle>
+        <CheckboxFieldTsx
+          toggle
+          checked={props.checked}
+          disabled={props.disabled}
+          lockIcon={props.disabled ? 'lock' : undefined}
+          onChange={() => props.onClick?.()}
+        />
+      </Row.CheckboxFieldToggle>
+      <Row.Icon icon={props.icon} />
       <Row.Title>
         <I18nTsx key={props.title} />
       </Row.Title>
       <Row.Subtitle><I18nTsx key={props.subtitle} /></Row.Subtitle>
-      <Row.RightContent>
-        <StaticSwitch checked={props.checked} handleContent={props.disabled ? <StaticSwitch.HandleIcon icon='lock' /> : undefined} />
-      </Row.RightContent>
     </Row>
   );
 };

@@ -22,7 +22,7 @@ import rootScope, {BroadcastEvents} from '@lib/rootScope';
 import appImManager from '@lib/appImManager';
 import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
 import limitSymbols from '@helpers/string/limitSymbols';
-import apiManagerProxy, {NotificationBuildTaskPayload, NotificationBuildStoryTaskPayload} from '@lib/apiManagerProxy';
+import apiManagerProxy, {NotificationBuildTaskPayload, NotificationBuildStoryTaskPayload, NotificationBuildStoryReactionTaskPayload} from '@lib/apiManagerProxy';
 import commonStateStorage from '@lib/commonStateStorage';
 import type {ActiveAccountNumber} from '@lib/accounts/types';
 import {createProxiedManagersForAccount, ProxiedManagers} from '@lib/getProxiedManagers';
@@ -61,8 +61,32 @@ export type NotificationSettings = StateSettings['notifications'];
 
 const SHOW_NOTIFICATIONS_FOR_OTHER_ACCOUNT = false;
 
+// * push loc_key prefix of a reaction to our own story ('REACT_STORY', 'REACT_STORY_HIDDEN')
+const STORY_REACTION_LOC_KEY = 'REACT_STORY';
+
+// * cancels are fired per message, so batch them into a single storage write
+const CANCEL_FLUSH_TIMEOUT = 100;
+const MAX_PENDING_NOTIFICATIONS = 1000;
+
 type Account = {managers: ProxiedManagers};
 type NotificationKey = BroadcastEvents['notification_cancel'];
+type PendingNotifications = Partial<Record<ActiveAccountNumber, NotificationKey[]>>;
+/** peerId -> the message id everything is read up to */
+type CancelledRanges = Map<PeerId, number>;
+
+function matchesCancelledRange(key: NotificationKey, accountNumber: ActiveAccountNumber, ranges: CancelledRanges) {
+  if(!ranges) {
+    return false;
+  }
+
+  const [type, keyAccountNumber, peerId, mid] = key.split('_');
+  if(type !== 'msg' || +keyAccountNumber !== accountNumber) {
+    return false;
+  }
+
+  const maxId = ranges.get(+peerId as PeerId);
+  return maxId !== undefined && +mid <= maxId;
+}
 
 function wrapUserName(user: User.user) {
   let name = user.first_name;
@@ -89,6 +113,10 @@ export class UiNotificationsManager {
 
   private stopped: boolean;
 
+  private cancelledKeys: Set<NotificationKey>;
+  private cancelledRanges: Map<ActiveAccountNumber, CancelledRanges>;
+  private cancelTimeout: number;
+
   private topMessagesDeferred: CancellablePromise<void>;
 
   private setAppBadge: (contents?: any) => Promise<void>;
@@ -105,8 +133,19 @@ export class UiNotificationsManager {
     return this.appSettings.notifications;
   }
 
+  private async getPendingNotifications(): Promise<PendingNotifications> {
+    return (await commonStateStorage.get('pendingNotifications', false)) || {};
+  }
+
   public async getNotificationsCountForAllAccounts(): Promise<Partial<Record<ActiveAccountNumber, number>>> {
-    return (await commonStateStorage.get('notificationsCount', false)) || {};
+    const pending = await this.getPendingNotifications();
+    const count: Partial<Record<ActiveAccountNumber, number>> = {};
+    for(const key in pending) {
+      const accountNumber = +key as ActiveAccountNumber;
+      count[accountNumber] = pending[accountNumber]?.length || 0;
+    }
+
+    return count;
   }
 
   private async getNotificationsCountForAllAccountsForTitle() {
@@ -123,33 +162,96 @@ export class UiNotificationsManager {
     return count;
   }
 
-  private async getNotificationsCount(accountNumber: ActiveAccountNumber) {
-    const notificationsCount = await this.getNotificationsCountForAllAccounts();
-    return notificationsCount?.[accountNumber] || 0;
-  }
-
-  private async setNotificationCount(valueOrFn: number | ((prev: number) => number), accountNumber: ActiveAccountNumber) {
+  private async modifyPendingNotifications(
+    accountNumber: ActiveAccountNumber,
+    modify: (keys: NotificationKey[]) => NotificationKey[]
+  ) {
     // * make it safe to call from multiple tabs
     await navigator.locks.request('notificationsCount', async() => {
-      const notificationsCount = await this.getNotificationsCountForAllAccounts();
+      const pending = await this.getPendingNotifications();
+      const keys = pending[accountNumber] || [];
 
-      let newValue = valueOrFn instanceof Function ?
-        valueOrFn(notificationsCount[accountNumber] || 0) :
-        valueOrFn;
-      newValue = Math.max(0, newValue);
-      if(notificationsCount[accountNumber] === newValue) {
+      let newKeys = modify(keys);
+      if(newKeys.length > MAX_PENDING_NOTIFICATIONS) {
+        newKeys = newKeys.slice(newKeys.length - MAX_PENDING_NOTIFICATIONS);
+      }
+
+      if(newKeys.length === keys.length && newKeys.every((key, idx) => key === keys[idx])) {
         return;
       }
 
       await commonStateStorage.set({
-        notificationsCount: {
-          ...notificationsCount,
-          [accountNumber]: newValue
+        pendingNotifications: {
+          ...pending,
+          [accountNumber]: newKeys
         }
       });
       rootScope.dispatchEvent('notification_count_update');
     });
   }
+
+  private addPendingNotification(key: NotificationKey, accountNumber: ActiveAccountNumber) {
+    return this.modifyPendingNotifications(accountNumber, (keys) => {
+      return keys.includes(key) ? keys : keys.concat(key);
+    });
+  }
+
+  private clearPendingNotifications(accountNumber: ActiveAccountNumber) {
+    return this.modifyPendingNotifications(accountNumber, () => []);
+  }
+
+  /**
+   * The count is kept in a storage shared by every tab, while the notifications themselves are only
+   * known to the tab that has shown them. Cancelling has to go through that storage too, otherwise
+   * the badge stays stuck whenever the messages are read anywhere else — another tab, another
+   * client, or this very tab before a reload.
+   */
+  private queueNotificationCancel(key: NotificationKey) {
+    this.cancelledKeys.add(key);
+    this.scheduleNotificationCancelFlush();
+  }
+
+  private queueNotificationCancelUpTo({accountNumber, peerId, maxId}: BroadcastEvents['notification_cancel_up_to']) {
+    let ranges = this.cancelledRanges.get(accountNumber);
+    if(!ranges) {
+      this.cancelledRanges.set(accountNumber, ranges = new Map());
+    }
+
+    ranges.set(peerId, Math.max(ranges.get(peerId) || 0, maxId));
+    this.scheduleNotificationCancelFlush();
+  }
+
+  private scheduleNotificationCancelFlush() {
+    if(this.cancelTimeout !== undefined) {
+      return;
+    }
+
+    this.cancelTimeout = window.setTimeout(this.flushNotificationCancels, CANCEL_FLUSH_TIMEOUT);
+  }
+
+  private flushNotificationCancels = () => {
+    this.cancelTimeout = undefined;
+
+    const keys = this.cancelledKeys;
+    const ranges = this.cancelledRanges;
+    this.cancelledKeys = new Set();
+    this.cancelledRanges = new Map();
+
+    const accountNumbers = new Set<ActiveAccountNumber>(ranges.keys());
+    for(const key of keys) {
+      const accountNumber = +key.split('_')[1] as ActiveAccountNumber;
+      if(accountNumber) {
+        accountNumbers.add(accountNumber);
+      }
+    }
+
+    for(const accountNumber of accountNumbers) {
+      const peerRanges = ranges.get(accountNumber);
+      this.modifyPendingNotifications(accountNumber, (pendingKeys) => pendingKeys.filter((key) => {
+        return !keys.has(key) && !matchesCancelledRange(key, accountNumber, peerRanges);
+      }));
+    }
+  };
 
   construct() {
     this.notificationsUiSupport = ('Notification' in window) || ('mozNotification' in navigator);
@@ -166,6 +268,9 @@ export class UiNotificationsManager {
     this.titleMiddlewareHelper = getMiddleware();
 
     this.stopped = true;
+
+    this.cancelledKeys = new Set();
+    this.cancelledRanges = new Map();
 
     this.topMessagesDeferred = deferredPromise<void>();
 
@@ -192,6 +297,18 @@ export class UiNotificationsManager {
 
     rootScope.addEventListener('notification_cancel', (str) => {
       this.cancel(str);
+    });
+
+    rootScope.addEventListener('notification_cancel_up_to', (payload) => {
+      const {accountNumber, peerId, maxId} = payload;
+      const ranges: CancelledRanges = new Map([[peerId, maxId]]);
+      for(const key in this.notificationsShown) {
+        if(matchesCancelledRange(key as NotificationKey, accountNumber, ranges)) {
+          this.cancel(key as NotificationKey);
+        }
+      }
+
+      this.queueNotificationCancelUpTo(payload);
     });
 
     if(this.setAppBadge) {
@@ -237,13 +354,27 @@ export class UiNotificationsManager {
         return;
       }
 
-      const peerId = notificationData.custom && notificationData.custom.peerId.toPeerId();
-      if(!peerId) {
+      const {custom} = notificationData;
+      // * a reaction to OUR story ('REACT_STORY' / 'REACT_STORY_HIDDEN'): the story is ours,
+      // * the push peer is whoever reacted — so this must NOT be routed by peer
+      const isStoryReaction = !!notificationData.loc_key?.startsWith(STORY_REACTION_LOC_KEY);
+
+      const peerId = custom && custom.peerId.toPeerId();
+      if(!peerId && !isStoryReaction) {
         return;
       }
 
       this.topMessagesDeferred.then(async() => {
         const managers = rootScope.managers;
+
+        if(isStoryReaction) {
+          // * the server sends the story id as msg_id, our own notification as story_id
+          const storyId = +(custom?.story_id || custom?.msg_id) || undefined;
+          const self = await managers.appUsersManager.getSelf();
+          appImManager.openStoriesForPeer(self.id.toPeerId(), storyId);
+          return;
+        }
+
         const chatId = peerId.isAnyChat() ? peerId.toChatId() : undefined;
         let channelId: ChatId;
         if(chatId) {
@@ -258,12 +389,12 @@ export class UiNotificationsManager {
           return;
         }
 
-        if(notificationData.custom.story_id) {
+        if(custom.story_id) {
           appImManager.openStoriesForPeer(peerId);
           return;
         }
 
-        const lastMsgId = await managers.appMessagesIdsManager.generateMessageId(+notificationData.custom.msg_id, channelId);
+        const lastMsgId = await managers.appMessagesIdsManager.generateMessageId(+custom.msg_id, channelId);
 
         appImManager.setInnerPeer({
           peerId,
@@ -301,6 +432,10 @@ export class UiNotificationsManager {
       return this.buildStoryNotification(payload);
     }
 
+    if('storyReaction' in payload) {
+      return this.buildStoryReactionNotification(payload);
+    }
+
     const {
       fwdCount,
       peerReaction,
@@ -334,14 +469,8 @@ export class UiNotificationsManager {
       } else {
         notificationMessage = await wrapMessageForReply({message, plain: true, managers: account.managers});
 
-        const reaction = peerReaction?.reaction;
-        if(reaction && reaction._ !== 'reactionEmpty') {
-          let emoticon = (reaction as Reaction.reactionEmoji).emoticon;
-          if(!emoticon) {
-            const doc = await account.managers.appEmojiManager.getCustomEmojiDocument((reaction as Reaction.reactionCustomEmoji).document_id);
-            emoticon = doc.stickerEmojiRaw;
-          }
-
+        const emoticon = await this.getReactionEmoticon(account.managers, peerReaction?.reaction);
+        if(emoticon) {
           const langPackKey: LangPackKey = /* isAnyChat ? 'Notification.Group.Reacted' :  */'Notification.Contact.Reacted';
           const args: FormatterArguments = [
             fixEmoji(emoticon), // can be plain heart
@@ -363,7 +492,6 @@ export class UiNotificationsManager {
 
     if(peerReaction) {
       notification.noIncrement = true;
-      notification.silent = true;
     }
 
     const peerTitleOptions/* : Partial<Parameters<typeof getPeerTitle>[0]> */ = {
@@ -389,13 +517,6 @@ export class UiNotificationsManager {
     }
 
     const isDifferentAccount = accountNumber !== getCurrentAccount();
-    const hasMoreThanOneAccount = (await AccountController.getTotalAccounts()) > 1;
-    if((hasMoreThanOneAccount && isOtherTabActive) || isDifferentAccount) {
-      // ' ➜ '
-      notification.title += ' \u279C ' + wrapUserName(await account.managers.appUsersManager.getSelf());
-    }
-
-    notification.title = wrapPlainText(notification.title);
 
     notification.onclick = () => {
       if(isDifferentAccount) {
@@ -413,35 +534,28 @@ export class UiNotificationsManager {
 
     notification.message = notificationMessage;
     notification.key = `msg_${accountNumber}_${message.peerId}_${message.mid}`;
-    notification.tag = peerString;
-    notification.silent = true;// message.pFlags.silent || false;
 
-    notification.image = !isLocked ? await createNotificationImage(account.managers, peerId, peerTitle) : undefined;
     if(!peerReaction) { // ! WARNING, message can be already read
       message = await account.managers.appMessagesManager.getMessageByPeer(message.peerId, message.mid);
       if(!message || !message.pFlags.unread) return;
     }
 
-    const pushData: PushNotificationObject = {
+    const result = await this.finishNotification({
+      notification,
+      account,
+      accountNumber,
+      isDifferentAccount,
+      isOtherTabActive,
+      peerId,
+      peerString,
+      peerTitle,
+      hideContent: isLocked,
       custom: {
         msg_id: '' + message.mid,
         peerId: '' + peerId
-      },
-      description: '',
-      loc_key: '',
-      loc_args: [],
-      mute: '',
-      random_id: 0,
-      title: '',
-      accountNumber
-    };
+      }
+    });
 
-    if(isLocked) {
-      notification.title = I18n.format('PasscodeLock.NotificationTitle', true);
-      notification.message = I18n.format('PasscodeLock.NotificationDescription', true);
-    }
-
-    const result = await this.notify(notification, pushData);
     if(result && await apiManagerProxy.pushSingleManager.isRegistered()) {
       webPushApiManager.ignorePushByMid(peerId, message.mid);
     }
@@ -457,64 +571,189 @@ export class UiNotificationsManager {
       return;
     }
 
-    const isLocked = PasscodeLockScreenController.getIsLocked();
+    const {peerString, peerTitle} = await this.getNotificationPeer(account, peerId);
+    const isDifferentAccount = accountNumber !== getCurrentAccount();
 
+    return this.finishNotification({
+      notification: {
+        title: peerTitle,
+        message: I18n.format('Story.Notification', true),
+        key: `story_${accountNumber}_${peerId}_${storyId}`,
+        // * stories shouldn't play the notification sound nor bump the tab-title counter
+        noIncrement: true,
+        onclick: () => {
+          if(isDifferentAccount) {
+            const url = createAppURLForAccount(accountNumber, {p: '' + peerId, story: '1'});
+            window.open(url, '_blank');
+          } else {
+            appImManager.openStoriesForPeer(peerId);
+          }
+        }
+      },
+      account,
+      accountNumber,
+      isDifferentAccount,
+      isOtherTabActive,
+      peerId,
+      peerString,
+      peerTitle,
+      hideContent: PasscodeLockScreenController.getIsLocked(),
+      custom: {
+        msg_id: '0',
+        story_id: '' + storyId,
+        peerId: '' + peerId
+      }
+    });
+  }
+
+  private async buildStoryReactionNotification({
+    storyReaction: {peerId, storyId, reaction, showPreview},
+    accountNumber,
+    isOtherTabActive
+  }: NotificationBuildStoryReactionTaskPayload) {
+    const account = this.accounts.get(accountNumber);
+    if(!account) {
+      return;
+    }
+
+    const [{peerString, peerTitle}, emoticon, self] = await Promise.all([
+      this.getNotificationPeer(account, peerId),
+      this.getReactionEmoticon(account.managers, reaction),
+      account.managers.appUsersManager.getSelf()
+    ]);
+
+    // * without a preview the notification must not tell who reacted with what
+    const hideContent = !showPreview || !emoticon || PasscodeLockScreenController.getIsLocked();
+    const selfPeerId = self.id.toPeerId();
+    const isDifferentAccount = accountNumber !== getCurrentAccount();
+
+    return this.finishNotification({
+      notification: {
+        title: hideContent ? I18n.format('Story.Notification.ReactedHiddenSender', true) : peerTitle,
+        message: hideContent ?
+          I18n.format('Story.Notification.ReactedHidden', true) :
+          I18n.format('Story.Notification.Reacted', true, [fixEmoji(emoticon)]),
+        key: `storyReaction_${accountNumber}_${peerId}_${storyId}`,
+        // * reactions shouldn't play the notification sound nor bump the tab-title counter
+        noIncrement: true,
+        // * open our own story that was reacted to, as the mobile clients do
+        onclick: () => {
+          if(isDifferentAccount) {
+            const url = createAppURLForAccount(accountNumber, {
+              p: '' + selfPeerId,
+              story: '1',
+              story_id: '' + storyId
+            });
+            window.open(url, '_blank');
+          } else {
+            appImManager.openStoriesForPeer(selfPeerId, storyId);
+          }
+        }
+      },
+      account,
+      accountNumber,
+      isDifferentAccount,
+      isOtherTabActive,
+      peerId,
+      peerString,
+      peerTitle,
+      hideContent,
+      self,
+      locKey: STORY_REACTION_LOC_KEY,
+      custom: {
+        msg_id: '0',
+        story_id: '' + storyId,
+        peerId: '' + selfPeerId
+      }
+    });
+  }
+
+  // * the peer a notification is attributed to: its title is (part of) the notification
+  // * title, its avatar is the image and its string is the tag notifications collapse by
+  private async getNotificationPeer(account: Account, peerId: PeerId) {
     const [peerString, peerTitle] = await Promise.all([
       account.managers.appPeersManager.getPeerString(peerId),
       getPeerTitle({peerId, plainText: true, managers: account.managers, useManagers: true})
     ]);
 
-    const notification: NotifyOptions = {
-      title: peerTitle,
-      message: I18n.format('Story.Notification', true),
-      tag: peerString,
-      key: `story_${accountNumber}_${peerId}_${storyId}`,
-      silent: true,
-      // * stories shouldn't play the notification sound nor bump the tab-title counter
-      noIncrement: true
-    };
+    return {peerString, peerTitle};
+  }
 
-    const isDifferentAccount = accountNumber !== getCurrentAccount();
+  /**
+   * Shared tail of every builder: the other-account title suffix, the peer's avatar, the
+   * passcode-lock override and the push payload boilerplate.
+   */
+  private async finishNotification({
+    notification,
+    account,
+    accountNumber,
+    isDifferentAccount,
+    isOtherTabActive,
+    peerId,
+    peerString,
+    peerTitle,
+    hideContent,
+    self,
+    custom,
+    locKey
+  }: {
+    notification: NotifyOptions,
+    account: Account,
+    accountNumber: ActiveAccountNumber,
+    isDifferentAccount: boolean,
+    isOtherTabActive: boolean,
+    peerId: PeerId,
+    peerString: string,
+    peerTitle: string,
+    /** don't reveal who it's from nor what it says: passcode lock, or previews turned off */
+    hideContent?: boolean,
+    /** pass it when already resolved, otherwise it's fetched only when the suffix is needed */
+    self?: User.user,
+    custom: PushNotificationObject['custom'],
+    /** the server's loc_key this notification stands in for, so a click routes the same way */
+    locKey?: string
+  }) {
     const hasMoreThanOneAccount = (await AccountController.getTotalAccounts()) > 1;
     if((hasMoreThanOneAccount && isOtherTabActive) || isDifferentAccount) {
       // ' ➜ '
-      notification.title += ' ➜ ' + wrapUserName(await account.managers.appUsersManager.getSelf());
+      notification.title += ' ➜ ' + wrapUserName(self ?? await account.managers.appUsersManager.getSelf());
     }
 
     notification.title = wrapPlainText(notification.title);
+    notification.tag = peerString;
+    notification.silent = true;// message.pFlags.silent || false;
 
-    notification.image = !isLocked ? await createNotificationImage(account.managers, peerId, peerTitle) : undefined;
+    if(!hideContent) {
+      notification.image = await createNotificationImage(account.managers, peerId, peerTitle);
+    }
 
-    notification.onclick = () => {
-      if(isDifferentAccount) {
-        const url = createAppURLForAccount(accountNumber, {p: '' + peerId, story: '1'});
-        window.open(url, '_blank');
-      } else {
-        appImManager.openStoriesForPeer(peerId);
-      }
-    };
-
-    if(isLocked) {
+    if(PasscodeLockScreenController.getIsLocked()) {
       notification.title = I18n.format('PasscodeLock.NotificationTitle', true);
       notification.message = I18n.format('PasscodeLock.NotificationDescription', true);
     }
 
-    const pushData: PushNotificationObject = {
-      custom: {
-        msg_id: '0',
-        story_id: '' + storyId,
-        peerId: '' + peerId
-      },
+    return this.notify(notification, {
+      custom,
+      // * only routing matters here: the service-worker fallback reads it back on click
+      loc_key: locKey || '',
       description: '',
-      loc_key: '',
       loc_args: [],
       mute: '',
       random_id: 0,
       title: '',
       accountNumber
-    };
+    });
+  }
 
-    await this.notify(notification, pushData);
+  private async getReactionEmoticon(managers: ProxiedManagers, reaction: Reaction) {
+    if(reaction?._ === 'reactionEmoji') {
+      return reaction.emoticon;
+    }
+
+    if(reaction?._ === 'reactionCustomEmoji') {
+      const doc = await managers.appEmojiManager.getCustomEmojiDocument(reaction.document_id);
+      return doc?.stickerEmojiRaw;
+    }
   }
 
   private constructAndStartNotificationManagerFor(accountNumber: ActiveAccountNumber) {
@@ -607,7 +846,7 @@ export class UiNotificationsManager {
       this.constructAndStartNotificationManagerFor(accountNumber);
     }
 
-    this.setNotificationCount(0, getCurrentAccount());
+    this.clearPendingNotifications(getCurrentAccount());
   }
 
   private onTitleInterval = async() => {
@@ -719,15 +958,15 @@ export class UiNotificationsManager {
 
     data.image ||= NOTIFICATION_ICON_PATH;
 
-    if(!data.noIncrement) {
-      this.setNotificationCount((prev) => ++prev, pushData.accountNumber);
-    }
-
-    this.toggleToggler();
-
     const idx = ++this.notificationIndex;
     const key = data.key || 'k' + idx as NotificationKey;
     this.notificationsShown[key] = true;
+
+    if(!data.noIncrement) {
+      this.addPendingNotification(key, pushData.accountNumber);
+    }
+
+    this.toggleToggler();
 
     const now = tsNow();
     if(this.settings.volume > 0 && this.settings.sound && !data.noIncrement) {
@@ -853,10 +1092,11 @@ export class UiNotificationsManager {
     const notification = this.notificationsShown[key];
     this.log('cancel', key, notification);
     if(notification) {
-      this.setNotificationCount((prev) => --prev, +key.split('_')[1] as ActiveAccountNumber);
       this.closeNotification(notification);
       delete this.notificationsShown[key];
     }
+
+    this.queueNotificationCancel(key);
   }
 
   private closeNotification(notification: boolean | MyNotification) {
@@ -878,7 +1118,7 @@ export class UiNotificationsManager {
     }
 
     this.notificationsShown = {};
-    this.setNotificationCount(0, accountNumber);
+    this.clearPendingNotifications(accountNumber);
 
     webPushApiManager.hidePushNotifications();
   };

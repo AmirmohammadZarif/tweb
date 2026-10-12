@@ -195,6 +195,21 @@ export function mixColors(color1: ColorRgb, color2: ColorRgb, weight: number) {
   return out;
 }
 
+/**
+ * Applies the plus-lighter compositing formula to an opaque backdrop.
+ * `sourceOpacity` is kept separate so callers can reproduce an alpha gradient
+ * without relying on CSS blend modes.
+ */
+export function mixColorsPlusLighter(
+  backdrop: ColorRgb,
+  source: ColorRgb,
+  sourceOpacity: number
+): ColorRgb {
+  return backdrop.map((value, index) => {
+    return clamp(Math.round(value + source[index] * sourceOpacity), 0, 255);
+  }) as ColorRgb;
+}
+
 export function computePerceivedBrightness(color: ColorRgb) {
   return (color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722) / 255;
 }
@@ -334,6 +349,28 @@ export function darkenToMaxLuminance(hex: string, maxL: number): string {
   }
   const c = (v: number) => Math.round(v * lo).toString(16).padStart(2, '0');
   return '#' + c(r) + c(g) + c(b);
+}
+
+/** Adjust only colours that fail text contrast, retaining the original hue. */
+export function ensureTextContrast(hex: string, background: ColorRgb, ratio = 4.9): string {
+  const rgb = hexToRgb(hex);
+  const foregroundLuminance = relativeLuminance(rgb);
+  const backgroundLuminance = relativeLuminance(background);
+  if((Math.max(foregroundLuminance, backgroundLuminance) + .05) /
+    (Math.min(foregroundLuminance, backgroundLuminance) + .05) >= ratio) return hex;
+  if(backgroundLuminance > .179) {
+    return darkenToMaxLuminance(hex, (backgroundLuminance + .05) / ratio - .05);
+  }
+
+  const target = ratio * (backgroundLuminance + .05) - .05;
+  let low = 0, high = 1;
+  for(let i = 0; i < 20; ++i) {
+    const amount = (low + high) / 2;
+    const mixed = rgb.map((value) => value + (255 - value) * amount) as ColorRgb;
+    if(relativeLuminance(mixed) < target) low = amount;
+    else high = amount;
+  }
+  return rgbaToHexa(rgb.map((value) => Math.ceil(value + (255 - value) * high)) as ColorRgb);
 }
 
 export function getTextColor(luminance: number): ColorRgb {

@@ -1,5 +1,5 @@
-import type {Message, StickerSet, Update, NotifyPeer, PeerNotifySettings, PollResults, Poll, WebPage, GroupCall, GroupCallParticipant, ReactionCount, MessagePeerReaction, PhoneCall, Config, Reaction, AttachMenuBot, PeerSettings, StoryItem, PeerStories, SavedDialog, SavedReactionTag, InputSavedStarGift, LangPackDifference, StarsAmount, MessageEntity, HelpPromoData, StoriesStealthMode, StoryAlbum, GlobalPrivacySettings} from '@layer';
-import type {Dialog, ForumTopic, MessagesStorageKey, MyMessage} from '@appManagers/appMessagesManager';
+import type {Message, StickerSet, Update, NotifyPeer, PeerNotifySettings, PollResults, Poll, WebPage, GroupCall, GroupCallParticipant, ReactionCount, MessagePeerReaction, PhoneCall, Config, Reaction, AttachMenuBot, PeerSettings, StoryItem, PeerStories, SavedDialog, SavedReactionTag, InputSavedStarGift, LangPackDifference, StarsAmount, MessageEntity, HelpPromoData, StoriesStealthMode, StoryAlbum, GlobalPrivacySettings, ConnectedBot} from '@layer';
+import type {Dialog, ForumTopic, MessagesStorageKey, MyEphemeralMessage, MyMessage} from '@appManagers/appMessagesManager';
 import type {MyDialogFilter} from '@lib/storages/filters';
 import type {AnyDialog, Folder} from '@lib/storages/dialogs';
 import type {UserTyping} from '@appManagers/appProfileManager';
@@ -7,7 +7,7 @@ import type {MyDraftMessage} from '@appManagers/appDraftsManager';
 import type {ConnectionStatusChange} from '@lib/mtproto/connectionStatus';
 import type {GroupCallId} from '@appManagers/appGroupCallsManager';
 import type {AppManagers} from '@lib/managers';
-import type {StateSettings} from '@config/state';
+import type {GlobalNotifySettingsKey, StateSettings} from '@config/state';
 import type {Progress} from '@lib/appDownloadManager';
 import type {CallId} from '@appManagers/appCallsManager';
 import type {MyDocument} from '@appManagers/appDocsManager';
@@ -19,7 +19,10 @@ import type {ApiManager} from '@appManagers/apiManager';
 import type {MonoforumDialog} from '@lib/storages/monoforumDialogs';
 import type {MyStarGift} from '@appManagers/appGiftsManager';
 import type {MyPromoData} from '@appManagers/appPromoManager';
+import type {UnconfirmedAuthorization} from '@appManagers/appAccountManager';
 import type {ActiveAccountNumber} from '@lib/accounts/types';
+import type {BotConnectionReview} from '@appManagers/appBusinessManager';
+import type {StreamedMessageDraft, StreamedMessageDraftRemovalReason} from '@appManagers/utils/messages/streamedMessageDrafts';
 import {NULL_PEER_ID, UserAuth} from '@appManagers/constants';
 import EventListenerBase, {EventListenerListeners} from '@helpers/eventListenerBase';
 import {MOUNT_CLASS_TO} from '@config/debug';
@@ -43,14 +46,17 @@ export type BroadcastEvents = {
 
   'emoji_status_change': void,
 
-  'peer_pinned_messages': {peerId: PeerId, mids?: number[], pinned?: boolean, unpinAll?: true},
-  'peer_pinned_hidden': {peerId: PeerId, maxId: number},
+  /** `threadId` scopes the change to one forum topic; absent = the whole peer. */
+  'peer_pinned_messages': {peerId: PeerId, threadId?: number, mids?: number[], pinned?: boolean, unpinAll?: true},
+  'peer_pinned_hidden': {peerId: PeerId, threadId?: number, maxId: number},
   'peer_typings': {peerId: PeerId, threadId?: number, typings: UserTyping[]},
   'peer_block': {peerId: PeerId, blocked?: boolean, blockedMyStoriesFrom?: boolean},
   'peer_title_edit': {peerId: PeerId, threadId?: number},
   'peer_deleted': PeerId, // left chat, deleted user dialog, left channel
   'peer_full_update': PeerId,
   'peer_settings': {peerId: PeerId, settings: PeerSettings},
+  'chat_automation_update': ConnectedBot.connectedBot | undefined,
+  'bot_connection_reviews_update': BotConnectionReview[],
   'peer_stories': {peerId: PeerId, available: boolean},
   'peer_stories_hidden': {peerId: PeerId, hidden: boolean},
 
@@ -84,7 +90,18 @@ export type BroadcastEvents = {
   'history_delete_key': {historyKey: string, mid: number},
   // 'history_request': void,
 
+  'ephemeral_history_append': {storageKey: MessagesStorageKey, message: MyEphemeralMessage},
+  'ephemeral_history_edit': {storageKey: MessagesStorageKey, peerId: PeerId, mid: number, message: MyEphemeralMessage},
+  'ephemeral_history_delete': {peerId: PeerId, msgs: Set<number>},
+  'ephemeral_send_blocked': {peerId: PeerId, reason: 'ambiguous' | 'unavailable'},
+  'ephemeral_send_error': {peerId: PeerId, retryId: number},
+
   'message_edit': {storageKey: MessagesStorageKey, peerId: PeerId, mid: number, message: MyMessage},
+  'peer_history_flush': {peerId: PeerId},
+  'streamed_message_update': {draft: StreamedMessageDraft, message: Message.message, initial: boolean},
+  'streamed_message_remove': {draft: StreamedMessageDraft, reason: StreamedMessageDraftRemovalReason},
+  'streamed_message_finalize': {draft: StreamedMessageDraft, tempId: number, finalMessage: MyMessage},
+  'streamed_message_stoppable': {peerId: PeerId, threadId: number, stoppable: boolean},
   'message_sent': {storageKey: MessagesStorageKey, tempId: number, tempMessage: any, mid: number, message: MyMessage},
   'message_error': {storageKey: MessagesStorageKey, peerId: PeerId, tempId: number, error: ApiError},
   'message_transcribed': {peerId: PeerId, mid: number, text: string, pending?: boolean},
@@ -113,6 +130,8 @@ export type BroadcastEvents = {
 
   'scheduled_new': Message.message,
   'scheduled_delete': {peerId: PeerId, mids: number[]},
+  'welcome_message_new': Message.message,
+  'welcome_messages_delete': {peerId: PeerId, mids: number[]},
 
   'grouped_edit': {peerId: PeerId, groupedId: string, deletedMids: number[], messages: Message.message[]},
 
@@ -133,6 +152,7 @@ export type BroadcastEvents = {
   'contacts_update': UserId,
   'avatar_update': {peerId: PeerId, threadId?: number},
   'poll_update': {poll: Poll, results: PollResults},
+  'poll_vote_restriction': {pollId: Poll['id'], state?: import('@appManagers/utils/polls/pollVoteRestriction').PollVoteRestrictionState},
   'invalidate_participants': ChatId,
   // 'channel_settings': {channelId: number},
   'webpage_updated': {id: WebPage.webPage['id'], msgs: {peerId: PeerId, mid: number, isScheduled: boolean}[]},
@@ -147,10 +167,15 @@ export type BroadcastEvents = {
   'global_privacy_update': GlobalPrivacySettings,
 
   'notify_settings': Update.updateNotifySettings,
-  'notify_peer_type_settings': {key: Exclude<NotifyPeer['_'], 'notifyPeer'>, settings: PeerNotifySettings},
+  'notify_peer_type_settings': {key: GlobalNotifySettingsKey, settings: PeerNotifySettings},
 
   'notification_reset': string,
-  'notification_cancel': `msg_${ActiveAccountNumber}_${PeerId}_${number}` | `story_${ActiveAccountNumber}_${PeerId}_${number}`,
+  'notification_cancel': `msg_${ActiveAccountNumber}_${PeerId}_${number}` |
+    `story_${ActiveAccountNumber}_${PeerId}_${number}` |
+    `storyReaction_${ActiveAccountNumber}_${PeerId}_${number}`,
+  // * `notification_cancel` can only be fired for messages that are in memory, this one covers
+  // * the whole read range (e.g. a read that came from another client after a restart)
+  'notification_cancel_up_to': {accountNumber: ActiveAccountNumber, peerId: PeerId, maxId: number},
 
   'notification_count_update': void,
 
@@ -165,6 +190,7 @@ export type BroadcastEvents = {
   'media_play': void,
 
   'emoji_recent': {emoji: AppEmoji, deleted?: boolean},
+  'emoji_variant': {baseEmoji: string, emoji: string, tone: 0 | 1 | 2 | 3 | 4 | 5},
 
   'download_progress': Progress,
   'document_downloading': DocId,
@@ -191,6 +217,7 @@ export type BroadcastEvents = {
   'payment_sent': {peerId: PeerId, mid: number, receiptMessage: Message.messageService},
 
   'web_view_result_sent': Long,
+  'join_chat_webview_decision': Update.updateJoinChatWebViewDecision,
 
   'premium_toggle': boolean,
   'premium_toggle_private': {isNew: boolean, isPremium: boolean},
@@ -260,6 +287,7 @@ export type BroadcastEvents = {
   },
   'pinned_stargifts': {peerId: PeerId, gifts: InputSavedStarGift[]},
   'star_gift_list_update': {peerId: PeerId},
+  'saved_music_update': {peerId: PeerId},
   'star_gift_upgrade': {gift: MyStarGift, savedId?: Long, fromMsgId?: number},
 
   'insufficent_stars_for_message': {messageCount: number, requestId: number, invokeApiArgs: Parameters<ApiManager['invokeApi']>, reservedStars?: number};
@@ -272,6 +300,7 @@ export type BroadcastEvents = {
 
   'botforum_pending_topic_created': {peerId: PeerId, tempId: number, newId?: number},
   'promo_data_update': MyPromoData,
+  'unconfirmed_authorizations_update': UnconfirmedAuthorization[],
 
   'auto_delete_period_update': {peerId: PeerId, period: number},
 };

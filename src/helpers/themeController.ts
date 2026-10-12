@@ -6,9 +6,10 @@ import type {AppBackgroundTab} from '@components/sidebarLeft/tabs/background';
 import type {AppChatBackground} from '@components/chat/bubbles/chatBackground';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import rootScope from '@lib/rootScope';
-import {changeColorAccent, ColorRgb, getAccentColor, getAverageColor, getRgbColorFromTelegramColor, hexToRgb, hslaStringToHex, hslaStringToRgba, hslaToRgba, hsvToRgb, mixColors, rgbaToHexa, rgbaToHsla, rgbToHsv} from '@helpers/color';
+import {changeColorAccent, ColorRgb, ensureTextContrast, getAccentColor, getAverageColor, getRgbColorFromTelegramColor, hexToRgb, hslaStringToHex, hslaStringToRgba, hslaToRgba, hsvToRgb, mixColors, relativeLuminance, rgbaToHexa, rgbaToHsla, rgbToHsv} from '@helpers/color';
 import {SETTINGS_INIT} from '@config/state';
 import {MOUNT_CLASS_TO} from '@config/debug';
+import Modes from '@config/modes';
 import customProperties from '@helpers/dom/customProperties';
 import {TelegramWebViewTheme} from '@types';
 import windowSize from '@helpers/windowSize';
@@ -225,6 +226,10 @@ export class ThemeController {
     // here whenever `settings.theme` changes (radio in General Settings, switchTheme calls).
     const themeKey = joinDeepPath('settings', 'theme');
     rootScope.addEventListener('settings_updated', ({key, value}) => {
+      if(key === joinDeepPath('settings', 'increaseContrast')) {
+        this.setTheme();
+        return;
+      }
       if(key !== themeKey) return;
       const [, setAppSettings] = useAppSettings();
       if(value === 'night' || value === 'tinted') {
@@ -317,6 +322,11 @@ export class ThemeController {
     }
   }
 
+  // Increase Contrast is part of the a11y layer: its row, and a value stored earlier, count only with it on
+  private isHighContrast() {
+    return Modes.a11y && !!useAppSettings()[0].increaseContrast;
+  }
+
   public _setTheme(silent?: boolean) {
     const _log = log.bindPrefix('setTheme');
     _log(`set colors, silent=${silent}`);
@@ -325,6 +335,7 @@ export class ThemeController {
     colorScheme?.setAttribute('content', isNight ? 'dark' : 'light');
 
     document.documentElement.classList.toggle('night', isNight);
+    document.documentElement.classList.toggle('high-contrast', this.isHighContrast());
     this.setThemeColor();
     const theme = this.getTheme();
     this.applyTheme(theme);
@@ -406,38 +417,57 @@ export class ThemeController {
     transition.finished.catch(noop).then(() => clearTimeout(safetyTimeout));
 
     if(!coordinates) {
+      // Overlapping switches can skip even the default fade. Its `ready`
+      // promise still rejects although there is no custom reveal to await it.
+      transition.ready.catch(noop);
       _log('view transition is not needed');
       return;
     }
 
     const {x, y} = coordinates;
-    // Get the distance to the furthest corner
-    const endRadius = Math.hypot(
-      Math.max(x, windowSize.width - x),
-      Math.max(y, windowSize.height - y)
-    );
+    const pseudoElement = `::view-transition-${reverse ? 'old' : 'new'}(root)`;
 
+    let clipAnimation: Animation;
     transition.ready.then(() => {
       _log('view transition ready');
 
+      // The clip is given in percentages of the snapshot's own box, never in px. Older Chromium
+      // (seen on 152) ran this composited clip-path animation in backing-store pixels, so px
+      // landed at 1/DPR of the click; Chrome 154 resolves px in CSS pixels, as WebKit always did.
+      // A percentage resolves against the box in whatever space it is laid out in, so the origin
+      // and radius follow the click in every engine without sniffing versions or scaling by DPR.
+      const box = getComputedStyle(document.documentElement, pseudoElement);
+      const width = parseFloat(box.width);
+      const height = parseFloat(box.height);
+      const measured = width > 0 && height > 0;
+      // Get the distance to the furthest corner
+      const endRadius = Math.hypot(
+        Math.max(x, (measured ? width : windowSize.width) - x),
+        Math.max(y, (measured ? height : windowSize.height) - y)
+      );
+      // A circle's percentage radius resolves against the box diagonal divided by √2.
+      const circle = measured ?
+        (radius: number) => `circle(${radius / Math.hypot(width, height) * Math.SQRT2 * 100}% at ${x / width * 100}% ${y / height * 100}%)` :
+        (radius: number) => `circle(${radius}px at ${x}px ${y}px)`;
       const {easing, duration, keyframes} = getTransition(
         'standard',
         !reverse,
         [
-          {clipPath: `circle(0 at ${x}px ${y}px)`},
-          {clipPath: `circle(${endRadius}px at ${x}px ${y}px)`}
+          {clipPath: circle(0)},
+          {clipPath: circle(endRadius)}
         ]
       );
 
-      document.documentElement.animate(keyframes, {
+      clipAnimation = document.documentElement.animate(keyframes, {
         duration: duration * 2,
         easing,
-        pseudoElement: `::view-transition-${reverse ? 'old' : 'new'}(root)`,
+        pseudoElement,
         fill: 'forwards' // * without this rule animation will flick at the end
       });
     }).catch(noop); // `ready` rejects when the transition is skipped (safety timeout / overlap / hidden tab)
 
     transition.finished.catch(noop).finally(() => {
+      clipAnimation?.cancel();
       _log('view transition end');
       document.documentElement.classList.remove('no-view-transition', 'reverse');
     });
@@ -547,11 +577,34 @@ export class ThemeController {
     saveToCache?: boolean
   }) {
     const appColor = appColorMap[name];
-    const rgb = hexToRgb(hex);
-    const hsla = rgbaToHsla(...rgb);
-
     const resolvedName: AppTheme['name'] = themeName ?? (isNight ? 'night' : 'day');
     mixColor ??= hexToRgb(colorMap[resolvedName]['surface-color']);
+    const increaseContrast = this.isHighContrast();
+    if(increaseContrast) {
+      if(name === 'message-out-background-color' && isNight) hex = ensureTextContrast(hex, [255, 255, 255]);
+      if(name === 'message-out-primary-color') {
+        const messageSurface = isNight ? hexToRgb(ensureTextContrast(rgbaToHexa(mixColor), [255, 255, 255])) : mixColor;
+        hex = ensureTextContrast(hex, messageSurface);
+      }
+      if(name === 'primary-color' || name === 'secondary-text-color' || name === 'danger-color' || name === 'link-color' || name === 'green-color') {
+        const background = hexToRgb(colorMap[resolvedName]['background-color']);
+        const surfaceLuminance = relativeLuminance(mixColor);
+        const backgroundLuminance = relativeLuminance(background);
+        const limitingSurface = isNight ?
+          (surfaceLuminance > backgroundLuminance ? mixColor : background) :
+          (surfaceLuminance < backgroundLuminance ? mixColor : background);
+        // Text also appears on the lightly lifted cards and hover surfaces.
+        hex = ensureTextContrast(hex, isNight ? mixColors([255, 255, 255], limitingSurface, .05) : limitingSurface);
+      }
+    }
+    if(name === 'primary-color' || name === 'secondary-text-color' || name === 'danger-color') {
+      // Accent text sits on the surface; white button text sits on the accent.
+      // A separate fill keeps both readable, including on dark/custom themes.
+      const buttonColorName = name.replace('-text', '').replace('-color', '-button-color');
+      element.style.setProperty('--' + buttonColorName, increaseContrast ? ensureTextContrast(hex, [255, 255, 255]) : hex);
+    }
+    const rgb = hexToRgb(hex);
+    const hsla = rgbaToHsla(...rgb);
     const lightenedRgb = mixColors(rgb, mixColor, lightenAlpha);
 
     const darkenedHsla: typeof hsla = {

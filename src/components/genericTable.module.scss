@@ -1,13 +1,20 @@
 @use "../scss/variables.scss" as *;
+@use "../scss/mixins.scss" as *;
+
+// The same shades wherever a table is shown — the composer, a page, a bubble ($message-shade-color)
+$table-shade-color: $message-shade-color;
+$table-border-color: color-mix(in srgb, var(--message-status-color) 32%, var(--message-background-color));
 
 .wrapper {
   overflow-x: auto;
 }
 
+// Over the cells: a header cell is positioned and comes later, so its fill would cover the top edge.
 .border {
   position: absolute;
-  border: 1px solid var(--border-color);
-  border-radius: #{$border-radius};
+  z-index: 1;
+  border: 1px solid $table-border-color;
+  border-radius: var(--table-border-radius, #{$border-radius});
   inset: 0;
   pointer-events: none;
 }
@@ -15,12 +22,13 @@
 .genericTable {
   border-collapse: collapse;
   width: calc(100% - var(--padding-horizontal, 0px) * 2);
-  font-size: 0.8888em;
-  line-height: 1.3125em;
+  @include rounded-font-size(var(--table-font-size, .8888em));
   word-break: keep-all;
   margin-inline: var(--padding-horizontal);
-  border-radius: #{$border-radius};
+  border-radius: var(--table-border-radius, #{$border-radius});
   position: relative;
+  // keeps the border's z-index to the table
+  isolation: isolate;
   overflow: hidden;
 
   &.bordered {
@@ -29,23 +37,32 @@
 
     .genericCell,
     .genericHeaderCell {
-      border: 1px solid var(--border-color);
+      border: 1px solid $table-border-color;
     }
   }
 }
 
-.genericRow {
-  &.striped {
-    background-color: var(--light-filled-secondary-text-color);
+.genericTable.striped > tbody > .genericRow:nth-child(odd) {
+  background-color: $table-shade-color;
+
+  > .genericHeaderCell {
+    background-color: transparent;
   }
 }
 
 .genericCell,
 .genericHeaderCell {
-  padding: 0.5em;
+  --padding-horizontal: 0;
+  box-sizing: border-box;
+  // A table-cell `height` participates in row sizing as a minimum; keep an explicit
+  // min-height as well for non-table display modes and clearer component semantics.
+  height: var(--table-cell-min-height, auto);
+  min-height: var(--table-cell-min-height, 0);
+  min-width: var(--table-cell-min-width, 0);
+  padding: var(--table-cell-padding, calc(.5rem * var(--iv-scale, 1)));
+  position: relative;
   vertical-align: top;
   text-align: left;
-  border: 1px solid transparent;
 
   &.cellAlignCenter { text-align: center; }
   &.cellAlignRight { text-align: right; }
@@ -54,6 +71,6 @@
 }
 
 .genericHeaderCell {
+  background-color: $table-shade-color;
   font-weight: var(--font-weight-bold);
-  background-color: var(--light-secondary-text-color);
 }

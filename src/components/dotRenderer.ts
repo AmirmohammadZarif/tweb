@@ -4,14 +4,20 @@ import {MOUNT_CLASS_TO} from '@config/debug';
 import {animate} from '@helpers/animation';
 import callbackify from '@helpers/callbackify';
 import deferredPromise from '@helpers/cancellablePromise';
+import customProperties, {CustomProperty} from '@helpers/dom/customProperties';
 import {Middleware} from '@helpers/middleware';
 import getUnsafeRandomInt from '@helpers/number/getUnsafeRandomInt';
-import {applyColorOnContext} from '@lib/rlottie/rlottiePlayer';
+import readValue, {ValueOrGetter} from '@helpers/solid/readValue';
+import {applyColorOnContext} from '@lib/lottie/lottiePlayer';
+import rootScope from '@lib/rootScope';
 import animationIntersector, {AnimationItemGroup, AnimationItemWrapper} from '@components/animationIntersector';
 import BluffSpoilerController from '@components/bluffSpoilerController';
 import DotRendererCore, {buildDotRendererConfig, drawClippingCircle, getDefaultParticlesCount, DotRendererConfig, DotRendererShaderURLs} from '@components/dotRendererCore';
+import {drawImageFromSource} from '@components/messageSpoilerOverlay/drawImageFromSource';
+import {adjustSpaceBetweenCloseRects, getInnerCustomRect, toDOMRectArray} from '@components/messageSpoilerOverlay/utils';
+import {observeResize} from '@components/resizeObserver';
 import {retainSpoilerRenderer, SpoilerRendererConnection} from '@components/spoilerRendererConnection';
-import type {SpoilerOverlayUpdate} from '@components/spoilerRenderer.worker';
+import type {SpoilerOverlayRect, SpoilerOverlayUpdate} from '@components/spoilerRenderer.worker';
 import {animateValue, simpleEasing} from '@helpers/animateValue';
 import {CancellablePromise} from '@helpers/cancellablePromise';
 
@@ -23,6 +29,8 @@ const SHADER_URLS: DotRendererShaderURLs = {
 const TEXT_SPOILER_WIDTH = 240;
 const TEXT_SPOILER_HEIGHT = 120;
 const IMAGE_SPOILER_SIZE = 480;
+// * how long to wait for the worker's `*-inited` answer before giving up on this init round
+const WORKER_INIT_TIMEOUT = 8000;
 
 const getTextSpoilerConfig = (dpr: number): Partial<DotRendererConfig> => ({
   particlesCount: 4 * getDefaultParticlesCount(TEXT_SPOILER_WIDTH, TEXT_SPOILER_HEIGHT),
@@ -204,8 +212,8 @@ export default class DotRenderer implements AnimationItemWrapper {
       underLyingCtx: CanvasRenderingContext2D
     };
 
-    const x = getUnsafeRandomInt(0, instance.canvas.width - canvas.width);
-    const y = getUnsafeRandomInt(0, instance.canvas.height - canvas.height);
+    const x = getUnsafeRandomInt(0, Math.max(0, instance.canvas.width - canvas.width));
+    const y = getUnsafeRandomInt(0, Math.max(0, instance.canvas.height - canvas.height));
 
     const draw = () => {
       const {width, height} = canvas;
@@ -216,7 +224,7 @@ export default class DotRenderer implements AnimationItemWrapper {
       context.clearRect(0, 0, width, height);
 
       if(!revealAnimation) {
-        context.drawImage(instance.canvas, x, y, width, height, 0, 0, width, height);
+        drawImageFromSource(context, instance.canvas, x, y, width, height, 0, 0, width, height);
       } else {
         const {
           progress,
@@ -229,7 +237,7 @@ export default class DotRenderer implements AnimationItemWrapper {
 
         // Zoom (push) the particles
         const scaledProgress = progress ** 2 /* * Math.sqrt(progress) */ * 0.5;
-        context.drawImage(instance.canvas,
+        drawImageFromSource(context, instance.canvas,
           x + transformedCoords.x * scaledProgress, y + transformedCoords.y * scaledProgress, width * (1 - scaledProgress), height * (1 - scaledProgress),
           0, 0, width, height
         );
@@ -291,7 +299,7 @@ export default class DotRenderer implements AnimationItemWrapper {
         Math.hypot(rectX, rectY),
         Math.hypot(bcr.width - rectX, rectY),
         Math.hypot(rectX, bcr.height - rectY),
-        Math.hypot(bcr.width - rectX, bcr.height - rectY),
+        Math.hypot(bcr.width - rectX, bcr.height - rectY)
       );
       const maxDist = distToMargin * instance.dpr + 50;
 
@@ -371,11 +379,34 @@ export default class DotRenderer implements AnimationItemWrapper {
     this.mediaWorkerReady = this.textWorkerReady = undefined;
   }
 
+  /**
+   * The worker answers `*-inited` only once its sim's `init()` resolves, and that can never happen
+   * (a shader request that stalls, a lost WebGL context). `wrapMediaSpoiler` awaits this deferred,
+   * so a silent worker used to park the render queue of every chat holding a spoiler — permanently,
+   * because the `*Inited` latch below suppresses any further init. Give up after a deadline: resolve
+   * the deferred so the spoiler degrades to its blurred thumbnail, and unlatch so the next spoiler
+   * re-sends the init instead of inheriting a promise that can never settle.
+   */
+  private static watchWorkerInit(deferred: CancellablePromise<void>, unlatch: () => void) {
+    const timeout = window.setTimeout(() => {
+      unlatch();
+      deferred.resolve();
+    }, WORKER_INIT_TIMEOUT);
+
+    deferred.then(() => clearTimeout(timeout), () => clearTimeout(timeout));
+  }
+
   private static initMediaSim() {
     if(this.mediaInited) return;
     this.mediaInited = true;
 
-    this.mediaWorkerReady = deferredPromise<void>();
+    const deferred = this.mediaWorkerReady = deferredPromise<void>();
+    this.watchWorkerInit(deferred, () => {
+      if(this.mediaWorkerReady === deferred) {
+        this.mediaInited = false;
+      }
+    });
+
     const dpr = window.devicePixelRatio;
     this.connection.postMessage({
       type: 'media-init',
@@ -391,7 +422,13 @@ export default class DotRenderer implements AnimationItemWrapper {
     if(this.textInited) return;
     this.textInited = true;
 
-    this.textWorkerReady = deferredPromise<void>();
+    const deferred = this.textWorkerReady = deferredPromise<void>();
+    this.watchWorkerInit(deferred, () => {
+      if(this.textWorkerReady === deferred) {
+        this.textInited = false;
+      }
+    });
+
     const dpr = Math.min(2, window.devicePixelRatio);
     this.connection.postMessage({
       type: 'text-init',
@@ -454,8 +491,8 @@ export default class DotRenderer implements AnimationItemWrapper {
     const id = this.createdIndex;
 
     const simSize = IMAGE_SPOILER_SIZE * dpr;
-    const x = getUnsafeRandomInt(0, simSize - canvas.width);
-    const y = getUnsafeRandomInt(0, simSize - canvas.height);
+    const x = getUnsafeRandomInt(0, Math.max(0, simSize - canvas.width));
+    const y = getUnsafeRandomInt(0, Math.max(0, simSize - canvas.height));
 
     const offscreen = canvas.transferControlToOffscreen();
     connection.postMessage({
@@ -574,12 +611,16 @@ export default class DotRenderer implements AnimationItemWrapper {
     middleware,
     animationGroup,
     canvas,
-    draw
+    draw,
+    observeElement = canvas,
+    onDestroy
   }: {
     canvas: HTMLCanvasElement,
     draw: () => void,
-    middleware: Middleware,
+    middleware?: Middleware,
     animationGroup: AnimationItemGroup,
+    observeElement?: HTMLElement,
+    onDestroy?: () => void
   }) {
     const instance = this.getTextSpoilerInstance();
 
@@ -601,13 +642,14 @@ export default class DotRenderer implements AnimationItemWrapper {
           instance.remove();
           this.textSpoilerInstance = undefined;
         }
+        onDestroy?.();
       }
     });
 
     animationIntersector.addAnimation({
       animation,
       group: animationGroup,
-      observeElement: canvas,
+      observeElement,
       controlled: middleware,
       type: 'dots'
     });
@@ -628,11 +670,15 @@ export default class DotRenderer implements AnimationItemWrapper {
   public static attachTextSpoilerOverlay({
     canvas,
     middleware,
-    animationGroup
+    animationGroup,
+    observeElement = canvas,
+    onDestroy
   }: {
     canvas: HTMLCanvasElement,
-    middleware: Middleware,
-    animationGroup: AnimationItemGroup
+    middleware?: Middleware,
+    animationGroup: AnimationItemGroup,
+    observeElement?: HTMLElement,
+    onDestroy?: () => void
   }) {
     const connection = this.retainConnection();
     this.initTextSim();
@@ -648,13 +694,14 @@ export default class DotRenderer implements AnimationItemWrapper {
       onDestroy: () => {
         this.connection?.postMessage({type: 'overlay-detach', id});
         this.releaseConnection();
+        onDestroy?.();
       }
     });
 
     animationIntersector.addAnimation({
       animation,
       group: animationGroup,
-      observeElement: canvas,
+      observeElement,
       controlled: middleware,
       type: 'dots'
     });
@@ -673,80 +720,180 @@ export default class DotRenderer implements AnimationItemWrapper {
     };
   }
 
-  public static attachBluffTextSpoilerTarget(element: HTMLElement) {
+  public static attachBluffTextSpoilerTarget(element: HTMLElement, textColor?: ValueOrGetter<CustomProperty>) {
+    // * a reconnect must repaint with the CURRENT color, so it re-attaches without one
     BluffSpoilerController.observeReconnection(element, (el) => this.attachBluffTextSpoilerTarget(el));
-
-    ++BluffSpoilerController.instancesCount;
-
-    // The whole rendering (simulation + encoding) runs inside a worker, the main
-    // thread only receives ready mask URLs
-    if(BluffSpoilerController.isWorkerSimSupported()) {
-      const dpr = Math.min(2, window.devicePixelRatio);
-      BluffSpoilerController.setupWorkerSim({
-        width: TEXT_SPOILER_WIDTH,
-        height: TEXT_SPOILER_HEIGHT,
-        dpr,
-        config: buildDotRendererConfig(TEXT_SPOILER_WIDTH, TEXT_SPOILER_HEIGHT, dpr, getTextSpoilerConfig(dpr)),
-        vertexURL: new URL(SHADER_URLS.vertex, window.location.href).href,
-        fragmentURL: new URL(SHADER_URLS.fragment, window.location.href).href
-      });
-
-      const animation = new AnimationItemNested({
-        onPlay: () => BluffSpoilerController.activate(element),
-        onPause: () => BluffSpoilerController.deactivate(element),
-        onDestroy: () => {
-          if(!--BluffSpoilerController.instancesCount) {
-            BluffSpoilerController.destroy();
-          }
-        }
-      });
-
-      animationIntersector.addAnimation({
-        animation,
-        group: 'BLUFF-SPOILER',
-        // controlled: true, // should not be controlled! elements might reappear in the DOM after being removed
-        observeElement: element,
-        type: 'dots'
-      });
-
-      return;
+    if(textColor !== undefined) {
+      this.inlineSpoilerTextColors.set(element, textColor);
     }
 
-    const instance = this.getTextSpoilerInstance();
+    const canvas = element.querySelector<HTMLCanvasElement>('.bluff-spoiler-canvas');
+    if(!canvas) return;
 
-    ++instance.targetCanvasesCount;
+    if(BluffSpoilerController.isWorkerSimSupported()) {
+      this.attachBluffTextSpoilerTargetWithWorker(element, canvas);
+    } else {
+      this.attachBluffTextSpoilerTargetOnMain(element, canvas);
+    }
+  }
 
-    const animation = new AnimationItemNested({
-      onPlay: () => {
-        instance.drawCallbacks.set(element, () => BluffSpoilerController.draw(element, instance.canvas));
-        instance.play();
-      },
-      onPause: () => {
-        instance.drawCallbacks.delete(element);
-        if(!instance.drawCallbacks.size) {
-          instance.pause();
-        }
-      },
+  // * the color outlives the target it was rendered on: the element can be detached and
+  // * reconnected (see BluffSpoilerController), the recolored spoiler must survive that
+  private static inlineSpoilerTextColors = new WeakMap<HTMLElement, ValueOrGetter<CustomProperty>>();
+  private static inlineSpoilerUpdates = new Map<HTMLElement, () => void>();
+  private static onInlineAppearanceUpdate = () => this.inlineSpoilerUpdates.forEach((update) => update());
+
+  private static watchInlineSpoiler(element: HTMLElement, canvas: HTMLCanvasElement, update: () => void) {
+    const wasEmpty = !this.inlineSpoilerUpdates.size;
+    this.inlineSpoilerUpdates.set(element, update);
+    // * the spoiler is an inline box, and a ResizeObserver never reports one once it is laid out.
+    // * The canvas inside it is a block box that gets a size the moment it is rendered, so that
+    // * is what measures text inserted later than the frame it was wrapped in (an auth card
+    // * waits out the previous card's exit first) - otherwise it stays blank for good
+    const unobserve = observeResize(canvas, update);
+    if(wasEmpty) {
+      rootScope.addEventListener('theme_changed', this.onInlineAppearanceUpdate);
+      rootScope.addEventListener('chat_background_set', this.onInlineAppearanceUpdate);
+    }
+
+    return () => {
+      unobserve();
+      this.inlineSpoilerUpdates.delete(element);
+      if(!this.inlineSpoilerUpdates.size) {
+        rootScope.removeEventListener('theme_changed', this.onInlineAppearanceUpdate);
+        rootScope.removeEventListener('chat_background_set', this.onInlineAppearanceUpdate);
+      }
+    };
+  }
+
+  /**
+   * Recolor the already rendered spoilers inside `container` — for text that is
+   * repainted by CSS alone (e.g. a chat list row becoming active), the same way
+   * `CustomEmojiRendererElement.setTextColor` recolors the custom emoji next to them.
+   */
+  public static setInlineSpoilersTextColor(container: HTMLElement, textColor: ValueOrGetter<CustomProperty>) {
+    this.inlineSpoilerUpdates.forEach((update, element) => {
+      if(this.inlineSpoilerTextColors.get(element) === textColor || !container.contains(element)) {
+        return;
+      }
+
+      this.inlineSpoilerTextColors.set(element, textColor);
+      update();
+    });
+  }
+
+  private static getInlineSpoilerParticleColor(element: HTMLElement) {
+    // * without a color passed down, fall back to whatever the text around it ended up being
+    const property = readValue(this.inlineSpoilerTextColors.get(element));
+    return property ? customProperties.getPropertyAsColor(property) : getComputedStyle(element).color;
+  }
+
+  private static getBluffTextSpoilerState(element: HTMLElement, canvas: HTMLCanvasElement, dpr: number) {
+    const bounds = element.getBoundingClientRect();
+    if(!bounds.width || !bounds.height) return;
+
+    canvas.style.width = bounds.width + 'px';
+    canvas.style.height = bounds.height + 'px';
+
+    const canvasBounds = canvas.getBoundingClientRect();
+    const currentLeft = parseFloat(canvas.style.left) || 0;
+    const currentTop = parseFloat(canvas.style.top) || 0;
+    canvas.style.left = currentLeft + bounds.left - canvasBounds.left + 'px';
+    canvas.style.top = currentTop + bounds.top - canvasBounds.top + 'px';
+
+    const rects: SpoilerOverlayRect[] = adjustSpaceBetweenCloseRects(
+      toDOMRectArray(element.getClientRects()).map((rect) => getInnerCustomRect(bounds, rect))
+    );
+
+    return {
+      width: Math.round(bounds.width * dpr),
+      height: Math.round(bounds.height * dpr),
+      rects,
+      backgroundColor: 'transparent',
+      particleColor: this.getInlineSpoilerParticleColor(element)
+    };
+  }
+
+  private static attachBluffTextSpoilerTargetWithWorker(element: HTMLElement, canvas: HTMLCanvasElement) {
+    let destroyed = false;
+    const target = this.attachTextSpoilerOverlay({
+      canvas,
+      animationGroup: 'BLUFF-SPOILER',
+      observeElement: element,
       onDestroy: () => {
-        if(!--instance.targetCanvasesCount) {
-          instance.remove();
-          this.textSpoilerInstance = undefined;
-        }
-        if(!--BluffSpoilerController.instancesCount) {
-          BluffSpoilerController.destroy();
-        }
+        destroyed = true;
+        unwatch?.();
+        element.classList.remove('is-visible');
+        canvas.replaceWith(canvas.cloneNode(false));
       }
     });
 
-    animationIntersector.addAnimation({
-      animation,
-      group: 'BLUFF-SPOILER',
-      // controlled: true, // should not be controlled! elements might reappear in the DOM after being removed
-      observeElement: element,
-      type: 'dots'
+    const update = () => {
+      const state = this.getBluffTextSpoilerState(element, canvas, target.dpr);
+      if(state) target.overlay.update(state);
+    };
+    const unwatch = this.watchInlineSpoiler(element, canvas, update);
+
+    callbackify(target.readyResult, () => {
+      if(destroyed) return;
+      update();
+      requestAnimationFrame(() => !destroyed && element.classList.add('is-visible'));
     });
 
-    instance.init();
+    requestAnimationFrame(() => !destroyed && update());
+  }
+
+  private static attachBluffTextSpoilerTargetOnMain(element: HTMLElement, canvas: HTMLCanvasElement) {
+    const context = canvas.getContext('2d');
+    let state: Omit<SpoilerOverlayUpdate, 'type' | 'id'>;
+    let destroyed = false;
+
+    const draw = () => {
+      const {sourceCanvas, dpr} = target;
+      if(!state || !sourceCanvas) return;
+
+      context.clearRect(0, 0, canvas.width, canvas.height);
+
+      for(const rect of state.rects) {
+        const x = rect.left * dpr;
+        const y = rect.top * dpr;
+        const width = rect.width * dpr;
+        const height = rect.height * dpr;
+
+        drawImageFromSource(context, sourceCanvas, x, y, width, height, x, y, width, height);
+        applyColorOnContext(context, state.particleColor, x, y, width, height);
+      }
+
+      element.classList.add('is-visible');
+    };
+
+    const update = () => {
+      const newState = this.getBluffTextSpoilerState(element, canvas, target.dpr);
+      if(!newState) return;
+
+      state = newState;
+      if(canvas.width !== state.width || canvas.height !== state.height) {
+        canvas.width = state.width;
+        canvas.height = state.height;
+      }
+      draw();
+    };
+    const target = this.attachTextSpoilerTarget({
+      canvas,
+      draw,
+      animationGroup: 'BLUFF-SPOILER',
+      observeElement: element,
+      onDestroy: () => {
+        destroyed = true;
+        unwatch?.();
+        element.classList.remove('is-visible');
+      }
+    });
+    const unwatch = this.watchInlineSpoiler(element, canvas, update);
+
+    callbackify(target.readyResult, () => !destroyed && update());
+
+    requestAnimationFrame(() => !destroyed && update());
   }
 }
 

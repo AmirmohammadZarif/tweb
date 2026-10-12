@@ -2,7 +2,8 @@ import {createEffect, createResource, createSignal, on, onCleanup, onMount, Show
 import {render} from 'solid-js/web';
 import {averageColor, averageColorFromCanvas} from '@helpers/averageColor';
 import deferredPromise, {CancellablePromise} from '@helpers/cancellablePromise';
-import {attachClickEvent} from '@helpers/dom/clickEvent';
+import {attachClickEvent, simulateClickEvent} from '@helpers/dom/clickEvent';
+import Modes from '@config/modes';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import markGridCornerItem, {GRID_CORNER_CLASSES} from '@helpers/dom/markGridCornerItem';
 import highlightingColor from '@helpers/highlightingColor';
@@ -12,22 +13,23 @@ import {BaseTheme, Document, WallPaper, WebDocument} from '@layer';
 import {MyDocument} from '@appManagers/appDocsManager';
 import appDownloadManager, {AppDownloadManager} from '@lib/appDownloadManager';
 import appImManager from '@lib/appImManager';
+import I18n from '@lib/langPack';
 import rootScope from '@lib/rootScope';
+import {i18n} from '@lib/langPack';
 import {useAppSettings} from '@stores/appSettings';
 import {unwrap} from 'solid-js/store';
 import Section from '@components/section';
 import Row from '@components/rowTsx';
 import Button from '@components/buttonTsx';
-import CheckboxField from '@components/checkboxField';
+import CheckboxFieldTsx from '@components/checkboxFieldTsx';
 import ProgressivePreloader from '@components/preloader';
 import {AppBackgroundColorTab} from '@components/solidJsTabs/tabs';
 import {AppTheme, AppThemeSettings} from '@config/state';
 import {blendWallpaperForTinted} from '@config/themePresets';
 import themeController from '@helpers/themeController';
 import requestFile from '@helpers/files/requestFile';
-import {renderImageFromUrlPromise} from '@helpers/dom/renderImageFromUrl';
-import scaleMediaElement from '@helpers/canvas/scaleMediaElement';
-import {MediaSize} from '@helpers/mediaSize';
+import prepareWallPaperImage from '@helpers/files/prepareWallPaperImage';
+import {toastNew} from '@components/toast';
 import {getColorsFromWallPaper} from '@helpers/color';
 import ChatBackgroundStore from '@lib/chatBackgroundStore';
 import ListenerSetter from '@helpers/listenerSetter';
@@ -153,11 +155,12 @@ export class AppBackgroundTab {
     const doc = (wallPaper as WallPaper.wallPaper).document as MyDocument;
     const deferred = deferredPromise<void>();
     let download: Promise<void> | ReturnType<AppDownloadManager['downloadMediaURL']>;
+    const downloadWallPaper = () => appDownloadManager.downloadMediaURL({
+      media: doc,
+      queueId: appImManager.chat.bubbles ? appImManager.chat.bubbles.lazyLoadQueue.queueId : 0
+    });
     if(doc) {
-      download = appDownloadManager.downloadMediaURL({
-        media: doc,
-        queueId: appImManager.chat.bubbles ? appImManager.chat.bubbles.lazyLoadQueue.queueId : 0
-      });
+      download = downloadWallPaper();
       deferred.addNotifyListener = download.addNotifyListener.bind(download);
       deferred.cancel = download.cancel;
     } else {
@@ -231,15 +234,30 @@ export class AppBackgroundTab {
 
       const cacheContext = await rootScope.managers.thumbsStorage.getCacheContext(doc);
       if(needBlur(wallPaper)) {
-        setTimeout(() => {
-          ChatBackgroundStore.blurWallPaperImage(cacheContext.url).then((url) => {
+        setTimeout(async() => {
+          try {
+            if(!middleware()) {
+              deferred.resolve();
+              return;
+            }
+
+            const currentCacheContext = await rootScope.managers.thumbsStorage.getCacheContext(doc);
+            const sourceUrl = currentCacheContext.url || await downloadWallPaper();
+            if(!middleware()) {
+              deferred.resolve();
+              return;
+            }
+
+            const url = await ChatBackgroundStore.blurWallPaperImage(sourceUrl);
             if(!middleware()) {
               deferred.resolve();
               return;
             }
 
             onReady(url);
-          });
+          } catch(error) {
+            deferred.reject(error);
+          }
         }, 200);
       } else if(middleware()) {
         onReady(cacheContext.url);
@@ -274,16 +292,17 @@ const ChatBackground = () => {
   grid.classList.add('search-super-content-media-grid');
 
   const getActiveThemeSettings = () => themeController.getThemeSettings(getTheme());
-
-  const blurCheckboxField = new CheckboxField({
-    text: 'ChatBackground.Blur',
-    name: 'blur',
-    checked: needBlur(getActiveThemeSettings()?.wallpaper, false)
-  });
-
-  const toggleBlurCheckbox = () => {
+  const getBlurDisabled = () => {
     const wallPaper = getActiveThemeSettings()?.wallpaper;
-    blurCheckboxField.toggleDisability(!wallPaper || wallPaper._ === 'wallPaperNoFile' || !!wallPaper?.pFlags?.pattern);
+    return !wallPaper || wallPaper._ === 'wallPaperNoFile' || !!wallPaper.pFlags.pattern;
+  };
+  const blurSignal = createSignal(needBlur(getActiveThemeSettings()?.wallpaper, false));
+  const [blur, setBlur] = blurSignal;
+  const [blurDisabled, setBlurDisabled] = createSignal(getBlurDisabled());
+
+  const syncBlurControl = () => {
+    setBlur(needBlur(getActiveThemeSettings()?.wallpaper, false));
+    setBlurDisabled(getBlurDisabled());
   };
 
   const changeWallPaperBlur = async(wallPaper: WallPaper, blur: boolean) => {
@@ -296,19 +315,19 @@ const ChatBackground = () => {
     wallPaper: WallPaper,
     themeSettings?: AppThemeSettings
   ) => {
-    if(!blurCheckboxField.isDisabled()) {
-      await changeWallPaperBlur(wallPaper, blurCheckboxField.checked);
+    if(!blurDisabled()) {
+      await changeWallPaperBlur(wallPaper, blur());
     }
 
     return AppBackgroundTab.setBackgroundDocument(wallPaper, themeSettings);
   };
 
   const setActive = () => {
+    syncBlurControl();
+
     const active = grid.querySelector('.active');
     const target = elementsByKey.get(getWallPaperKeyFromTheme(getTheme()));
     if(active === target) return;
-
-    toggleBlurCheckbox();
 
     active?.classList.remove('active', ...GRID_CORNER_CLASSES);
     if(target) {
@@ -333,6 +352,12 @@ const ChatBackground = () => {
     if(result) {
       const {container, media, dispose} = result;
       container.classList.add('grid-item');
+      // The tile is a plain <div> selected via a delegated grid click; expose it as a focusable
+      // control with a name so keyboard / screen-reader users can pick a wallpaper. Here and not
+      // in the static builder: the theme picker nests the same element inside its own tiles.
+      container.setAttribute('role', 'button');
+      if(Modes.a11y) container.setAttribute('tabindex', '0');
+      container.setAttribute('aria-label', I18n.format('ChatBackground', true));
       media.classList.add('grid-item-media');
       solidRoots.push(dispose);
 
@@ -361,13 +386,12 @@ const ChatBackground = () => {
 
   const onUploadClick = () => {
     requestFile('image/x-png,image/png,image/jpeg').then(async(file) => {
-      if(file.name.endsWith('.png')) {
-        const img = document.createElement('img');
-        const url = URL.createObjectURL(file);
-        await renderImageFromUrlPromise(img, url, false);
-        const mimeType = 'image/jpeg';
-        const {blob} = await scaleMediaElement({media: img, size: new MediaSize(img.naturalWidth, img.naturalHeight), mimeType});
-        file = new File([blob], file.name.replace(/\.png$/, '.jpg'), {type: mimeType});
+      try {
+        file = await prepareWallPaperImage(file);
+      } catch(err) {
+        console.error('wallpaper upload: cannot prepare the image', err);
+        toastNew({langPackKey: 'Error.AnError'});
+        return;
       }
 
       const wallPaper = await rootScope.managers.appDocsManager.prepareWallPaperUpload(file);
@@ -400,8 +424,17 @@ const ChatBackground = () => {
       }, deferred.reject.bind(deferred));
 
       const key = getWallPaperKey(wallPaper);
-      deferred.catch(() => {
+      const releaseUploadPreview = () => {
+        ChatBackgroundStore.deleteBackgroundUrlFromCache({
+          slug: (wallPaper as WallPaper.wallPaper).slug
+        });
+      };
+      deferred.then(releaseUploadPreview, releaseUploadPreview);
+      deferred.catch((error: ApiError) => {
         container.remove();
+        if(error?.type !== 'DOWNLOAD_CANCELED' && error?.type !== 'UPLOAD_CANCELED') {
+          toastNew({langPackKey: 'Error.AnError'});
+        }
       });
 
       const preloader = new ProgressivePreloader({
@@ -423,8 +456,25 @@ const ChatBackground = () => {
     // and re-applies the background itself (applyNewTheme → setBackgroundDocument →
     // applyCurrentTheme), so we just refresh the blur checkbox once it settles.
     themeController.resetActiveTheme().then(() => {
-      blurCheckboxField.setValueSilently(needBlur(getActiveThemeSettings()?.wallpaper, false));
+      syncBlurControl();
     });
+  };
+
+  const onBlurChange = async(blur: boolean) => {
+    await changeWallPaperBlur(getActiveThemeSettings().wallpaper, blur);
+
+    // wait for the animation end before re-applying — matches legacy timing
+    setTimeout(() => {
+      const active = grid.querySelector('.active') as HTMLElement;
+      if(!active) return;
+
+      const wallpaper = wallPapersByElement.get(active);
+      if((wallpaper as WallPaper.wallPaper).pFlags.pattern || wallpaper._ === 'wallPaperNoFile') {
+        return;
+      }
+
+      setBackgroundDocument(wallpaper);
+    }, 100);
   };
 
   const onGridClick = (e: MouseEvent | TouchEvent) => {
@@ -501,25 +551,16 @@ const ChatBackground = () => {
 
   onMount(() => {
     attachClickEvent(grid, onGridClick, {listenerSetter});
-    toggleBlurCheckbox();
-    tab.container.classList.add('background-container', 'background-image-container');
-
-    listenerSetter.add(blurCheckboxField.input)('change', async() => {
-      await changeWallPaperBlur(getActiveThemeSettings().wallpaper, blurCheckboxField.checked);
-
-      // wait for the animation end before re-applying — matches legacy timing
-      setTimeout(() => {
-        const active = grid.querySelector('.active') as HTMLElement;
-        if(!active) return;
-
-        const wallpaper = wallPapersByElement.get(active);
-        if((wallpaper as WallPaper.wallPaper).pFlags.pattern || wallpaper._ === 'wallPaperNoFile') {
-          return;
-        }
-
-        setBackgroundDocument(wallpaper);
-      }, 100);
+    // Enter/Space on a focused wallpaper tile selects it (tiles are role="button" <div>s
+    // picked via the delegated grid click above).
+    if(Modes.a11y) listenerSetter.add(grid)('keydown', (e: KeyboardEvent) => {
+      if(e.key !== 'Enter' && e.key !== ' ') return;
+      const target = findUpClassName(e.target, 'grid-item') as HTMLElement;
+      if(!target) return;
+      e.preventDefault();
+      simulateClickEvent(target);
     });
+    tab.container.classList.add('background-container', 'background-image-container');
   });
 
   subscribeOn(rootScope)('background_change', setActive);
@@ -545,8 +586,17 @@ const ChatBackground = () => {
           text="Appearance.Reset"
           onClick={onResetClick}
         />
-        <Row>
-          <Row.CheckboxField>{blurCheckboxField.label}</Row.CheckboxField>
+        <Row disabled={blurDisabled()}>
+          <Row.CheckboxFieldToggle>
+            <CheckboxFieldTsx
+              disabled={blurDisabled()}
+              name="blur"
+              signal={blurSignal}
+              toggle
+              onChange={onBlurChange}
+            />
+          </Row.CheckboxFieldToggle>
+          <Row.Title>{i18n('ChatBackground.Blur')}</Row.Title>
         </Row>
       </Section>
       <Show when={loaded()}>

@@ -6,7 +6,7 @@ import setCurrentTime from '@helpers/dom/setCurrentTime';
 import limitSymbols from '@helpers/string/limitSymbols';
 import toHHMMSS from '@helpers/string/toHHMMSS';
 import appMediaPlaybackController from '@components/appMediaPlaybackController';
-import {VideoTimestamp} from '@components/appMediaViewerBase';
+import {VideoTimestamp} from '@components/mediaViewer/base';
 import RangeSelector from '@components/rangeSelector';
 import {observeResize} from '@components/resizeObserver';
 
@@ -56,6 +56,7 @@ export default class MediaProgressLine extends RangeSelector {
     appendToTimeElement?: HTMLElement
   } = {}) {
     super({
+      ariaLabel: 'AccDescr.PlaybackPosition',
       step: 1000 / 60 / 1000,
       min: 0,
       max: 1,
@@ -88,6 +89,13 @@ export default class MediaProgressLine extends RangeSelector {
 
     this.media = media;
     this.streamable = streamable;
+
+    // Before anything draws: both bars divide by `max`, which is still the constructor's 1 until
+    // this runs. A media that is already positioned and paused — reopening a chat on a track you
+    // stopped halfway — never fires an event afterwards to correct a bar drawn against the wrong
+    // max, so it would sit at 100% for good.
+    this.setSeekMax(duration);
+
     if(!media.paused || media.currentTime > 0) {
       this.onPlay();
     }
@@ -95,7 +103,6 @@ export default class MediaProgressLine extends RangeSelector {
     this.setTimestampsClipPath();
 
     let wasPlaying = false;
-    this.setSeekMax(duration);
     this.setListeners();
     this.setHandlers({
       onMouseDown: () => {

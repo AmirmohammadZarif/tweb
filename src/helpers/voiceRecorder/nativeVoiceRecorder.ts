@@ -134,8 +134,12 @@ export default class NativeVoiceRecorder {
     this.sourceNode = this.audioContext.createMediaStreamSource(this.stream);
 
     const blob = new Blob([WORKLET_SOURCE], {type: 'application/javascript'});
-    this.workletUrl = URL.createObjectURL(blob);
-    await this.audioContext.audioWorklet.addModule(this.workletUrl);
+    const workletUrl = URL.createObjectURL(blob);
+    try {
+      await this.audioContext.audioWorklet.addModule(workletUrl);
+    } finally {
+      URL.revokeObjectURL(workletUrl);
+    }
 
     this.workletNode = new AudioWorkletNode(this.audioContext, WORKLET_PROCESSOR_NAME, {
       numberOfInputs: 1,
@@ -278,11 +282,6 @@ export default class NativeVoiceRecorder {
     }
 
     const ogg = this.writer ? this.writer.finalize() : new Uint8Array(0);
-
-    if(this.workletUrl) {
-      URL.revokeObjectURL(this.workletUrl);
-      this.workletUrl = undefined;
-    }
 
     if(this.audioContext && this.audioContext.state !== 'closed') {
       try {

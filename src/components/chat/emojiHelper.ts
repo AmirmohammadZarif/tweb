@@ -9,7 +9,7 @@ import {CustomEmojiRendererElement} from '@lib/customEmoji/renderer';
 import mediaSizes from '@helpers/mediaSizes';
 import {getMiddleware, Middleware} from '@helpers/middleware';
 import CustomEmojiElement from '@lib/customEmoji/element';
-import attachStickerViewerListeners from '@components/stickerViewer';
+import attachMediaPeekListeners from '@components/mediaPeek';
 import ListenerSetter from '@helpers/listenerSetter';
 import rootScope from '@lib/rootScope';
 
@@ -104,7 +104,7 @@ export default class EmojiHelper extends AutocompleteHelper {
           this.innerList = undefined;
         }
       });
-      attachStickerViewerListeners({listenTo: this.container, listenerSetter});
+      attachMediaPeekListeners({listenTo: this.container, listenerSetter});
 
       await customEmojiRenderer.add({
         addCustomEmojis: customEmojis
@@ -179,6 +179,13 @@ export default class EmojiHelper extends AutocompleteHelper {
 
   // * suggest custom emoji variants for a regular emoji typed right before the caret
   public checkEmoticon(emoticon: string) {
+    // * the suggestions depend on the emoticon alone, so typing 😳 after 😳 asks for the very
+    // * same strip. rebuilding it would re-request the list, re-create every element and reset
+    // * the scroll — keep the one that's already on screen instead
+    if(this.emoticon === emoticon && !this.hidden) {
+      return;
+    }
+
     const middleware = this.getMiddleware();
     this.emoticon = emoticon;
     this.managers.appEmojiManager.searchCustomEmoji(emoticon).then((emojiList) => {

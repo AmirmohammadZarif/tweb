@@ -3,9 +3,9 @@ import appMediaPlaybackController, {AppMediaPlaybackController} from '@component
 import cancelEvent from '@helpers/dom/cancelEvent';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
 import PeerTitle from '@components/peerTitle';
-import {i18n} from '@lib/langPack';
+import I18n, {i18n} from '@lib/langPack';
 import {formatFullSentTime} from '@helpers/date';
-import {DocumentAttribute} from '@layer';
+import getAudioTitles from '@appManagers/utils/docs/getAudioTitles';
 import MediaProgressLine from '@components/mediaProgressLine';
 import VolumeSelector from '@components/volumeSelector';
 import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
@@ -13,6 +13,7 @@ import {AppManagers} from '@lib/managers';
 import getFwdFromName from '@appManagers/utils/messages/getFwdFromName';
 import toHHMMSS from '@helpers/string/toHHMMSS';
 import {PlaybackRateButton} from '@components/playbackRateButton';
+import createAudioAnimatedIcon, {createPlayPauseIcon} from '@components/audioAnimatedIcon';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import {doubleRaf} from '@helpers/schedulers';
 import ListenerSetter from '@helpers/listenerSetter';
@@ -22,10 +23,11 @@ import type {AppImManager} from '@lib/appImManager';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import toggleDisability from '@helpers/dom/toggleDisability';
 import appSidebarRight from '../sidebarRight';
-import AppSavedMusicTab from '../sidebarRight/tabs/savedMusic';
+import {openSavedMusicTab} from '@components/savedMusicActions';
 import TopbarPlate, {createTopbarPlate} from '@components/chat/topbarPlate';
 import Button from '@components/buttonTsx';
 import documentFragmentToNodes from '@helpers/dom/documentFragmentToNodes';
+import classNames from '@helpers/string/classNames';
 
 export type ChatAudioController = {
   container: HTMLElement,
@@ -44,8 +46,41 @@ export default function createChatAudio(
   const [title, setTitle] = createSignal<JSX.Element>();
   const [subtitle, setSubtitle] = createSignal<JSX.Element>();
   const [timeText, setTimeText] = createSignal('');
-  const [playIcon, setPlayIcon] = createSignal<Icon>('play');
+  // the seek glyphs rest on their finished frame and replay on every press
+  const rewindIcon = createAudioAnimatedIcon('rewind');
+  const forwardIcon = createAudioAnimatedIcon('forward');
+  let playIconContainer!: HTMLDivElement;
+  const setPlayIcon = createPlayPauseIcon(() => playIconContainer);
+
+  // The controller announces a play one task late (see its `onPlay`), so a press that lands inside
+  // that gap is told about a play that is already over, and the glyph sits out the change. The media
+  // itself is never late, so the plate follows it directly — the same rule the row's button follows.
+  const mediaListenerSetter = new ListenerSetter();
+  let playingMedia: HTMLMediaElement;
+  const [playing, setPlaying] = createSignal(false);
+  const syncPlayIcon = () => {
+    const isPlaying = !!playingMedia && !playingMedia.paused;
+    setPlaying(isPlaying);
+    setPlayIcon(isPlaying);
+  };
+
+  const followMedia = (media: HTMLMediaElement) => {
+    if(playingMedia !== media) {
+      mediaListenerSetter.removeAll();
+      playingMedia = media;
+      (['play', 'pause', 'emptied'] as const).forEach((event) => {
+        mediaListenerSetter.add(media)(event, syncPlayIcon);
+      });
+    }
+
+    syncPlayIcon();
+  };
+
   const [repeatIcon, setRepeatIcon] = createSignal<Icon>('audio_repeat');
+
+  // A track picked in the music search popup plays off a message that only ever existed inside that
+  // popup — there is nothing to open, so the plate's content stops being a button altogether.
+  const [inert, setInert] = createSignal(false);
 
   // Refs to JSX-rendered buttons that need imperative classList toggles or
   // disability state changes after the initial render.
@@ -63,7 +98,7 @@ export default function createChatAudio(
   volumeProgressLineContainer.append(volumeSelector.container);
   const tunnel = document.createElement('div');
   tunnel.classList.add('pinned-audio-volume-tunnel');
-  volumeSelector.btn.classList.add('pinned-audio-volume', 'active');
+  volumeSelector.btn.classList.add('pinned-audio-volume');
   volumeSelector.btn.prepend(tunnel);
   volumeSelector.btn.append(volumeProgressLineContainer);
 
@@ -86,27 +121,33 @@ export default function createChatAudio(
     render: () => (
       <>
         <TopbarPlate.Body noRipple>
-          <Button.Icon
+          <Button
             ref={prevEl}
-            icon="fast_rewind"
-            class="active"
+            class="btn-icon"
             noRipple
-            onClick={(e) => { cancelEvent(e); appMediaPlaybackController.previous(); }}
-          />
-          <Button.Icon
-            icon={playIcon()}
-            class="active pinned-audio-ico"
+            aria-label={I18n.format('KeyboardShortcuts.Action.PreviousMedia', true)}
+            onClick={(e) => { cancelEvent(e); rewindIcon.play(); appMediaPlaybackController.previous(); }}
+          >
+            {rewindIcon.element}
+          </Button>
+          <Button
+            class="btn-icon pinned-audio-ico"
             noRipple
+            aria-label={I18n.format(playing() ? 'Pause' : 'Play', true)}
             onClick={(e) => { cancelEvent(e); appMediaPlaybackController.toggle(); }}
-          />
-          <Button.Icon
+          >
+            <div class="pinned-audio-play-icon" ref={playIconContainer} />
+          </Button>
+          <Button
             ref={nextEl}
-            icon="fast_forward"
-            class="active"
+            class="btn-icon"
             noRipple
-            onClick={(e) => { cancelEvent(e); appMediaPlaybackController.next(); }}
-          />
-          <TopbarPlate.Content class="hover-effect" ripple>
+            aria-label={I18n.format('KeyboardShortcuts.Action.NextMedia', true)}
+            onClick={(e) => { cancelEvent(e); forwardIcon.play(); appMediaPlaybackController.next(); }}
+          >
+            {forwardIcon.element}
+          </Button>
+          <TopbarPlate.Content class={classNames('hover-effect', inert() && 'pinned-audio-content-inert')} ripple clickable disabled={inert()}>
             <TopbarPlate.Title>{title()}</TopbarPlate.Title>
             <TopbarPlate.Subtitle>
               <span class="pinned-audio-time">{timeText()}</span>
@@ -121,6 +162,7 @@ export default function createChatAudio(
               ref={repeatEl}
               icon={repeatIcon()}
               noRipple
+              aria-label={I18n.format('Schedule.Repeat', true)}
               onClick={(e) => {
                 cancelEvent(e);
                 const params = appMediaPlaybackController.getPlaybackParams();
@@ -149,7 +191,7 @@ export default function createChatAudio(
   // Click on the central content (title/subtitle) → open the source chat /
   // saved music tab. Clicks anywhere else on the plate do nothing.
   attachClickEvent(plate.container, (e) => {
-    if(!findUpClassName(e.target, 'pinned-container-content')) {
+    if(inert() || !findUpClassName(e.target, 'pinned-container-content')) {
       return;
     }
 
@@ -157,17 +199,7 @@ export default function createChatAudio(
     const peerId = plate.container.dataset.peerId.toPeerId();
     const savedMusicDocId = plate.container.dataset.savedMusicDocId;
     if(savedMusicDocId) {
-      const prevTab = appSidebarRight.getTab(AppSavedMusicTab);
-      if(prevTab?.peerId === peerId) {
-        appSidebarRight.toggleSidebar(true);
-        return;
-      }
-
-      const tab = appSidebarRight.createTab(AppSavedMusicTab);
-      tab.peerId = peerId;
-      tab.open();
-      appSidebarRight.toggleSidebar(true);
-      if(prevTab) setTimeout(() => prevTab.close(), 300);
+      openSavedMusicTab(appSidebarRight, peerId);
       return;
     }
 
@@ -206,16 +238,16 @@ export default function createChatAudio(
     repeatEl.classList.toggle('active', playbackParams.loop || playbackParams.round);
   };
 
-  const onMediaPlay = ({doc, message, media, playbackParams, isSavedMusic, isSlotted}: ReturnType<AppMediaPlaybackController['getPlayingDetails']>) => {
+  const onMediaPlay = ({doc, message, media, playbackParams, isSavedMusic, isLocal, isSlotted}: ReturnType<AppMediaPlaybackController['getPlayingDetails']>) => {
     let titleVal: JSX.Element, subtitleVal: JSX.Element;
     const isMusic = doc.type !== 'voice' && doc.type !== 'round';
     if(!isMusic) {
       titleVal = new PeerTitle({peerId: message.fromId, fromName: getFwdFromName(message.fwd_from)}).element;
       subtitleVal = formatFullSentTime(message.date);
     } else {
-      const audioAttribute = doc.attributes.find((attr) => attr._ === 'documentAttributeAudio') as DocumentAttribute.documentAttributeAudio;
-      titleVal = wrapEmojiText(audioAttribute?.title ?? doc.file_name);
-      subtitleVal = audioAttribute?.performer ? wrapEmojiText(audioAttribute.performer) : i18n('AudioUnknownArtist');
+      const titles = getAudioTitles(doc);
+      titleVal = wrapEmojiText(titles?.title);
+      subtitleVal = titles?.performer ? wrapEmojiText(titles.performer) : i18n('AudioUnknownArtist');
     }
 
     // Slotted media (e.g. poll description / explanation audio) is played in
@@ -232,7 +264,7 @@ export default function createChatAudio(
     // Visually mute the next button for slotted playback — there's no
     // next track to advance to. The click handler is a safe no-op on the
     // empty list loader, so we leave the button enabled.
-    nextEl.classList.toggle('active', !isSlotted);
+    nextEl.classList.toggle('pinned-audio-no-next', isSlotted);
 
     plate.container.dataset.peerId = '' + message.peerId;
     plate.container.dataset.mid = '' + message.mid;
@@ -242,6 +274,10 @@ export default function createChatAudio(
       delete plate.container.dataset.savedMusicDocId;
     }
 
+    // The saved-music tab is a real destination even for a locally built message; anything else
+    // local (the music picker) has none.
+    setInert(!isSavedMusic && isLocal);
+
     setTitle(titleVal);
 
     // Solid is throwing an error when trying to set the subtitle as a fragment / array of nodes
@@ -250,11 +286,11 @@ export default function createChatAudio(
 
     setSubtitle(subtitleSpan);
 
-    setPlayIcon(media.paused ? 'play' : 'pause');
+    followMedia(media);
     toggle(false);
   };
 
-  const onPause = () => setPlayIcon('play');
+  const onPause = () => syncPlayIcon();
   const onStop = () => toggle(true);
 
   const toggleActivity = (active: boolean) => {
@@ -283,6 +319,7 @@ export default function createChatAudio(
     destroy: () => {
       progressLine?.removeListeners();
       listenerSetter.removeAll();
+      mediaListenerSetter.removeAll();
       plate.destroy();
     }
   };
