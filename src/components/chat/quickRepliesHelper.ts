@@ -8,6 +8,7 @@ import AutocompleteHelperController from '@components/chat/autocompleteHelperCon
 import {AppManagers} from '@lib/managers';
 import {QuickReply} from '@lib/quickReplies/types';
 import rootScope from '@lib/rootScope';
+import {i18n} from '@lib/langPack';
 
 type HelperReply = {
   id: string,
@@ -16,6 +17,8 @@ type HelperReply = {
   source?: 'crm',
   // set for CRM templates that carry attached images, sent alongside the text
   crmTemplateId?: number,
+  // set for CRM voice templates, sent as a voice message instead of inserting text
+  crmVoiceTemplateId?: number,
   imageCount?: number
 };
 
@@ -55,6 +58,7 @@ export default class QuickRepliesHelper extends AutocompleteHelper {
         this.chatInput.insertQuickReply({
           text: reply.text,
           crmTemplateId: reply.crmTemplateId,
+          crmVoiceTemplateId: reply.crmVoiceTemplateId,
           hasImages: !!reply.imageCount,
           isHelper: true
         });
@@ -95,8 +99,9 @@ export default class QuickRepliesHelper extends AutocompleteHelper {
     return this.cachePromise ??= Promise.all([
       this.managers.appQuickRepliesManager.getQuickReplies(),
       this.managers.appCrmManager.getTemplates(),
+      this.managers.appCrmManager.getVoiceTemplates(),
       this.managers.appCrmManager.getFaqs()
-    ]).then(([local, templates, faqs]) => {
+    ]).then(([local, templates, voiceTemplates, faqs]) => {
       const combined: HelperReply[] = [
         ...local.map((r: QuickReply) => ({id: r.id, title: r.title, text: r.text})),
         ...templates.map((t) => ({
@@ -106,6 +111,13 @@ export default class QuickRepliesHelper extends AutocompleteHelper {
           source: 'crm' as const,
           crmTemplateId: t.id,
           imageCount: t.image_urls?.length || 0
+        })),
+        ...voiceTemplates.map((t) => ({
+          id: 'crm-v-' + t.id,
+          title: t.name,
+          text: '',
+          source: 'crm' as const,
+          crmVoiceTemplateId: t.id
         })),
         ...faqs.map((f) => ({id: 'crm-f-' + f.id, title: f.question, text: f.answer, source: 'crm' as const}))
       ];
@@ -194,7 +206,11 @@ export default class QuickRepliesHelper extends AutocompleteHelper {
 
     const text = document.createElement('div');
     text.classList.add(BASE + '-text');
-    setInnerHTML(text, wrapEmojiText(reply.text));
+    if(reply.crmVoiceTemplateId !== undefined) {
+      text.append(i18n('QuickReplies.VoiceMessage'));
+    } else {
+      setInnerHTML(text, wrapEmojiText(reply.text));
+    }
 
     div.append(name, text);
 

@@ -50,6 +50,8 @@ export const CRM_ENDPOINTS = {
   me: '/auth/me',
   templates: '/templates',
   templateImages: (id: number) => '/templates/' + id + '/images',
+  voiceTemplates: '/voice-templates',
+  voiceTemplateAudio: (id: number) => '/voice-templates/' + id + '/audio',
   faqs: '/faqs',
   agents: '/agents',
   customersSearch: '/customers/search',
@@ -315,6 +317,22 @@ export type CrmTemplate = {
 // base64 data URIs, fetched lazily when an image-bearing template is picked so
 // they can be staged as Files in the send-preview.
 export type CrmTemplateImage = {
+  name: string,
+  mime: string,
+  data: string // data URI: data:<mime>;base64,<...>
+};
+
+// GET /voice-templates -> {data: CrmVoiceTemplate[]}. Pre-recorded audio replies,
+// sent to the customer as a voice message.
+export type CrmVoiceTemplate = {
+  id: number,
+  name: string,
+  mime_type: string
+};
+
+// GET /voice-templates/{id}/audio -> {data: CrmVoiceTemplateAudio}. The audio bytes
+// as a base64 data URI, fetched lazily when a voice template is previewed or sent.
+export type CrmVoiceTemplateAudio = {
   name: string,
   mime: string,
   data: string // data URI: data:<mime>;base64,<...>

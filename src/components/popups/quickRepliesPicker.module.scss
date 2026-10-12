@@ -45,6 +45,10 @@
   white-space: nowrap;
 }
 
+.play {
+  color: var(--primary-color);
+}
+
 .empty {
   flex: 1 1 auto;
   display: flex;
