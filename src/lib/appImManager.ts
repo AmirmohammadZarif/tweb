@@ -1393,7 +1393,10 @@ export class AppImManager extends EventListenerBase<{
 
       const target = e.target as HTMLElement;
 
-      const isTargetAnInput = (target.tagName === 'INPUT' && !['checkbox', 'radio'].includes((target as HTMLInputElement).type)) || target.isContentEditable;
+      // Textareas (e.g. the CRM notes composer) are inputs too — otherwise the
+      // "type anywhere → focus the message input" fallback below steals focus from them.
+      const isTargetATextarea = target.tagName === 'TEXTAREA';
+      const isTargetAnInput = (target.tagName === 'INPUT' && !['checkbox', 'radio'].includes((target as HTMLInputElement).type)) || isTargetATextarea || target.isContentEditable;
 
       // if(target.tagName === 'INPUT') return;
 
@@ -1435,7 +1438,7 @@ export class AppImManager extends EventListenerBase<{
           }
         });
         return;
-      } else if((key === 'ArrowUp' || key === 'ArrowDown') && this.chat?.type !== ChatType.Scheduled) {
+      } else if((key === 'ArrowUp' || key === 'ArrowDown') && !isTargetATextarea && this.chat?.type !== ChatType.Scheduled) {
         // In chats/channels where the user can't post (read-only broadcasts, restricted groups,
         // unjoined chats), there's no message to edit, so let ArrowUp/Down scroll the chat instead.
         if(chat?.input && !chat.input.canSendPlain()) {

@@ -70,6 +70,7 @@ import callbackify from '@helpers/callbackify';
 import ChatBotCommands from '@components/chat/botCommands';
 import createCrmTaskFromText from '@lib/crm/createTask';
 import {CrmAiDraftReason} from '@lib/crm/types';
+import AndropayMark from '@components/andropayMark';
 import {hasCrmOpenTicket} from '@stores/crmOpenTickets';
 import copy from '@helpers/object/copy';
 import documentFragmentToHTML from '@helpers/dom/documentFragmentToHTML';
@@ -1060,7 +1061,8 @@ export default class ChatInput {
     // * a `float` button like the gift/scheduled ones — those appear only while the
     // * input is empty, and this one has to stay reachable after the agent has
     // * started typing (that is exactly when they want the draft to compare against).
-    this.btnAiDraft = this.createButtonIcon('ai_star1 toggle-ai-draft hide', {noRipple: true});
+    this.btnAiDraft = this.createButtonIcon(' toggle-ai-draft hide', {noRipple: true});
+    this.btnAiDraft.append(AndropayMark());
     this.btnAiDraft.title = I18n.format('Crm.AiDraft.Tooltip', true);
     attachClickEvent(this.btnAiDraft, () => {
       this.requestAiDraft();
