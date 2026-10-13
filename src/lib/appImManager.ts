@@ -1753,9 +1753,12 @@ export class AppImManager extends EventListenerBase<{
       // Without the a11y layer, what counted as an input before it: any <input> but a checkbox or a
       // radio. A seek bar (range) that took the focus on a click then keeps its keys, Enter included,
       // instead of handing them to the composer, which would send the draft.
+      // Textareas (e.g. the CRM notes composer) are inputs too — otherwise the
+      // "type anywhere → focus the message input" fallback below steals focus from them.
+      const isTargetATextarea = target.tagName === 'TEXTAREA';
       const targetIsInput = Modes.a11y ? isTargetAnInput(target) : !!target && (
         target.tagName === 'INPUT' && !['checkbox', 'radio'].includes((target as HTMLInputElement).type) ||
-        target.tagName === 'TEXTAREA' ||
+        isTargetATextarea ||
         target.isContentEditable
       );
 
@@ -1800,7 +1803,7 @@ export class AppImManager extends EventListenerBase<{
           }
         });
         return;
-      } else if((key === 'ArrowUp' || key === 'ArrowDown') && this.chat?.type !== ChatType.Scheduled && this.chat?.type !== ChatType.Welcome) {
+      } else if((key === 'ArrowUp' || key === 'ArrowDown') && !isTargetATextarea && this.chat?.type !== ChatType.Scheduled && this.chat?.type !== ChatType.Welcome) {
         // In chats/channels where the user can't post (read-only broadcasts, restricted groups,
         // unjoined chats), there's no message to edit, so let ArrowUp/Down scroll the chat instead.
         if(chat?.input && !chat.input.canSendPlain()) {

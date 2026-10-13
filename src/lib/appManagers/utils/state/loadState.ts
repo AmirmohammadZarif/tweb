@@ -1,6 +1,6 @@
 import App from '@config/app';
 import DEBUG from '@config/debug';
-import {CommonState as StateCommon, State, COMMON_STATE_INIT, STATE_INIT, AppTheme} from '@config/state';
+import {CommonState as StateCommon, State, COMMON_STATE_INIT, STATE_INIT, AppTheme, ANDROPAY_ACCENT_DAY, ANDROPAY_ACCENT_NIGHT} from '@config/state';
 import compareVersion from '@helpers/compareVersion';
 import copy from '@helpers/object/copy';
 import validateInitObject from '@helpers/object/validateInitObject';
@@ -152,6 +152,10 @@ function CommonStateWriter(log: ReturnType<typeof logger>) {
   return w;
 }
 
+// Factory accents shipped before the Andropay brand colors — see MIGRATE_THEMES.
+const OLD_DAY_ACCENTS = [0x3390ec, 0x2D7ED5, 0x420574];
+const OLD_NIGHT_ACCENTS = [0x8774E1];
+
 const STATE_STEPS = {
   REFRESH: (writer: ReturnType<typeof StateWriter>) => {
     const time = Date.now();
@@ -190,6 +194,19 @@ const STATE_STEPS = {
         theme.settings = [theme.settings as any];
         migrated = true;
       }
+
+      // Andropay rebrand: themes saved before it still carry the old factory
+      // accents. Swap only those, so an accent the agent picked by hand survives.
+      theme.settings?.forEach((s) => {
+        const base = s.base_theme?._;
+        const isNight = base === 'baseThemeNight';
+        const oldDefaults = isNight ? OLD_NIGHT_ACCENTS : base === 'baseThemeTinted' ? [] : OLD_DAY_ACCENTS;
+        if(!oldDefaults.includes(s.accent_color)) return;
+        const accent = isNight ? ANDROPAY_ACCENT_NIGHT : ANDROPAY_ACCENT_DAY;
+        s.accent_color = accent;
+        if(isNight) s.message_colors = [accent];
+        migrated = true;
+      });
     });
     if(migrated) {
       writer.push('settings', writer.state.settings);

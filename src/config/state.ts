@@ -314,6 +314,11 @@ export type CommonState = {
 //   id: '-1'
 // };
 
+// Andropay brand book: primary purple #502675. Dark themes use the same hue
+// lifted to L≈65% so it keeps contrast on the near-black surfaces.
+export const ANDROPAY_ACCENT_DAY = 0x502675;
+export const ANDROPAY_ACCENT_NIGHT = 0xA979D2;
+
 export const DEFAULT_THEME: Theme = {
   _: 'theme',
   access_hash: '',
@@ -322,7 +327,7 @@ export const DEFAULT_THEME: Theme = {
     _: 'themeSettings',
     pFlags: {},
     base_theme: {_: 'baseThemeClassic'},
-    accent_color: 0x420574, // Andropay purple
+    accent_color: ANDROPAY_ACCENT_DAY,
     message_colors: [0x5CA853],
     wallpaper: {
       _: 'wallPaper',
@@ -348,8 +353,8 @@ export const DEFAULT_THEME: Theme = {
     _: 'themeSettings',
     pFlags: {},
     base_theme: {_: 'baseThemeNight'},
-    accent_color: 0x8774E1,
-    message_colors: [0x8774E1],
+    accent_color: ANDROPAY_ACCENT_NIGHT,
+    message_colors: [ANDROPAY_ACCENT_NIGHT],
     wallpaper: {
       _: 'wallPaper',
       pFlags: {
@@ -411,7 +416,7 @@ export const DEFAULT_THEME: Theme = {
     _: 'themeSettings',
     pFlags: {},
     base_theme: {_: 'baseThemeDay'},
-    accent_color: 0x420574, // Andropay purple
+    accent_color: ANDROPAY_ACCENT_DAY,
     message_colors: [0x2D7ED5],
     wallpaper: {
       _: 'wallPaper',

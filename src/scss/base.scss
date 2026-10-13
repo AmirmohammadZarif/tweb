@@ -123,12 +123,15 @@
   --section-box-shadow: 0px 1px 4px 0px var(--section-box-shadow-color);
   --section-box-shadow-big: 0px 1px 8px 0px var(--section-box-shadow-big-color);
   --column-box-shadow: 0px 0px 4px 0px var(--column-box-shadow-color);
-  --font-regular: "Roboto", -apple-system, apple color emoji, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+  --font-regular: "Open Sans", "Roboto", -apple-system, apple color emoji, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
   --font-serif: "Roboto Serif", Georgia, "Times New Roman", serif;
   --font-heading: "Merriweather", "Roboto Serif", Georgia, "Times New Roman", serif;
   --font-monospace: 'Roboto Mono', monospace;
   --font-rounded: -ui-rounded, "Numbers Rounded", "Roboto", "Helvetica Neue", sans-serif;
-  --font-weight-bold: 500;
+  --font-weight-bold: 600; // Open Sans SemiBold, per the Andropay brand book
+  --font-monospace: 'Roboto Mono', monospace;
+  --font-rounded: -ui-rounded, "Numbers Rounded", "Roboto", "Helvetica Neue", sans-serif;
+  --font-weight-bold: 600; // Open Sans SemiBold, per the Andropay brand book
   --font-weight-normal: 400;
   --font-weight: var(--font-weight-normal);
   --selection-background-color: rgba(var(--primary-color-rgb), .4);
