@@ -461,6 +461,7 @@ const lang = {
   'QuickReplies.SourceCrm': 'CRM',
   'QuickReplies.VoiceMessage': 'Voice message',
   'QuickReplies.VoiceLoadError': 'Couldn\'t load the voice template.',
+  'QuickReplies.VideoLoadError': 'Couldn\'t load a video from the template; sending the rest.',
   'Crm.Title': 'Andropay CRM',
   'Crm.Caption': 'Connect this session to your Andropay CRM to pull shared FAQ/templates into quick replies and look up customers. Sign in with your agent mobile and OTP — the token is stored only in this browser.',
   'Crm.BaseUrl': 'CRM address (e.g. https://andropay.xyz)',

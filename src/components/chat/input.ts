@@ -1509,6 +1509,7 @@ export default class ChatInput {
             crmTemplateId: reply.crmTemplateId,
             crmVoiceTemplateId: reply.crmVoiceTemplateId,
             hasImages: !!reply.imageCount,
+            videoUrls: reply.videoUrls,
             isHelper: false
           })
         });
@@ -4149,9 +4150,10 @@ export default class ChatInput {
     crmTemplateId?: number,
     crmVoiceTemplateId?: number,
     hasImages?: boolean,
+    videoUrls?: string[],
     isHelper?: boolean
   }) {
-    const {text, crmTemplateId, crmVoiceTemplateId, hasImages, isHelper} = options;
+    const {text, crmTemplateId, crmVoiceTemplateId, hasImages, videoUrls, isHelper} = options;
 
     if(crmVoiceTemplateId !== undefined) {
       // * drop the typed `/query` token, keep whatever else the agent has written
@@ -4168,17 +4170,15 @@ export default class ChatInput {
       this.insertAtCaret(text || '', undefined, !!isHelper);
     }
 
-    if(!hasImages || crmTemplateId === undefined) {
+    const videoCount = videoUrls?.length || 0;
+    if((!hasImages && !videoCount) || crmTemplateId === undefined) {
       return;
     }
 
     const middleware = this.middlewareHelper.get();
-    const images = await this.managers.appCrmManager.getTemplateImages(crmTemplateId);
-    if(!middleware() || !images.length) {
-      return;
-    }
 
-    const files = (await Promise.all(images.map(async(img, idx) => {
+    const imageFilesPromise = !hasImages ? Promise.resolve([] as File[]) : this.managers.appCrmManager.getTemplateImages(crmTemplateId)
+    .then((images) => Promise.all(images.map(async(img, idx) => {
       try {
         // * a data: URI fetch resolves locally — no network / CORS involved
         const blob = await fetch(img.data).then((r) => r.blob());
@@ -4187,9 +4187,34 @@ export default class ChatInput {
       } catch(err) {
         return undefined;
       }
-    }))).filter(Boolean) as File[];
+    })));
 
-    if(!middleware() || !files.length) {
+    // * videos are sent from this account like the images, so they have to be downloaded
+    // * here too; the CRM never sees this outgoing message. Fetched as raw bytes by index.
+    const videoFilesPromise = Promise.all(Array.from({length: videoCount}, async(_, idx) => {
+      const buffer = await this.managers.appCrmManager.getTemplateVideo(crmTemplateId, idx);
+      if(!buffer) {
+        return undefined;
+      }
+
+      const name = (videoUrls[idx] || '').split('/').pop() || `template-${crmTemplateId}-${idx}.mp4`;
+      const ext = (name.split('.').pop() || 'mp4').toLowerCase();
+      const type = ext === 'mov' ? 'video/quicktime' : ext === 'webm' ? 'video/webm' : 'video/mp4';
+      return new File([buffer], name, {type});
+    }));
+
+    const [imageFiles, videoFiles] = await Promise.all([imageFilesPromise, videoFilesPromise]);
+    const files = [...imageFiles, ...videoFiles].filter(Boolean) as File[];
+
+    if(!middleware()) {
+      return;
+    }
+
+    if(videoFiles.some((file) => !file)) {
+      toastNew({langPackKey: 'QuickReplies.VideoLoadError'});
+    }
+
+    if(!files.length) {
       return;
     }
 

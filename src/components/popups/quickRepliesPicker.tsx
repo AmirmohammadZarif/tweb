@@ -11,7 +11,7 @@ import cancelEvent from '@helpers/dom/cancelEvent';
 import {ButtonIconTsx} from '@components/buttonIconTsx';
 import styles from './quickRepliesPicker.module.scss';
 
-type PickerItem = QuickReply & {source?: 'crm', crmTemplateId?: number, crmVoiceTemplateId?: number, imageCount?: number};
+type PickerItem = QuickReply & {source?: 'crm', crmTemplateId?: number, crmVoiceTemplateId?: number, imageCount?: number, videoUrls?: string[]};
 
 export default function showQuickRepliesPickerPopup(options: {
   onSelect: (reply: PickerItem) => void
@@ -36,7 +36,8 @@ export default function showQuickRepliesPickerPopup(options: {
           date: 0,
           source: 'crm' as const,
           crmTemplateId: t.id,
-          imageCount: t.image_urls?.length || 0
+          imageCount: t.image_urls?.length || 0,
+          videoUrls: t.video_urls || []
         })),
         ...voiceTemplates.map((t) => ({
           id: 'crm-v-' + t.id,
@@ -134,6 +135,9 @@ export default function showQuickRepliesPickerPopup(options: {
                       {reply.title}
                       <Show when={reply.source === 'crm'}>
                         <span class={styles.badge}>{i18n('QuickReplies.SourceCrm')}</span>
+                      </Show>
+                      <Show when={reply.videoUrls?.length}>
+                        <span class={styles.images}>{(reply.videoUrls.length > 1 ? reply.videoUrls.length + ' ' : '') + '🎬'}</span>
                       </Show>
                       <Show when={reply.imageCount}>
                         <span class={styles.images}>{(reply.imageCount > 1 ? reply.imageCount + ' ' : '') + '🖼'}</span>

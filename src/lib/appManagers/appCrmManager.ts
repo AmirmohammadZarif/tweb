@@ -361,6 +361,18 @@ export default class AppCrmManager extends AppManager {
     }
   }
 
+  // The raw bytes of one of a template's attached videos. Videos run to tens of
+  // MB, so unlike getTemplateImages they come as binary, not base64 JSON.
+  public async getTemplateVideo(templateId: number, index: number): Promise<ArrayBuffer | undefined> {
+    if(!(await this.isConnected())) return undefined;
+    try {
+      return await this.requestBinary(CRM_ENDPOINTS.templateVideo(templateId, index));
+    } catch(err) {
+      this.log.error('getTemplateVideo failed', err);
+      return undefined;
+    }
+  }
+
   public async getVoiceTemplates(): Promise<CrmVoiceTemplate[]> {
     if(!(await this.isConnected())) return [];
     try {

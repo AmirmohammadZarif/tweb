@@ -19,7 +19,9 @@ type HelperReply = {
   crmTemplateId?: number,
   // set for CRM voice templates, sent as a voice message instead of inserting text
   crmVoiceTemplateId?: number,
-  imageCount?: number
+  imageCount?: number,
+  // set for CRM templates that carry attached videos, sent alongside the images
+  videoUrls?: string[]
 };
 
 // * keep the combined local + CRM reply list warm so typing each `/` query doesn't re-hit the
@@ -60,6 +62,7 @@ export default class QuickRepliesHelper extends AutocompleteHelper {
           crmTemplateId: reply.crmTemplateId,
           crmVoiceTemplateId: reply.crmVoiceTemplateId,
           hasImages: !!reply.imageCount,
+          videoUrls: reply.videoUrls,
           isHelper: true
         });
       }
@@ -110,7 +113,8 @@ export default class QuickRepliesHelper extends AutocompleteHelper {
           text: t.text,
           source: 'crm' as const,
           crmTemplateId: t.id,
-          imageCount: t.image_urls?.length || 0
+          imageCount: t.image_urls?.length || 0,
+          videoUrls: t.video_urls || []
         })),
         ...voiceTemplates.map((t) => ({
           id: 'crm-v-' + t.id,
@@ -195,6 +199,13 @@ export default class QuickRepliesHelper extends AutocompleteHelper {
       badge.classList.add(BASE + '-badge');
       badge.textContent = 'CRM';
       name.append(badge);
+    }
+
+    if(reply.videoUrls?.length) {
+      const videos = document.createElement('span');
+      videos.classList.add(BASE + '-images');
+      videos.textContent = (reply.videoUrls.length > 1 ? reply.videoUrls.length + ' ' : '') + '🎬';
+      name.append(videos);
     }
 
     if(reply.imageCount) {
