@@ -50,6 +50,7 @@ export const CRM_ENDPOINTS = {
   me: '/auth/me',
   templates: '/templates',
   templateImages: (id: number) => '/templates/' + id + '/images',
+  templateVideo: (id: number, index: number) => '/templates/' + id + '/videos/' + index,
   voiceTemplates: '/voice-templates',
   voiceTemplateAudio: (id: number) => '/voice-templates/' + id + '/audio',
   faqs: '/faqs',
@@ -310,7 +311,10 @@ export type CrmTemplate = {
   text: string,
   // origin-relative /storage paths of attached images (prefix with the CRM
   // baseUrl to display). Empty/absent when the template has no images.
-  image_urls?: string[]
+  image_urls?: string[],
+  // origin-relative /storage paths of attached videos. The bytes come from
+  // CRM_ENDPOINTS.templateVideo(id, index), index being the position here.
+  video_urls?: string[]
 };
 
 // GET /templates/{id}/images -> {data: CrmTemplateImage[]}. The image bytes as
