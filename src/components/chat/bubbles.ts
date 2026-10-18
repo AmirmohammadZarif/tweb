@@ -9563,6 +9563,8 @@ export default class ChatBubbles {
         () => getRichTextOptions(solidMessageBodyEntry?.controller.getSnapshot().text.entities || totalEntities),
         messageWithMessage.mid === message.mid
       );
+      // The legacy branch gets this from setInnerHTML; without it RTL text renders LTR.
+      setDirection(messageDiv);
       messageDiv.append(element);
       if(messageWithMessage.pFlags.currentlyTyping) isMessageEmpty = false;
     } else if(needToSetHTML) {
