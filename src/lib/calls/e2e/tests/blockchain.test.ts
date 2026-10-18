@@ -4,13 +4,15 @@
  * accepts valid blocks and rejects each class of tampering individually.
  */
 
-import {beforeAll, describe, it, expect} from 'vitest';
+import {describe, it, expect} from 'vitest';
 import {applyBlock, BlockchainError, computeBlockHash, createInitialState} from '../blockchain';
 import {bytesToHex, ensureCryptoReady} from '../crypto';
 import {PrivateKey} from '../keys';
 import {Block, Change, GroupParticipant, GroupState, PERM_ADD_USERS, PERM_REMOVE_USERS, serializeBlockForSigning} from '../tlTypes';
 
-beforeAll(() => ensureCryptoReady());
+// Top-level, not beforeAll: some describe bodies derive keys at collection time,
+// before any hook runs, and libsodium's wasm is not ready on a loaded machine.
+await ensureCryptoReady();
 
 // Build a block + sign it with the given key.
 function buildSignedBlock(opts: {
