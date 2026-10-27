@@ -28,7 +28,7 @@ import {
 // is the fallback if the socket is down; this only adds liveness.
 
 type AttributionPush = {message_id: number, admin_id: number, name: string};
-type InboundSeenPush = {seen: CrmFirstSeenMap};
+type InboundSeenPush = {peer_chat_id?: string, seen: CrmFirstSeenMap};
 type SensitiveRequestPush = {message_id: number, requested_by: number, name: string, reason?: string};
 type SensitiveApprovedPush = {message_id: number, user_id: number | null};
 type NotePush = {ticket_id: number, peer_chat_id?: string, note: CrmNote};
@@ -194,6 +194,11 @@ class CrmRealtime {
 
     this.notesChannelName = name;
     this.notesChannel = pusher.subscribe(name);
+    this.notesChannel.bind('pusher:subscription_succeeded', () => {
+      // Reconnects can miss reads while the socket is down. Reconcile cached
+      // dialog rows in the existing bounded batches when the feed resumes.
+      rootScope.managers.appCrmManager.refreshFirstSeenSummaries();
+    });
 
     // The chat a push belongs to, or undefined when the payload predates the
     // department channel (an old CRM broadcasting only the per-peer shape).
@@ -211,6 +216,14 @@ class CrmRealtime {
         rootScope.dispatchEvent('crm_note_push', {peerId, note: data.note});
       });
     });
+    // Reuse the department feed: all dialog rows need viewer updates, including
+    // chats nobody has open. Older servers still use the per-peer listener.
+    this.notesChannel.bind(CRM_INBOUND_SEEN_EVENT, (data: InboundSeenPush) => {
+      const peerId = data?.peer_chat_id ? (+data.peer_chat_id).toPeerId() : undefined;
+      if(!peerId || !data.seen) return;
+      rootScope.dispatchEvent('crm_first_seen_push', {peerId, seen: data.seen});
+    });
+
     this.notesChannel.bind(CRM_NOTE_DELETED_EVENT, (data: NotePush) => {
       const peerId = pushedPeerId(data);
       if(!peerId || !data?.note?.id) return;

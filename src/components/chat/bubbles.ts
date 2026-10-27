@@ -1505,7 +1505,7 @@ export default class ChatBubbles {
     // this session or by a colleague sharing the account.
     this.listenerSetter.add(rootScope)('crm_first_seen_update', ({peerId, firstSeen}) => {
       if(peerId !== this.peerId) return;
-      this.crmFirstSeen = firstSeen || {};
+      Object.assign(this.crmFirstSeen, firstSeen || {});
       this.retagAgentBubbles();
     });
 
@@ -3528,12 +3528,11 @@ export default class ChatBubbles {
   // 1:1 customer chats (the whole point is the customer's read receipt and the
   // team's unread state) and released for good once the chat IS claimed, so the
   // rest of the visit reads normally. See @lib/agentReadMode.
-  private isReadHeld() {
+  public isReadHeld() {
     // A read-only trainee holds reads ALWAYS and can never release them: on a
     // shared department account a read receipt is itself an outgoing action —
     // it tells the customer someone is there and clears the team's unread.
-    return (agentReadMode.isEnabled() || useIsCrmReadOnly()()) &&
-      !this.manualReadReleased &&
+    return (useIsCrmReadOnly()() || (agentReadMode.isEnabled() && !this.manualReadReleased)) &&
       !!this.chat.peerId?.isUser() &&
       this.chat.type === ChatType.Chat;
   }
@@ -3592,11 +3591,17 @@ export default class ChatBubbles {
 
     const unreadedSeenKey = type === 'history' ? 'unreadedSeen' : 'unreadedContentSeen';
 
+    if(!this[unreadedSeenKey].size) return;
+
     const middleware = this.getMiddleware();
     this[readPromiseKey] = idleController.getFocusPromise().then(async() => {
       // like a failed middleware, a stale unreadedChat leaves `this[readPromiseKey]` latched —
       // `cleanup()` is what resets both the promise and the sets
       if(!middleware() || this.isUnreadedChatChanged()) return;
+      if(this.isReadHeld()) {
+        this[readPromiseKey] = undefined;
+        return;
+      }
       const {peerId, threadId, monoforumThreadId} = this.chat;
 
       let callback: () => Promise<any>;
@@ -7504,6 +7509,12 @@ export default class ChatBubbles {
 
     content.querySelector(':scope > .agent-tag')?.remove();
 
+    // Bubble alignment is presentation (e.g. forwarded Saved Messages). Read
+    // attribution must use Telegram's direction, including on later re-tags.
+    const message = this.chat.getMessage(mid);
+    if(!message || message._ !== 'message') return;
+    isOut = !!message.pFlags.out;
+
     const serverMid = getServerMessageId(mid);
 
     // Incoming: label with the agent who SAW it first, not who wrote it — the
@@ -7545,13 +7556,18 @@ export default class ChatBubbles {
     if(useIsCrmReadOnly()()) return;
 
     const messageIds = mids
+    .filter((mid) => {
+      const message = this.chat.getMessage(mid);
+      return message?._ === 'message' && !message.pFlags.out;
+    })
     .map((mid) => getServerMessageId(mid))
     .filter((messageId) => !!messageId && !this.crmFirstSeen['' + messageId]);
     if(!messageIds.length) return;
 
+    const middleware = this.getMiddleware();
     this.managers.appCrmManager.reportMessagesSeen('' + peerId.toUserId(), messageIds)
     .then((firstSeen) => {
-      if(this.peerId !== peerId || !firstSeen) return;
+      if(!middleware() || this.peerId !== peerId || !firstSeen) return;
       Object.assign(this.crmFirstSeen, firstSeen);
       this.retagAgentBubbles();
     });

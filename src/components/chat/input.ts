@@ -3682,7 +3682,7 @@ export default class ChatInput {
       // this.updateSendBtn();
 
       if((this.chat.type === ChatType.Chat || this.chat.type === ChatType.Discussion) &&
-        this.chat.bubbles.scrollable.loadedAll.bottom) {
+        this.chat.bubbles.scrollable.loadedAll.bottom && !this.chat.bubbles.isReadHeld()) {
         this.managers.appMessagesManager.readAllHistory(this.chat.peerId, this.chat.threadId);
       }
 
@@ -5018,6 +5018,7 @@ export default class ChatInput {
 
   public onMessageSent(clearInput = true, clearReply?: boolean, skipReadHistory = false) {
     if(!skipReadHistory && !PEER_EXCEPTIONS.has(this.chat.type)) {
+      this.chat.bubbles.markChatRead();
       this.managers.appMessagesManager.readAllHistory(this.chat.peerId, this.chat.threadId, true);
     }
 

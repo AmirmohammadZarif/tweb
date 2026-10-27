@@ -11353,6 +11353,10 @@ export class AppMessagesManager extends AppManager {
     // this.log.warn(dT(), 'read', peerId, isOut ? 'out' : 'in', maxId)
 
     const historyStorage = this.getHistoryStorage(peerId, threadId || monoforumThreadId);
+    const currentReadMaxId = isOut ? historyStorage.readOutboxMaxId : historyStorage.readMaxId;
+    // A delayed update must not undo a newer local/server read or resurrect its
+    // unread count. Equal cursors may still carry authoritative count corrections.
+    if(maxId < (currentReadMaxId || 0)) return;
 
     if(peerId.isUser() && isOut) {
       this.appUsersManager.forceUserOnline(peerId.toUserId());

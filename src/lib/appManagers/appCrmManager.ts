@@ -589,16 +589,21 @@ export default class AppCrmManager extends AppManager {
    */
   public async reportMessagesSeen(chatId: string, messageIds: number[]): Promise<CrmFirstSeenMap> {
     if(!(await this.isConnected()) || !chatId || !messageIds?.length) return {};
+    const map: CrmFirstSeenMap = {};
     try {
-      const result = await this.request<{data: CrmFirstSeenMap}>('POST', CRM_ENDPOINTS.markSeen(chatId), {
-        body: {message_ids: messageIds, session_telegram_user_id: this.sessionTelegramUserId()}
-      });
-      const map = result?.data || {};
-      this.rememberFirstSeen(chatId, map);
+      const ids = Array.from(new Set(messageIds));
+      // The API caps a burst at 200; claiming a busy chat can cover more.
+      for(let offset = 0; offset < ids.length; offset += 200) {
+        const result = await this.request<{data: CrmFirstSeenMap}>('POST', CRM_ENDPOINTS.markSeen(chatId), {
+          body: {message_ids: ids.slice(offset, offset + 200), session_telegram_user_id: this.sessionTelegramUserId()}
+        });
+        Object.assign(map, result?.data);
+        this.rememberFirstSeen(chatId, result?.data || {});
+      }
       return map;
     } catch(err) {
       this.log.error('reportMessagesSeen failed', err);
-      return {};
+      return map;
     }
   }
 
@@ -651,6 +656,10 @@ export default class AppCrmManager extends AppManager {
     }, FIRST_SEEN_BATCH_MS);
   }
 
+  public refreshFirstSeenSummaries() {
+    return this.requestFirstSeenForPeers(Array.from(this.firstSeenFetchedAt.keys()), true);
+  }
+
   private async flushFirstSeenBatch() {
     const peerIds = Array.from(this.pendingFirstSeenPeerIds).slice(0, MAX_FIRST_SEEN_CHAT_IDS);
     if(!peerIds.length) return;
@@ -659,6 +668,7 @@ export default class AppCrmManager extends AppManager {
     // Mark them fetched up front: a failed request must not make every dialog row
     // retry on its next render, and the TTL will let them through again anyway.
     const now = Date.now();
+    const previous = new Map(peerIds.map((peerId) => [peerId, this.firstSeenByPeerId.get(peerId)]));
     peerIds.forEach((peerId) => this.firstSeenFetchedAt.set(peerId, now));
 
     try {
@@ -672,6 +682,10 @@ export default class AppCrmManager extends AppManager {
       const summary = result?.data || {};
       for(const peerId of peerIds) {
         const entry = summary['' + peerId.toUserId()];
+        const current = this.firstSeenByPeerId.get(peerId);
+        // Only protect an update that arrived DURING this request. Otherwise the
+        // authoritative summary may correct an obsolete (e.g. outbound) label.
+        if(current !== previous.get(peerId) && current && (!entry || current.message_id > entry.message_id)) continue;
         if(entry) this.firstSeenByPeerId.set(peerId, entry);
         else this.firstSeenByPeerId.delete(peerId);
       }
