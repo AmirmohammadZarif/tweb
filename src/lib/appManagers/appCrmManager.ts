@@ -85,6 +85,9 @@ export default class AppCrmManager extends AppManager {
   private storage: AppStorage<Record<string, CrmConfig>, ReturnType<typeof getDatabaseState>>;
   private config: CrmConfig;
   private loadPromise: Promise<void>;
+  private accessCheckedAt = 0;
+  private accessExpiryTimeout: ReturnType<typeof setTimeout>;
+  private accessRefresh: Promise<CrmUser | undefined>;
   private openTicketPeerIds: PeerId[] = [];
   private ticketByPeerId = new Map<PeerId, CrmTicketRef>();
   private openTicketsFetchedAt = 0;
@@ -109,6 +112,10 @@ export default class AppCrmManager extends AppManager {
     // a role change in the CRM propagates without re-login. Fire-and-forget —
     // gated UI simply stays hidden until the flag lands.
     this.loadPromise.then(() => this.refreshMe());
+    // Revalidate active grants, including an agent being downgraded or detached.
+    setInterval(() => {
+      if(this.config?.enabled && this.config.token) void this.refreshMe();
+    }, 30000);
     return this.loadPromise;
   }
 
@@ -129,17 +136,23 @@ export default class AppCrmManager extends AppManager {
 
   public async getConfig(): Promise<CrmConfig> {
     await this.loadPromise;
-    return {...this.config};
+    return {...this.config, user: this.config.user && {
+      ...this.config.user,
+      department_access: this.hasCurrentDepartmentAccess() ? this.config.user.department_access : null,
+      is_read_only: this.isReadOnlyCached()
+    }};
   }
 
   public async setConfig(config: Partial<Pick<CrmConfig, 'enabled' | 'baseUrl'>>): Promise<void> {
     await this.loadPromise;
+    this.accessCheckedAt = 0;
     this.config = {
       ...this.config,
       ...config,
       baseUrl: (config.baseUrl ?? this.config.baseUrl).trim().replace(/\/+$/, '')
     };
     await this.persist();
+    void this.refreshMe();
   }
 
   /**
@@ -187,7 +200,10 @@ export default class AppCrmManager extends AppManager {
       'Accept': 'application/json'
     };
     if(options.body) headers['Content-Type'] = 'application/json';
-    if(options.auth !== false) headers['Authorization'] = 'Bearer ' + this.config.token;
+    if(options.auth !== false) {
+      headers['Authorization'] = 'Bearer ' + this.config.token;
+      headers['X-Telegram-Session-Id'] = this.sessionTelegramUserId();
+    }
 
     const response = await fetch(url, {
       method,
@@ -243,7 +259,7 @@ export default class AppCrmManager extends AppManager {
   }
 
   public async me(): Promise<CrmUser> {
-    return this.request<CrmUser>('GET', CRM_ENDPOINTS.me);
+    return this.request<CrmUser>('GET', CRM_ENDPOINTS.me, {query: {session_telegram_user_id: this.sessionTelegramUserId()}});
   }
 
   // Synchronous session/role checks for worker-side hot paths (dialog
@@ -252,7 +268,7 @@ export default class AppCrmManager extends AppManager {
   // they're accurate from the first manager call, because createManagers awaits
   // every after() (and thus load()) before serving anything.
   public isLoggedInCached(): boolean {
-    return !!(this.config?.enabled && this.config.baseUrl && this.config.token);
+    return !!(this.config?.enabled && this.config.baseUrl && this.config.token && this.hasCurrentDepartmentAccess());
   }
 
   public isSuperAdminCached(): boolean {
@@ -269,18 +285,39 @@ export default class AppCrmManager extends AppManager {
    * never passes through the CRM at all.
    */
   public isReadOnlyCached(): boolean {
-    return this.isLoggedInCached() && !!this.config.user?.is_read_only;
+    return !this.isLoggedInCached() || this.config.user?.department_access !== 'admin';
   }
 
   // Re-fetch /auth/me and merge into the stored user. persist() dispatches
   // crm_config_update, which is what the main-thread role store listens for.
-  public async refreshMe(): Promise<CrmUser | undefined> {
+  private hasCurrentDepartmentAccess(): boolean {
+    return !!this.accessCheckedAt && Date.now() - this.accessCheckedAt < 60000 &&
+      this.config.user?.session_telegram_user_id === this.sessionTelegramUserId() &&
+      (this.config.user?.department_access === 'admin' || this.config.user?.department_access === 'read_only');
+  }
+
+  public refreshMe(): Promise<CrmUser | undefined> {
+    return this.accessRefresh ??= this.refreshDepartmentAccess().finally(() => {
+      this.accessRefresh = undefined;
+    });
+  }
+
+  private async refreshDepartmentAccess(): Promise<CrmUser | undefined> {
     if(!(await this.isConnected())) return undefined;
+    const token = this.config.token;
+    const baseUrl = this.config.baseUrl;
+    const sessionId = this.sessionTelegramUserId();
     try {
       const user = await this.me();
-      this.config.user = {...this.config.user, ...user};
-      // Refresh the global reveal-approval setting from the public /config in the
-      // same app-start pass. Default true (fail-safe) if the fetch/field is absent.
+      if(token !== this.config.token || baseUrl !== this.config.baseUrl || sessionId !== this.sessionTelegramUserId()) return undefined;
+      this.config.user = user;
+      this.accessCheckedAt = Date.now();
+      clearTimeout(this.accessExpiryTimeout);
+      this.accessExpiryTimeout = setTimeout(() => {
+        if(!this.hasCurrentDepartmentAccess()) this.rootScope.dispatchEvent('crm_config_update');
+      }, 60000);
+      // Publish access immediately; the optional public settings fetch can be slow.
+      await this.persist();
       try {
         const mobileConfig = await this.request<{data?: {sensitive_reveal_require_approval?: boolean}}>('GET', CRM_ENDPOINTS.config, {auth: false});
         this.config.requireSensitiveApproval = mobileConfig?.data?.sensitive_reveal_require_approval ?? true;
@@ -290,8 +327,12 @@ export default class AppCrmManager extends AppManager {
       await this.persist();
       return this.config.user;
     } catch(err) {
+      if(token === this.config.token && baseUrl === this.config.baseUrl) {
+        this.accessCheckedAt = 0;
+        this.rootScope.dispatchEvent('crm_config_update');
+      }
       this.log.error('refreshMe failed', err);
-      return this.config.user;
+      return undefined;
     }
   }
 
@@ -300,7 +341,8 @@ export default class AppCrmManager extends AppManager {
   // bearer token so the client can run the /broadcasting/auth handshake. The token
   // is already a client-side credential, so handing it to the UI thread is fine.
   public async getRealtimeConfig(): Promise<CrmRealtimeConfig | undefined> {
-    if(!(await this.isConnected())) return undefined;
+    await this.loadPromise;
+    if(!this.isLoggedInCached()) return undefined;
     try {
       const result = await this.request<{data: {reverb?: CrmReverbConfig}}>('GET', CRM_ENDPOINTS.config, {auth: false});
       const reverb = result?.data?.reverb;

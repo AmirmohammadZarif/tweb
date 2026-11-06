@@ -61,8 +61,8 @@ class CrmRealtime {
     // The chat LIST needs the note feed before any chat is opened, so it comes up
     // on session availability rather than on a peer change. Both events are the
     // same ones crmRole listens to: a fresh login, a reconnect, a token refresh.
-    rootScope.addEventListener('crm_config_update', this.ensureNotesFeed);
-    rootScope.addEventListener('crm_auth_required', this.ensureNotesFeed);
+    rootScope.addEventListener('crm_config_update', this.refreshAccess);
+    rootScope.addEventListener('crm_auth_required', this.refreshAccess);
     if(rootScope.myId) this.ensureNotesFeed();
     else rootScope.addEventListener('user_auth', this.ensureNotesFeed);
   }
@@ -71,6 +71,15 @@ class CrmRealtime {
    * Bring up (or keep) the department-wide note feed. Independent of which chat is
    * open — the chat list is its main consumer, and it has no peer.
    */
+  private refreshAccess = async() => {
+    // A revoked grant must also close already-authorized subscriptions.
+    if(!await rootScope.managers.appCrmManager.getRealtimeConfig()) {
+      this.teardown();
+      return;
+    }
+    await this.ensureNotesFeed();
+  };
+
   public ensureNotesFeed = async() => {
     if(!rootScope.myId) return;
     // Cheap synchronous exit BEFORE the async config read: this is called from

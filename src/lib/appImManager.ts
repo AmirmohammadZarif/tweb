@@ -3432,6 +3432,7 @@ export class AppImManager extends EventListenerBase<{
 
   public async setPeer(options: Partial<ChatSetInnerPeerOptions> = {}, animate?: boolean): Promise<boolean> {
     options.peerId ??= NULL_PEER_ID;
+    if(options.peerId && !useIsCrmLoggedIn()()) return false;
     options.peerId = await this.managers.appPeersManager.getPeerMigratedTo(options.peerId) || options.peerId;
 
     const {peerId} = options;
@@ -3531,6 +3532,7 @@ export class AppImManager extends EventListenerBase<{
   }
 
   public async setInnerPeer(options: ChatSetInnerPeerOptions) {
+    if(options.peerId && !useIsCrmLoggedIn()()) return;
     let {peerId} = options;
     if(peerId === NULL_PEER_ID || !peerId) {
       return;

@@ -15,7 +15,9 @@ export type CrmUser = {
   // Onboarding trainee: may READ the department's conversations and nothing else.
   // Every write affordance is off and no read receipt is ever sent — see
   // @stores/crmRole and AppCrmManager.isReadOnlyCached.
-  is_read_only?: boolean
+  is_read_only?: boolean,
+  department_access?: 'admin' | 'read_only' | null,
+  session_telegram_user_id?: string | null
 };
 
 export type CrmConfig = {

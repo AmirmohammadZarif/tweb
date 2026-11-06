@@ -16,7 +16,7 @@ const [isCrmSuperAdmin, setIsCrmSuperAdmin] = createRoot(() => createSignal(fals
 // Onboarding trainee: read the department's conversations, change nothing. Drives
 // every write affordance in the UI (composer, context menu, CRM actions) and
 // forces peek mode, so not even a read receipt leaves this session.
-const [isCrmReadOnly, setIsCrmReadOnly] = createRoot(() => createSignal(false));
+const [isCrmReadOnly, setIsCrmReadOnly] = createRoot(() => createSignal(true));
 // The signed-in agent's own CRM id (undefined when logged out). Used to match
 // per-agent sensitive-reveal approvals — see the sensitive-message workflow.
 const [crmUserId, setCrmUserId] = createRoot(() => createSignal<number | undefined>(undefined));
@@ -29,16 +29,17 @@ const refresh = () => {
   // fail-closed defaults
   if(!rootScope.managers) return;
   rootScope.managers.appCrmManager.getConfig().then((config) => {
-    const loggedIn = !!(config.enabled && config.baseUrl && config.token);
+    const loggedIn = !!(config.enabled && config.baseUrl && config.token &&
+      (config.user?.department_access === 'admin' || config.user?.department_access === 'read_only'));
     setIsCrmLoggedIn(loggedIn);
     setIsCrmSuperAdmin(loggedIn && !!config.user?.is_super_admin);
-    setIsCrmReadOnly(loggedIn && !!config.user?.is_read_only);
+    setIsCrmReadOnly(!loggedIn || config.user?.department_access !== 'admin');
     setCrmUserId(loggedIn ? config.user?.id : undefined);
     setRequireSensitiveApproval(config.requireSensitiveApproval !== false);
   }, () => {
     setIsCrmLoggedIn(false);
     setIsCrmSuperAdmin(false);
-    setIsCrmReadOnly(false);
+    setIsCrmReadOnly(true);
     setCrmUserId(undefined);
     setRequireSensitiveApproval(true);
   });

@@ -1256,6 +1256,7 @@ export class AppDialogsManager {
     createRoot(() => {
       createEffect(on(useIsCrmLoggedIn(), (loggedIn, prev) => {
         if(prev === undefined) return;
+        if(!loggedIn) void appImManager.setPeer();
         for(const id in this.xds) {
           const xd = this.xds[id];
           // drop the stale empty-placeholder so checkIfPlaceholderNeeded can
