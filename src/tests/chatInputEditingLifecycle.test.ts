@@ -10,7 +10,11 @@ import type {DraftMessage, Message, MessageEntity, RichMessage} from '@layer';
 
 vi.mock('@lib/appImManager', () => ({AppImManager: class {}, APP_TABS: {}, default: {}}));
 
-const mocks = vi.hoisted(() => ({reply: vi.fn(), toast: vi.fn(), frames: [] as Array<() => void>}));
+const mocks = vi.hoisted(() => ({reply: vi.fn(), toast: vi.fn(), frames: [] as Array<() => void>, readOnly: false}));
+vi.mock('@stores/crmRole', async(importOriginal) => ({
+  ...await importOriginal<typeof import('@stores/crmRole')>(),
+  useIsCrmReadOnly: () => () => mocks.readOnly
+}));
 vi.mock('@helpers/schedulers', async(importOriginal) => ({
   ...await importOriginal<typeof import('@helpers/schedulers')>(),
   fastRaf: (callback: () => void) => mocks.frames.push(callback)
@@ -28,6 +32,7 @@ beforeEach(() => {
   mocks.reply.mockReset().mockResolvedValue(document.createDocumentFragment());
   mocks.toast.mockReset();
   mocks.frames.length = 0;
+  mocks.readOnly = false;
 });
 
 function setup(partial = false) {
@@ -259,6 +264,26 @@ test.each([false, true])('does not read a changed rich document after waiting fo
   }
 });
 
+
+test('blocks composer submission while department access is read-only', async() => {
+  mocks.readOnly = true;
+  const send = vi.spyOn(ChatInput, 'sendMessageWithForward');
+  const input = document.createElement('div');
+  input.textContent = 'Must not send';
+  const host = {
+    chat: {type: ChatType.Chat, peerId: (42).toPeerId()},
+    messageInputField: {input},
+    clearInput: vi.fn()
+  };
+  try {
+    await ChatInput.prototype.sendMessage.call(host as unknown as ChatInput);
+    expect(send).not.toHaveBeenCalled();
+    expect(host.clearInput).toHaveBeenCalledOnce();
+    expect(mocks.toast).toHaveBeenCalledWith({langPackKey: 'Crm.ReadOnly.Blocked'});
+  } finally {
+    send.mockRestore();
+  }
+});
 
 for(const interruption of ['none', 'peer', 'typed', 'new-edit'] as const) test(`only cleans the submitted composer after send (interruption=${interruption})`, async() => {
   const pending = deferredPromise<{value: string, messageCount: number}>();
