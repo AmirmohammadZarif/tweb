@@ -37,6 +37,7 @@ const FORK_WITHOUT_STORY = new Set([
   'crmLogin.tsx',
   'crmNotes.tsx',
   'crmProfileForm.tsx',
+  'crmSecretRequest.tsx',
   'quickRepliesPicker.tsx',
   'quickReplyEdit.tsx',
   'storyComposer.tsx'
