@@ -783,7 +783,7 @@ export default class AppCrmManager extends AppManager {
       const result = await this.request<{data: CrmSensitiveRevealState}>('GET', CRM_ENDPOINTS.sensitiveReveals(chatId), {
         query: {session_telegram_user_id: this.sessionTelegramUserId()}
       });
-      return {approved: result?.data?.approved || [], pending: result?.data?.pending || []};
+      return {approved: result?.data?.approved || [], pending: result?.data?.pending || [], media: result?.data?.media || []};
     } catch(err) {
       this.log.error('getSensitiveReveals failed', err);
       return empty;

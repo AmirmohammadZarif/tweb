@@ -265,7 +265,10 @@ export type CrmSensitiveRevealState = {
   // Telegram message ids this agent is allowed to see in the clear.
   approved: number[],
   // Outstanding requests, surfaced to superadmins so they can approve.
-  pending: CrmSensitiveRequest[]
+  pending: CrmSensitiveRequest[],
+  // Telegram message ids whose image the CRM's analysis found an identity
+  // document, bank card or personal data in. Locked unless also in `approved`.
+  media?: number[]
 };
 
 export type CrmSensitiveRequest = {
@@ -281,6 +284,8 @@ export const CRM_SENSITIVE_CHANNEL = (sessionId: string, chatId: string) =>
   'private-sensitive.peer.' + sessionId + '.' + chatId;
 export const CRM_SENSITIVE_REQUESTED_EVENT = 'sensitive.reveal.requested';
 export const CRM_SENSITIVE_APPROVED_EVENT = 'sensitive.reveal.approved';
+// An image in this chat was just analysed as sensitive: lock its bubble.
+export const CRM_SENSITIVE_MEDIA_EVENT = 'sensitive.media.flagged';
 
 // Reserved pseudo message-id for a peer's CONTACT INFO (phone + username) in the
 // reveal workflow — real Telegram message ids are >= 1, so 0 never collides with

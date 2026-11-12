@@ -6,6 +6,7 @@ import {
   CRM_SENSITIVE_CHANNEL,
   CRM_SENSITIVE_REQUESTED_EVENT,
   CRM_SENSITIVE_APPROVED_EVENT,
+  CRM_SENSITIVE_MEDIA_EVENT,
   CRM_NOTES_DEPARTMENT_CHANNEL,
   CRM_NOTE_ADDED_EVENT,
   CRM_NOTE_UPDATED_EVENT,
@@ -31,6 +32,7 @@ type AttributionPush = {message_id: number, admin_id: number, name: string};
 type InboundSeenPush = {peer_chat_id?: string, seen: CrmFirstSeenMap};
 type SensitiveRequestPush = {message_id: number, requested_by: number, name: string, reason?: string};
 type SensitiveApprovedPush = {message_id: number, user_id: number | null};
+type SensitiveMediaPush = {message_id: number};
 type NotePush = {ticket_id: number, peer_chat_id?: string, note: CrmNote};
 
 const ATTRIBUTION_EVENT = 'outbound.attributed';
@@ -178,6 +180,10 @@ class CrmRealtime {
         messageId: data.message_id,
         userId: data.user_id ?? null
       });
+    });
+    this.sensitiveChannel.bind(CRM_SENSITIVE_MEDIA_EVENT, (data: SensitiveMediaPush) => {
+      if(this.currentPeerId !== peerId || !data?.message_id) return;
+      rootScope.dispatchEvent('crm_sensitive_media_push', {peerId, messageId: data.message_id});
     });
 
     // Internal notes do NOT ride a per-peer channel: an agent has one chat open,
