@@ -44,6 +44,8 @@ import {
   CrmContract,
   CrmContractsResult,
   CrmProfileFormLink,
+  CrmSecretRequest,
+  CrmSecretRequestLink,
   CrmProfileFormStatus
 } from '@lib/crm/types';
 
@@ -1203,6 +1205,49 @@ export default class AppCrmManager extends AppManager {
       }
     });
     return result.data;
+  }
+
+  // ── One-time vault links ───────────────────────────────────────────────────
+
+  /** This chat's secure-info requests, newest first. Never rejects. */
+  public async getSecretRequests(chatId: string): Promise<CrmSecretRequest[] | undefined> {
+    if(!(await this.isConnected()) || !chatId) return undefined;
+    try {
+      const result = await this.request<{data: CrmSecretRequest[]}>('GET', CRM_ENDPOINTS.secretRequests(chatId), {
+        query: {session_telegram_user_id: this.sessionTelegramUserId()}
+      });
+      return result?.data || [];
+    } catch(err) {
+      this.log.error('getSecretRequests failed', err);
+      return undefined;
+    }
+  }
+
+  /**
+   * Issue a one-time link asking the customer for `title`. Rejects so the
+   * popup can show the CRM's reason (no department, no vault access).
+   */
+  public async issueSecretRequest(chatId: string, title: string, note?: string): Promise<CrmSecretRequestLink> {
+    const result = await this.request<{data: CrmSecretRequestLink}>('POST', CRM_ENDPOINTS.secretRequests(chatId), {
+      body: {
+        session_telegram_user_id: this.sessionTelegramUserId(),
+        title,
+        ...(note ? {note} : {})
+      }
+    });
+    return result.data;
+  }
+
+  public async revokeSecretRequest(chatId: string, id: number): Promise<boolean> {
+    try {
+      await this.request('POST', CRM_ENDPOINTS.secretRequestRevoke(chatId, id), {
+        body: {session_telegram_user_id: this.sessionTelegramUserId()}
+      });
+      return true;
+    } catch(err) {
+      this.log.error('revokeSecretRequest failed', err);
+      return false;
+    }
   }
 
   // ── andro.law contracts ────────────────────────────────────────────────────

@@ -78,6 +78,7 @@ import showNoForwardsPopup from '@components/popups/noForwards';
 import {showCrmNotesPopup} from '@components/popups/crmNotes';
 import {showCrmContractsPopup} from '@components/popups/crmContracts';
 import showCrmProfileFormPopup from '@components/popups/crmProfileForm';
+import showCrmSecretRequestPopup from '@components/popups/crmSecretRequest';
 import {openCrmTasksTab} from '@lib/crm/createTask';
 import showAddBotToChat from '@components/popups/addBotToChat';
 import openBoosts from '@components/openBoosts';
@@ -548,6 +549,17 @@ export default class ChatTopbar {
       },
       // Like contracts: the profile belongs to the customer, not to a ticket.
       // Read-only (onboarding) agents cannot issue links, so it is hidden.
+      verify: () => !!this.peerId?.isUser() && !useIsCrmReadOnly()()
+    }, {
+      icon: 'lock',
+      text: 'Crm.SecretRequest.MenuButton',
+      onClick: () => {
+        showCrmSecretRequestPopup({
+          peerId: this.peerId,
+          insert: (text) => this.chat.input.insertQuickReply({text})
+        });
+      },
+      // Issuing a link is a write, so read-only (onboarding) agents do not see it.
       verify: () => !!this.peerId?.isUser() && !useIsCrmReadOnly()()
     }, {
       icon: 'check',

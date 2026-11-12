@@ -98,6 +98,11 @@ export const CRM_ENDPOINTS = {
   // The customer's andropay.org profile: is it complete, and a timed form link
   // for the agent to send them. See CrmProfileFormStatus.
   profileForm: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/profile-form`,
+  // One-time vault links: ask the customer for one sensitive value, which the
+  // CRM files in the vault. See CrmSecretRequest.
+  secretRequests: (chatId: string) => `/tickets/by-telegram/${encodeURIComponent(chatId)}/secret-requests`,
+  secretRequestRevoke: (chatId: string, id: number) =>
+    `/tickets/by-telegram/${encodeURIComponent(chatId)}/secret-requests/${id}/revoke`,
   // Crash reports — tweb ships as static files, so without this a JS crash in an
   // agent's browser leaves no trace on our side. See @lib/debug/crashReporter.
   clientLogs: '/client-logs'
@@ -620,6 +625,28 @@ export type CrmProfileFormStatus = {
   },
   /** A link is out there and still works. */
   isPending: boolean
+};
+
+// GET secretRequests -> {data: CrmSecretRequest[]}, newest first. Never carries
+// a value: reading one is the vault's job, behind its TOTP check.
+export type CrmSecretRequest = {
+  id: number,
+  title: string,
+  status: 'pending' | 'submitted' | 'revoked' | 'expired',
+  expires_at: string,
+  submitted_at: string | null,
+  /** The vault entry, once the customer has sent it. */
+  vault_url: string | null
+};
+
+// POST secretRequests -> {data: CrmSecretRequestLink}
+export type CrmSecretRequestLink = {
+  id: number,
+  title: string,
+  url: string,
+  expires_at: string,
+  /** Ready-to-send Persian message with the link, for the composer. */
+  message: string
 };
 
 export type CrmProfileFormLink = {
