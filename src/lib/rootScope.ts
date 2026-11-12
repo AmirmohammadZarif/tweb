@@ -251,6 +251,7 @@ export type BroadcastEvents = {
   // A superadmin approved a reveal — `userId` is the agent (CRM user id) it's
   // approved FOR (null = everyone). Each session reveals only if it matches.
   'crm_sensitive_reveal_push': {peerId: PeerId, messageId: number, userId: number | null},
+  'crm_sensitive_media_push': {peerId: PeerId, messageId: number},
   // A regular agent requested a reveal — only superadmin sessions act on this.
   'crm_sensitive_request_push': {peerId: PeerId, messageId: number, requestedBy: number, name: string, reason?: string},
   // Inbound first-seen: which agent displayed each customer message while it was

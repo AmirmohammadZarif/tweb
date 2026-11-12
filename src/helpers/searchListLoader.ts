@@ -4,6 +4,7 @@ import type {Message} from '@layer';
 import type {MessagesStorageKey, MyMessage} from '@appManagers/appMessagesManager';
 import {AppManagers} from '@lib/managers';
 import {isMessageSensitive} from '@appManagers/utils/messages/isMessageRestricted';
+import {isCrmMediaLocked} from '@stores/crmSensitiveReveals';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import rootScope, {BroadcastEvents} from '@lib/rootScope';
 import forEachReverse from '@helpers/array/forEachReverse';
@@ -93,6 +94,8 @@ export default class SearchListLoader<Item extends {mid: number, peerId: PeerId}
     if(this.searchContext.skipSensitive) {
       filtered = filtered.filter((message) => !isMessageSensitive(message));
     }
+    // An image the CRM locked for this agent never enters the viewer's list.
+    filtered = filtered.filter((message) => !isCrmMediaLocked(message));
     return filtered;
   }
 

@@ -93,6 +93,7 @@ import {showAdReport} from '@components/popups/reportAd';
 import ButtonMenuToggle from '@components/buttonMenuToggle';
 import {isSensitive} from '@helpers/restrictions';
 import {isMessageSensitive} from '@appManagers/utils/messages/isMessageRestricted';
+import {isCrmMediaLocked} from '@stores/crmSensitiveReveals';
 import {MediaSearchContext} from '@components/appMediaPlaybackController';
 import {StarGiftsProfileTab} from '@components/stargifts/profileList';
 import {MyStarGift} from '@appManagers/appGiftsManager';
@@ -1219,6 +1220,8 @@ export default class AppSearchSuper {
   }
 
   private async processPhotoVideoFilter({message, promises, middleware}: ProcessSearchSuperResult) {
+    // an image the CRM locked for this agent is left out of the grid entirely
+    if(isCrmMediaLocked(message)) return;
     const media = getMediaFromMessage(message, true);
 
     const div = document.createElement('div');
@@ -1286,6 +1289,7 @@ export default class AppSearchSuper {
 
   private async processDocumentFilter({message, inputFilter, middleware}: ProcessSearchSuperResult) {
     const document = getMediaFromMessage(message, true) as Document.document;
+    if(document?.mime_type?.startsWith('image/') && isCrmMediaLocked(message)) return;
     const showSender = this.showSender || (['voice', 'round'] as MyDocument['type'][]).includes(document.type);
 
     const div = await wrapDocument({

@@ -506,6 +506,8 @@ const lang = {
   'Crm.SessionExpired': 'CRM session expired',
   'Crm.Login': 'Log In',
   'Crm.Sensitive.Hidden': 'Hidden',
+  'Crm.Sensitive.ImageHidden': 'Sensitive image hidden',
+  'Crm.Sensitive.ImageHiddenHint': 'An identity document, bank card or personal data was detected in this image.',
   'Crm.Sensitive.Requested': 'Sent — waiting for a manager to approve',
   'Crm.Sensitive.RequestFailed': 'Could not send the request, please try again',
   'Crm.Sensitive.RateLimited': 'You\'ve reached today\'s limit for viewing sensitive data',

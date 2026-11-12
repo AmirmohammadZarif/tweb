@@ -62,6 +62,7 @@ import {formatPhoneNumber} from '@helpers/formatPhoneNumber';
 import useIsCrmSuperAdmin, {useCrmUserId, useIsCrmLoggedIn, useIsCrmReadOnly} from '@stores/crmRole';
 import {detectSensitiveRanges} from '@lib/crm/sensitiveContent';
 import {triggerSensitiveReveal} from '@lib/crm/triggerReveal';
+import {isCrmMediaLocked} from '@stores/crmSensitiveReveals';
 import AppMediaViewer from '@components/mediaViewer';
 import SetTransition from '@components/singleTransition';
 import handleHorizontalSwipe from '@helpers/dom/handleHorizontalSwipe';
@@ -1520,6 +1521,7 @@ export default class ChatBubbles {
       if(peerId !== this.peerId) return;
       this.crmSensitiveApproved = new Set(state?.approved || []);
       this.rerenderApprovedSensitive();
+      this.rerenderCrmMediaLocks();
     });
 
     // A superadmin approved a reveal. Reveal only if it's for this agent (or all).
@@ -1529,10 +1531,17 @@ export default class ChatBubbles {
       if(userId !== null && userId !== myId) return;
       this.crmSensitiveApproved.add(messageId);
       this.rerenderApprovedSensitive();
+      this.rerenderCrmMediaLocks();
     });
 
     // A regular agent asked to reveal a message — offer superadmins a one-tap
     // approve, showing who asked and their reason.
+    // An image in the open chat was just analysed as sensitive: lock it now.
+    this.listenerSetter.add(rootScope)('crm_sensitive_media_push', ({peerId}) => {
+      if(peerId !== this.peerId) return;
+      this.rerenderCrmMediaLocks();
+    });
+
     this.listenerSetter.add(rootScope)('crm_sensitive_request_push', ({peerId, messageId, requestedBy, name, reason}) => {
       if(peerId !== this.peerId || !useIsCrmSuperAdmin()()) return;
       confirmationPopup({
@@ -4342,6 +4351,9 @@ export default class ChatBubbles {
     // a rich message's media is not the message's own: its page opens the viewer for it
     if(this.chat.type === ChatType.Logs || isRichMessageTarget(target)) return;
 
+    // a locked sensitive image has no media to open; its button asks for a reveal
+    if(bubble?.dataset.crmLockedMedia) return;
+
     // Prevent recursive click event simulation
 
     if((e as any)[SimulatedClickSymbol]) return;
@@ -4431,6 +4443,11 @@ export default class ChatBubbles {
         const media = getMediaFromMessage(message);
 
         if(skipSensitive && isMessageSensitive(message)) {
+          return;
+        }
+
+        // never page the viewer onto an image locked for this agent
+        if(isCrmMediaLocked(message)) {
           return;
         }
 
@@ -7685,6 +7702,69 @@ export default class ChatBubbles {
     }
   }
 
+  // ── Sensitive-image lock ────────────────────────────────────────────────────
+  // The CRM analyses every customer image and flags identity documents, bank
+  // cards and personal data. A flagged image is not drawn at all for a regular
+  // agent (no thumbnail, no download), only a locked card whose button opens the
+  // same reveal request as hidden text. On approval the bubble re-renders with
+  // the real media. An album locks whole while any item in it is locked.
+
+  // Draw the lock instead of the media when any of `messages` is locked.
+  // Returns whether it did, so the caller skips wrapping the real media.
+  private lockCrmSensitiveMedia(bubble: HTMLElement, attachmentDiv: HTMLElement, messages: Message[] | undefined): boolean {
+    const locked = (messages || []).filter((m) => isCrmMediaLocked(m));
+    if(!locked.length) {
+      delete bubble.dataset.crmLockedMedia;
+      bubble.classList.remove('crm-sensitive-media');
+      return false;
+    }
+
+    const serverMids = locked.map((m) => getServerMessageId(m.mid));
+    bubble.dataset.crmLockedMedia = serverMids.join(',');
+    bubble.classList.add('crm-sensitive-media');
+    attachmentDiv.append(this.createSensitiveMediaLock(serverMids[0]));
+    return true;
+  }
+
+  private createSensitiveMediaLock(serverMid: number): HTMLElement {
+    const lock = document.createElement('div');
+    lock.classList.add('crm-sensitive-media-lock');
+    const title = document.createElement('div');
+    title.classList.add('crm-sensitive-media-lock-title');
+    title.append(i18n('Crm.Sensitive.ImageHidden'));
+    const hint = document.createElement('div');
+    hint.classList.add('crm-sensitive-media-lock-hint');
+    hint.append(i18n('Crm.Sensitive.ImageHiddenHint'));
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.classList.add('crm-sensitive-chip');
+    button.append(Icon('lock'), i18n('Crm.Sensitive.RevealButton'));
+    attachClickEvent(button, (e) => {
+      cancelEvent(e);
+      triggerSensitiveReveal(this.peerId, serverMid);
+    }, {listenerSetter: this.listenerSetter});
+    lock.append(Icon('lock'), title, hint, button);
+    return lock;
+  }
+
+  // Re-render every bubble whose lock no longer matches the state: an image just
+  // flagged, or one just approved for this agent.
+  private rerenderCrmMediaLocks() {
+    const seen = new Set<HTMLElement>();
+    for(const fullMid in this.bubbles) {
+      const bubble = this.bubbles[fullMid];
+      if(seen.has(bubble)) continue;
+      seen.add(bubble);
+      const message = this.chat.getMessage(getBubbleFullMid(bubble));
+      if(!message || message._ !== 'message' || !message.media) continue;
+      const group = message.grouped_id ? apiManagerProxy.getMessagesByGroupedId(message.grouped_id) : [message];
+      const shouldLock = group.some((m) => isCrmMediaLocked(m));
+      if(shouldLock !== !!bubble.dataset.crmLockedMedia) {
+        this.safeRenderMessage({message, bubble});
+      }
+    }
+  }
+
   /**
    * Render a poll-link preview through the regular message renderer. Keeping the
    * preview on this path means every webpage kind (documents, stories, gifts,
@@ -9935,6 +10015,10 @@ export default class ChatBubbles {
 
           bubble.classList.add('photo');
 
+          if(this.lockCrmSensitiveMedia(bubble, context.attachmentDiv, groupedMustBeRenderedFull && groupedId ? groupedMessages : [message])) {
+            break;
+          }
+
           if(groupedMustBeRenderedFull && groupedId && groupedMids.length !== 1) {
             bubble.classList.add('is-album', 'is-grouped');
             wrapAlbum({
@@ -10557,6 +10641,12 @@ export default class ChatBubbles {
 
         case 'messageMediaDocument': {
           const doc = context.messageMedia.document as MyDocument;
+
+          // An image sent as a file is analysed like a photo, so it locks the same way.
+          if(!doc.sticker && doc.mime_type?.startsWith('image/') &&
+            this.lockCrmSensitiveMedia(bubble, context.attachmentDiv, groupedMustBeRenderedFull && groupedId ? groupedMessages : [message])) {
+            break;
+          }
 
           if(doc.sticker/*  && doc.size <= 1e6 */) {
             this.wrapSticker(context, {doc, container: context.attachmentDiv});
