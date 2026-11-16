@@ -29,8 +29,15 @@ export type CrmConfig = {
   // super-admin approval (true) or the agent may self-reveal with a logged reason
   // (false). Cached with the config; refreshed by AppCrmManager.refreshMe.
   // Defaults to true (fail-safe) until the first /config fetch lands.
-  requireSensitiveApproval?: boolean
+  requireSensitiveApproval?: boolean,
+  // The CRM's id for this browser's Telegram login, when the CRM approved it
+  // (QR "Log in with CRM"). Sent back when tweb is logged out, so the CRM can
+  // record who logged it out and why against the right session.
+  telegramAuthorizationId?: number
 };
+
+/** How tweb was logged out, as reported to the CRM. */
+export type CrmTelegramLogoutReason = 'self_logout' | 'session_revoked' | 'unauthorized' | 'auth_key_duplicated' | 'duplicate_account';
 
 // Production CRM. Agents connect to this by default; the base-url field is
 // prefilled with it so they only need their mobile + OTP.
@@ -50,6 +57,9 @@ export const CRM_ENDPOINTS = {
   verifyOtp: '/auth/verify-otp',
   logout: '/auth/logout',
   me: '/auth/me',
+  telegramLoginAccounts: '/telegram-login/accounts',
+  telegramLoginApprove: '/telegram-login/approve',
+  telegramLoginEnded: '/telegram-login/ended',
   templates: '/templates',
   templateImages: (id: number) => '/templates/' + id + '/images',
   templateVideo: (id: number, index: number) => '/templates/' + id + '/videos/' + index,
@@ -701,4 +711,13 @@ export type CrmClientLogResult = {
   fingerprint: string,
   entry_count: number,
   occurrences: number
+};
+
+/** A department Telegram account the agent may log tweb in to without a code. */
+export type CrmTelegramLoginAccount = {
+  session_telegram_user_id: string,
+  name: string,
+  username: string | null,
+  department: string | null,
+  access: 'admin' | 'read_only'
 };

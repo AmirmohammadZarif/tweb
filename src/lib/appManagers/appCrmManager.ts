@@ -46,7 +46,9 @@ import {
   CrmProfileFormLink,
   CrmSecretRequest,
   CrmSecretRequestLink,
-  CrmProfileFormStatus
+  CrmProfileFormStatus,
+  CrmTelegramLoginAccount,
+  CrmTelegramLogoutReason
 } from '@lib/crm/types';
 
 /**
@@ -181,7 +183,7 @@ export default class AppCrmManager extends AppManager {
   private async request<T>(
     method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
     path: string,
-    options: {body?: object, query?: Record<string, string | number>, auth?: boolean} = {}
+    options: {body?: object, query?: Record<string, string | number>, auth?: boolean, session?: boolean} = {}
   ): Promise<T> {
     await this.loadPromise;
 
@@ -204,7 +206,8 @@ export default class AppCrmManager extends AppManager {
     if(options.body) headers['Content-Type'] = 'application/json';
     if(options.auth !== false) {
       headers['Authorization'] = 'Bearer ' + this.config.token;
-      headers['X-Telegram-Session-Id'] = this.sessionTelegramUserId();
+      // Off only before Telegram sign-in, where there is no account to name yet.
+      if(options.session !== false) headers['X-Telegram-Session-Id'] = this.sessionTelegramUserId();
     }
 
     const response = await fetch(url, {
@@ -258,6 +261,49 @@ export default class AppCrmManager extends AppManager {
     // verify-otp's payload has no is_super_admin — pull the full profile so
     // role-gated UI unlocks right after login, not on the next app start.
     return (await this.refreshMe()) || result.user;
+  }
+
+  // ── Code-free Telegram sign-in ────────────────────────────────────────────
+  // Used on the QR card before any Telegram account is signed in: the CRM checks
+  // the agent's department access and has its userbot accept the QR token, the
+  // way a phone scanning the code would. No Telegram code or secret is involved.
+  public async telegramLoginAccounts(): Promise<CrmTelegramLoginAccount[]> {
+    const result = await this.request<{data: CrmTelegramLoginAccount[]}>('GET', CRM_ENDPOINTS.telegramLoginAccounts, {session: false});
+    return this.unwrap(result);
+  }
+
+  public async approveTelegramLogin(sessionTelegramUserId: string, token: string): Promise<void> {
+    const result = await this.request<{authorization_id?: number}>('POST', CRM_ENDPOINTS.telegramLoginApprove, {
+      session: false,
+      body: {session_telegram_user_id: sessionTelegramUserId, token}
+    });
+    // Stored in this account's config, which is the account the QR login is
+    // signing in to, so it is still there when this login is later logged out.
+    this.config.telegramAuthorizationId = result?.authorization_id;
+    await this.persist();
+  }
+
+  /**
+   * Tell the CRM this browser is being logged out of Telegram, and how. Called
+   * by apiManager.logOut before it wipes storage (the CRM token goes with it).
+   * Best effort: never throws, and the caller does not wait long for it.
+   */
+  public async reportTelegramLogout(reason: CrmTelegramLogoutReason, error?: string): Promise<void> {
+    try {
+      if(!(await this.isConnected())) return;
+      const sessionId = this.sessionTelegramUserId();
+      if(!sessionId || sessionId === '0') return;
+      await this.request('POST', CRM_ENDPOINTS.telegramLoginEnded, {
+        session: false,
+        body: {
+          session_telegram_user_id: sessionId,
+          authorization_id: this.config.telegramAuthorizationId ?? null,
+          reason,
+          // Only a Telegram error type ever goes here, never a message.
+          error: error && /^[A-Z0-9_]{1,64}$/.test(error) ? error : null
+        }
+      });
+    } catch{}
   }
 
   public async me(): Promise<CrmUser> {

@@ -24,6 +24,7 @@ import Modes from '@config/modes';
 import bytesFromHex from '@helpers/bytes/bytesFromHex';
 import bytesToHex from '@helpers/bytes/bytesToHex';
 import isObject from '@helpers/object/isObject';
+import type {CrmTelegramLogoutReason} from '@lib/crm/types';
 import pause from '@helpers/schedulers/pause';
 import ApiManagerMethods from '@appManagers/apiManagerMethods';
 import {getEnvironment} from '@environment/utils';
@@ -326,12 +327,23 @@ export class ApiManager extends ApiManagerMethods {
     });
   }
 
-  public async logOut(migrateAccountTo?: ActiveAccountNumber) {
+  public async logOut(migrateAccountTo?: ActiveAccountNumber, cause?: {reason: CrmTelegramLogoutReason, error?: string}) {
     if(this.loggingOut) {
       return;
     }
 
     this.loggingOut = true;
+
+    // Tell the CRM who logged this department session out and why, while the
+    // CRM token still exists (the storage wipe below takes it). Capped so a slow
+    // or unreachable CRM never holds up the logout.
+    await Promise.race([
+      this.appCrmManager.reportTelegramLogout(
+        cause?.reason ?? (migrateAccountTo ? 'duplicate_account' : 'self_logout'),
+        cause?.error
+      ).catch(noop),
+      pause(1500)
+    ]);
 
     const totalAccounts = await AccountController.getTotalAccounts();
     const accountNumber = this.getAccountNumber();
@@ -691,7 +703,10 @@ export class ApiManager extends ApiManagerMethods {
 
       if((error.code === 401 && error.type === 'SESSION_REVOKED') ||
         (error.code === 406 && error.type === 'AUTH_KEY_DUPLICATED')) {
-        this.logOut();
+        this.logOut(undefined, {
+          reason: error.type === 'SESSION_REVOKED' ? 'session_revoked' : 'auth_key_duplicated',
+          error: error.type
+        });
       }
 
       if(options.ignoreErrors) {
@@ -707,7 +722,7 @@ export class ApiManager extends ApiManagerMethods {
         setTimeout(() => {
           if(!error.handled) {
             if(error.code === 401) {
-              this.logOut();
+              this.logOut(undefined, {reason: 'unauthorized', error: error.type});
             } else {
               // ErrorService.show({error: error}); // WARNING
             }

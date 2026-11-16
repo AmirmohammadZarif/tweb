@@ -119,7 +119,11 @@ function CrmLoginForm(props: {onDone: () => void}) {
 // Singleton guard — prevents a second popup when 401s fire in quick succession.
 let isPopupActive = false;
 
-function showCrmLoginPopup() {
+/**
+ * The CRM sign-in popup. `onConnected` runs after a successful login, which the
+ * Telegram QR card uses to continue straight into the code-free sign-in.
+ */
+export function showCrmLoginPopup(onConnected?: () => void) {
   isPopupActive = true;
   const [show, setShow] = createSignal(true);
 
@@ -136,7 +140,10 @@ function showCrmLoginPopup() {
         <PopupElement.Title title="Crm.Title" />
       </PopupElement.Header>
       <PopupElement.Body>
-        <CrmLoginForm onDone={() => setShow(false)} />
+        <CrmLoginForm onDone={() => {
+          setShow(false);
+          onConnected?.();
+        }} />
       </PopupElement.Body>
     </PopupElement>
   ));
