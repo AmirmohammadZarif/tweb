@@ -18,6 +18,7 @@ import {LangPackKey, i18n} from '@lib/langPack';
 import AccountController from '@lib/accounts/accountController';
 import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
 import rootScope from '@lib/rootScope';
+import {startCrmTelegramLogin} from '@components/popups/crmTelegramLogin';
 
 import AuthCard from '@/pages/AuthCard';
 import {CardSpec, useAuthFlow} from '@/pages/authFlow';
@@ -48,6 +49,8 @@ export default function SignQRCard(_props: {spec: Spec}) {
   // Latest token we've drawn — kept so the theme_changed listener can repaint
   // synchronously without waiting for the next `iterate` cycle to come around.
   let lastDrawnToken: Uint8Array | number[] | undefined;
+  // The same token, as the base64url string the QR encodes, for the CRM login.
+  let lastDrawnTokenEncoded: string | undefined;
   let QRCodeStylingCtor: any;
 
   /* ---------- description list ---------- */
@@ -81,7 +84,8 @@ export default function SignQRCard(_props: {spec: Spec}) {
     if(!QRCodeStylingCtor) return;
 
     const encoded = bytesToBase64(token);
-    const url = 'tg://login?token=' + fixBase64String(encoded, true);
+    const tokenEncoded = fixBase64String(encoded, true);
+    const url = 'tg://login?token=' + tokenEncoded;
 
     const style = window.getComputedStyle(document.documentElement);
     const surfaceColor = style.getPropertyValue('--light-filled-primary-color').trim();
@@ -117,6 +121,7 @@ export default function SignQRCard(_props: {spec: Spec}) {
     }
 
     lastDrawnToken = token;
+    lastDrawnTokenEncoded = tokenEncoded;
   }
 
   /* ---------- theme_changed: repaint with new CSS-variable colors ---------- */
@@ -236,6 +241,11 @@ export default function SignQRCard(_props: {spec: Spec}) {
       }
     >
       {helpList}
+      <Button
+        class="btn-primary btn-color-primary"
+        onClick={() => void startCrmTelegramLogin(() => lastDrawnTokenEncoded)}
+        text="Crm.QrLogin"
+      />
       <Button
         class="btn-primary btn-secondary btn-primary-transparent primary"
         onClick={() => {
