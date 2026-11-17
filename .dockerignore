@@ -1,0 +1,5 @@
+# The production image runs pnpm install itself and never reads git history.
+.git
+node_modules
+dist
+*.log

@@ -37,6 +37,13 @@ const TONE: Record<CrmSecretRequest['status'], 'ok' | 'warn' | 'none'> = {
   expired: 'none'
 };
 
+// Narrowed through a local: TS does not narrow `TONE[x]` across two reads, so
+// indexing the generated Styles type with it failed the production typecheck.
+function toneClass(status: CrmSecretRequest['status']): string | undefined {
+  const tone = TONE[status];
+  return tone === 'none' ? undefined : (profileStyles as Record<string, string>)[tone];
+}
+
 export default function showCrmSecretRequestPopup(props: {
   peerId: PeerId,
   /** Puts the message into the chat's composer at the caret. */
@@ -110,7 +117,7 @@ export default function showCrmSecretRequestPopup(props: {
           <Show when={!requests.loading}>
             <Show when={requests()?.length} fallback={<div class={profileStyles.empty}>{i18n('Crm.SecretRequest.None')}</div>}>
               <For each={requests()}>{(request) => (
-                <div class={classNames(profileStyles.row, TONE[request.status] !== 'none' && profileStyles[TONE[request.status]])}>
+                <div class={classNames(profileStyles.row, toneClass(request.status))}>
                   <span class={profileStyles.dot} />
                   <div>
                     <div class={profileStyles.rowValue}>{request.title}</div>
