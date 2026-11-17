@@ -10,8 +10,14 @@ vi.mock('@stores/crmRole', () => ({
   useCrmUserId: () => () => role.userId
 }));
 
-const {default: rootScope} = await import('@lib/rootScope');
-const {isCrmMediaLocked} = await import('@stores/crmSensitiveReveals');
+// Imported after vi.mock above. In beforeAll rather than at top level: the
+// production typecheck (tsc --noEmit) covers tests and rejects top-level await.
+let rootScope: typeof import('@lib/rootScope').default;
+let isCrmMediaLocked: typeof import('@stores/crmSensitiveReveals').isCrmMediaLocked;
+beforeAll(async() => {
+  ({default: rootScope} = await import('@lib/rootScope'));
+  ({isCrmMediaLocked} = await import('@stores/crmSensitiveReveals'));
+});
 
 const PEER = (555111 as UserId).toPeerId(false);
 const MID = 4242 * 2 ** 20;
