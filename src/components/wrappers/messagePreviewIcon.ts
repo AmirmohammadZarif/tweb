@@ -44,6 +44,9 @@ function getServiceMessagePreviewIcon(message: Extract<MyMessage, {_: 'messageSe
     case 'messageActionGiveawayLaunch':
     case 'messageActionGiveawayResults':
       return MESSAGE_PREVIEW_ICON_FALLBACKS.giveaway;
+    // * a transfer is money, not a gift: the gem (Android's dialog cell draws the same)
+    case 'messageActionGramTransfer':
+      return 'gram_filled';
   }
 }
 
@@ -87,6 +90,8 @@ export default function getMessagePreviewIcon(
       return MESSAGE_PREVIEW_ICON_FALLBACKS.giveaway;
     case 'messageMediaToDo':
       return 'checklist_done';
+    case 'messageMediaWidget':
+      return 'apps';
     case 'messageMediaCall':
       return 'phone';
   }

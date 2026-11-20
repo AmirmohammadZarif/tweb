@@ -1,9 +1,16 @@
+@use "../shared" as *;
+
 .animated-super {
   &-row {
     --translateY: 100%;
     position: absolute;
     inset: 0;
     transition: transform var(--pm-transition), opacity var(--pm-transition);
+
+    // reduced: the rows crossfade where they stand
+    @include animation-level-below(2) {
+      transform: none !important;
+    }
 
     body.animation-level-0 & {
       transition: none;
@@ -39,10 +46,14 @@
 
   &-dynamic-width {
     width: 100vw;
-    // * as wide as its text until it is measured, not as the viewport
-    max-width: var(--width, max-content);
+    // * as wide as its text until it is measured, not as the viewport - and not as an ancestor's
+    // * `--width` (the topics column has one), which a property of a common name would inherit
+    max-width: var(--animated-counter-width, max-content);
     // overflow: hidden;
-    transition: max-width var(--pm-transition);
+
+    @include animation-level(1) {
+      transition: max-width var(--pm-transition);
+    }
   }
 
   &-decimal {

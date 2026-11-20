@@ -2,15 +2,16 @@
  * Side-effect module: builds the mock managers and merges the fixtures into the app's state.
  *
  * Everything here is ADDITIVE, because the sandbox has two homes:
- *  - `?popups=1`, where the app never booted and the stores and mirrors are empty;
+ *  - `?popups=1` (and the widget sandbox's `?widgets=1`), where the app never booted and the stores
+ *    and mirrors are empty;
  *  - `showPopupSandbox()` inside a live, signed-in session, where they are full of real data that
  *    must survive untouched.
  * So the fixture peers and messages are merged in one key at a time (never as a whole-mirror
  * snapshot), and the stores are only seeded when nobody has filled them yet.
  *
  * In the standalone case this must also run BEFORE the popup modules are pulled in: several read
- * `appState` while their own module body evaluates (`stores/contentSettings.ts` builds memos inside
- * a module-scope `createRoot`), and a memo that throws on first read stays stale forever. That is
+ * `appState` while their own module body evaluates (memos inside a module-scope `createRoot`), and
+ * a memo that throws on first read stays stale forever. That is
  * why every sandbox module that reaches into the app imports this one first — and why `?popups=1`
  * imports it on its own before the sandbox (`src/index.ts`). Import order alone holds only on the dev
  * server: in a bundle a chunk evaluates every chunk it imports before its own body, so the shared
@@ -25,7 +26,7 @@ import {joinDeepPath} from '@helpers/object/setDeepProperty';
 import {setAppSettingsSilent} from '@stores/appSettings';
 import {appState, setAppStateSilent} from '@stores/appState';
 import {SETTINGS_INIT, STATE_INIT} from '@config/state';
-import {IS_POPUP_SANDBOX} from '@config/debug';
+import {IS_SANDBOX_PAGE} from '@config/debug';
 import {createMockManagers, mockAppConfig} from './mockManagers';
 import {messages, peers, selfUser, SELF_PEER_ID} from './fixtures';
 
@@ -69,7 +70,7 @@ function seedFixtureMirrors() {
  * login page it can still be empty, and the standalone branch below would then overwrite the running
  * app's settings, state and managers with fixtures and never put them back.
  */
-export const isLiveSession = !IS_POPUP_SANDBOX;
+export const isLiveSession = !IS_SANDBOX_PAGE;
 
 if(!isLiveSession) {
   rootScope.managers = mockManagers.managers;

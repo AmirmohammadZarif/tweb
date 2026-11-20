@@ -24,6 +24,20 @@ export function canonicalOrderedListType(value: unknown) {
   return getOrderedListTypePresentation(type)?.htmlType || type || '1';
 }
 
+/**
+ * The number of each of a list's `count` items, as the list counts them: from its start (its first item's,
+ * when it has none), an item's own value taking over.
+ */
+export function* orderedListValues(count: number, start: unknown, reversed: boolean, itemValue: (index: number) => unknown) {
+  let value = Number.isInteger(start) ? start as number : reversed ? count : 1;
+  for(let index = 0; index < count; ++index) {
+    const explicit = itemValue(index);
+    if(Number.isInteger(explicit)) value = explicit as number;
+    yield value;
+    value += reversed ? -1 : 1;
+  }
+}
+
 export function isDecimalOrderedListType(value: unknown) {
   return canonicalOrderedListType(value) === '1';
 }
@@ -32,14 +46,16 @@ export function isDecimalOrderedListType(value: unknown) {
  * A list item written as text — what stands for a list where a message carries
  * none: a rich list sent without formatting, a list pasted into a caption.
  */
-export function formatListItemMarker({ordered, value, type, checkbox, checked}: {
+export function formatListItemMarker({ordered, value, type, num, checkbox, checked}: {
   ordered: boolean,
   value?: number,
   type?: unknown,
+  /** The marker as an ordered item carries it (`num`), instead of one made of value and type. */
+  num?: string,
   checkbox?: boolean,
   checked?: boolean
 }) {
-  const marker = ordered ? `${formatOrderedListMarker(value, type)}. ` : '- ';
+  const marker = ordered ? `${num || formatOrderedListMarker(value, type)}. ` : '- ';
   return checkbox ? `${marker}[${checked ? 'x' : ' '}] ` : marker;
 }
 

@@ -2,7 +2,6 @@ import forEachReverse from '@helpers/array/forEachReverse';
 import createSerializedQueue from '@helpers/createSerializedQueue';
 import {GroupCallConnectionType, JoinGroupCallJsonPayload} from '@appManagers/appGroupCallsManager';
 import {AppManagers} from '@lib/managers';
-import rootScope from '@lib/rootScope';
 import CallConnectionInstanceBase, {CallConnectionInstanceOptions} from '@lib/calls/callConnectionInstanceBase';
 import GroupCallInstance from '@lib/calls/groupCallInstance';
 import filterServerCodecs from '@lib/calls/helpers/filterServerCodecs';
@@ -52,6 +51,10 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
     isMuted?: boolean,
     joinVideo?: boolean,
     rejoin?: boolean,
+    // Who a legacy video chat shows us as: a channel we speak as, or (unset) the account.
+    joinAs?: PeerId,
+    // The speaker invite of the link the call was joined by (phone.joinGroupCall `invite_hash`).
+    inviteHash?: string,
     // Conference (TdE2E) join: when set, passed to phone.joinGroupCall as
     // the `public_key` + `block` fields. Server treats the join as a
     // conference iff BOTH are present.
@@ -339,7 +342,7 @@ export default class GroupCallConnectionInstance extends CallConnectionInstanceB
         if(!channel) return;
 
         description.setEntrySource(entry, channel.sourceGroups || channel.source);
-        description.setEntryPeerId(entry, rootScope.myId);
+        description.setEntryPeerId(entry, this.groupCall.myId);
       }
     });
 

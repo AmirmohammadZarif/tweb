@@ -1,40 +1,41 @@
 # Keep the whole Tiptap release aligned with the audited editor version.
 overrides:
   '@tiptap/core': &tiptapVersion 3.31.3
-  '@tiptap/extension-blockquote': 3.31.3
-  '@tiptap/extension-bold': 3.31.3
-  '@tiptap/extension-bullet-list': 3.31.3
-  '@tiptap/extension-code': 3.31.3
-  '@tiptap/extension-code-block': 3.31.3
-  '@tiptap/extension-document': 3.31.3
-  '@tiptap/extension-dropcursor': 3.31.3
-  '@tiptap/extension-gapcursor': 3.31.3
-  '@tiptap/extension-hard-break': 3.31.3
-  '@tiptap/extension-heading': 3.31.3
-  '@tiptap/extension-horizontal-rule': 3.31.3
-  '@tiptap/extension-italic': 3.31.3
-  '@tiptap/extension-link': 3.31.3
-  '@tiptap/extension-list': 3.31.3
-  '@tiptap/extension-list-item': 3.31.3
-  '@tiptap/extension-list-keymap': 3.31.3
-  '@tiptap/extension-ordered-list': 3.31.3
-  '@tiptap/extension-paragraph': 3.31.3
-  '@tiptap/extension-strike': 3.31.3
-  '@tiptap/extension-table': 3.31.3
-  '@tiptap/extension-text': 3.31.3
-  '@tiptap/extension-underline': 3.31.3
-  '@tiptap/extensions': 3.31.3
-  '@tiptap/pm': 3.31.3
-  '@tiptap/starter-kit': 3.31.3
+  '@tiptap/extension-blockquote': *tiptapVersion
+  '@tiptap/extension-bold': *tiptapVersion
+  '@tiptap/extension-bullet-list': *tiptapVersion
+  '@tiptap/extension-code': *tiptapVersion
+  '@tiptap/extension-code-block': *tiptapVersion
+  '@tiptap/extension-document': *tiptapVersion
+  '@tiptap/extension-dropcursor': *tiptapVersion
+  '@tiptap/extension-gapcursor': *tiptapVersion
+  '@tiptap/extension-hard-break': *tiptapVersion
+  '@tiptap/extension-heading': *tiptapVersion
+  '@tiptap/extension-horizontal-rule': *tiptapVersion
+  '@tiptap/extension-italic': *tiptapVersion
+  '@tiptap/extension-link': *tiptapVersion
+  '@tiptap/extension-list': *tiptapVersion
+  '@tiptap/extension-list-item': *tiptapVersion
+  '@tiptap/extension-list-keymap': *tiptapVersion
+  '@tiptap/extension-ordered-list': *tiptapVersion
+  '@tiptap/extension-paragraph': *tiptapVersion
+  '@tiptap/extension-strike': *tiptapVersion
+  '@tiptap/extension-table': *tiptapVersion
+  '@tiptap/extension-text': *tiptapVersion
+  '@tiptap/extension-underline': *tiptapVersion
+  '@tiptap/extensions': *tiptapVersion
+  '@tiptap/pm': *tiptapVersion
+  '@tiptap/starter-kit': *tiptapVersion
+  # typed-scss-modules still asks for esbuild ^0.17, a line no security fix reaches any more.
+  # It only uses it, through bundle-require, to load an optional config file we do not have,
+  # so it gets the app's own esbuild instead (keep in step with package.json)
+  'typed-scss-modules>esbuild': 0.28.2
 
 allowBuilds:
   '@parcel/watcher@2.6.0': true
   '@sentry/cli': set this to true or false
   'cpu-features@0.0.10': true
-  # typed-scss-modules pulls esbuild 0.17 only to bundle an optional config file we
-  # do not have, so its native binary never runs and never needs building
-  'esbuild@0.17.19': false
-  'esbuild@0.27.4': true
+  'esbuild@0.28.2': true
   'ssh2@1.17.0': true
   # downloads the sentry-cli binary the source-map upload in vite.config.ts runs
   '@sentry/cli@2.58.6': true
@@ -78,5 +79,15 @@ minimumReleaseAgeExclude:
 # formula — see src/components/instantViewMath.tsx. Upstreamed as ronkok/Temml#139; until
 # a release carries it, a temml upgrade means re-applying the patch (`pnpm patch temml`),
 # and src/tests/instantViewMathBudget.test.ts checks the shipped build for it.
+#
+# mediabunny reads a track's ID3 tags (src/helpers/files/readAudioTags.ts), but not every frame the
+# standard allows: its pass that undoes an ID3v2.3 tag's "unsynchronisation" (the zero older taggers put
+# after every 0xFF of a tag holding a JPEG or UTF-16 text) looks at the wrong byte, and ID3v2.2 skips it,
+# so the frames after the first such byte are lost (offered upstream); it reads the group id and the data
+# length an ID3v2.3/2.4 frame's flags put ahead of its data as data, and a cover's MIME type in its
+# description's encoding instead of ISO-8859-1. The patch fixes the module build that `import` resolves
+# to; a mediabunny upgrade means checking upstream for the fixes and re-applying them (`pnpm patch
+# mediabunny`), and src/tests/audioTags.test.ts reads such tags through the shipped build.
 patchedDependencies:
+  mediabunny: patches/mediabunny.patch
   temml: patches/temml.patch

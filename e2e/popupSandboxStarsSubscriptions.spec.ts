@@ -9,8 +9,8 @@ test('subscription receipts show product, actual billing period and cancellation
   await page.evaluate(() => window.popupSandbox.ready());
   for(const [id, state] of [
     ['minute', 'Renews'], ['five-minutes', 'Renews'], ['cancelled', 'Expires'],
-    ['expired', 'Expired'], ['bot-cancelled', 'Cancelled by the bot'],
-    ['business-cancelled', 'Cancelled by the business'], ['missing-balance', 'Insufficient Stars']
+    ['expired', 'Expired'], ['bot-cancelled', 'Canceled by the bot'],
+    ['business-cancelled', 'Canceled by the business'], ['missing-balance', 'Insufficient Stars']
   ]) {
     await page.evaluate((id) => window.popupSandbox.open(`transaction/subscription-${id}`), id);
     const popup = page.locator('.popup-stars-pay.active');
@@ -43,8 +43,8 @@ test('subscription history rows show invoice names, billing periods and terminal
   await expect(section).toContainText('Subscription product minute');
   await expect(section).toContainText('per 1 minute');
   await expect(section).toContainText('per 5 minutes');
-  await expect(section).toContainText('Cancelled by the bot');
-  await expect(section).toContainText('Cancelled by the business');
+  await expect(section).toContainText('Canceled by the bot');
+  await expect(section).toContainText('Canceled by the business');
   await expect(section).toContainText('Insufficient Stars');
   await expect(section).toContainText('expired on');
   const media = section.locator('.row-media');
@@ -70,8 +70,9 @@ test('already-paid bot and channel subscriptions restore through the existing ma
     await expect(popup.locator('.popup-stars-pay-tos2')).toContainText('already paid');
     await popup.getByRole('button', {name: kind === 'bot' ? 'RESUME SUBSCRIPTION' : 'SUBSCRIBE TO CHANNEL', exact: true}).click();
     await expect.poll(() => page.evaluate(() => {
-      const sandbox = window.popupSandbox as typeof window.popupSandbox & {calls(): {manager: string, method: string, args: unknown[]}[]};
-      return sandbox.calls().filter((call) => call.manager === 'appPaymentsManager' && call.method === 'fulfillStarsSubscription').map((call) => call.args[0]);
+      return window.popupSandbox.calls()
+      .filter((call) => call.manager === 'appPaymentsManager' && call.method === 'fulfillStarsSubscription')
+      .map((call) => call.args[0]);
     })).toContain(`sandbox-subscription-restore-${kind}`);
     await expect(popup).toHaveCount(0);
     await expect.poll(() => page.evaluate(() => (window as any).restoredSubscriptionPeer?.peerId)).toBe(kind === 'bot' ? 777004 : -888002);
@@ -86,9 +87,9 @@ test('mobile subscription statuses and product names stay within the popup', asy
   await page.evaluate(() => (window.popupSandbox as unknown as {hide(): void}).hide());
   await page.evaluate(() => window.popupSandbox.open('transaction/subscription-list'));
   const section = page.locator('.popup-stars-subscriptions-section');
-  const rows = section.locator('.popup-stars-transaction-row');
+  const rows = section.locator('.transaction-row');
   await expect(rows).toHaveCount(9);
-  await expect(section).toContainText('Cancelled by the business');
+  await expect(section).toContainText('Canceled by the business');
   const overflow = await rows.evaluateAll((elements) => elements.map((element) => ({
     right: element.getBoundingClientRect().right,
     scroll: element.scrollWidth,

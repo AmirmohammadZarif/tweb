@@ -29,6 +29,8 @@ const refresh = () => {
   // fail-closed defaults
   if(!rootScope.managers) return;
   rootScope.managers.appCrmManager.getConfig().then((config) => {
+    // a manager that answers nothing (the popup sandbox's) is no session: everything stays closed
+    config ??= {} as typeof config;
     const loggedIn = !!(config.enabled && config.baseUrl && config.token &&
       (config.user?.department_access === 'admin' || config.user?.department_access === 'read_only'));
     setIsCrmLoggedIn(loggedIn);

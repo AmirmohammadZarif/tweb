@@ -1,4 +1,5 @@
 import {expect, Page, test} from '@playwright/test';
+import {findMessage, MESSAGE_MEDIA, openMessage, PAGE_MEDIA, Point} from './chatMedia.helpers';
 
 /*
  * Holding the mouse button on a photo or video peeks at it (`components/mediaPeek`): in a chat, in a
@@ -16,13 +17,8 @@ import {expect, Page, test} from '@playwright/test';
 const PEEK = 'div[aria-hidden="true"][class*="_MediaPeek_"]';
 const PEEK_ITEM = '[class*="_MediaPeekItem_"]';
 const VIEWER = '.media-viewer-whole.active';
-// * a photo or video of a message, and one of a rich message's page
-const MESSAGE_MEDIA = '.attachment.media-container, .album-item';
-const PAGE_MEDIA = '[class*="_MediaViewable_"]';
-// * how far down the chat list to look for a photo
-const DIALOGS_LIMIT = 30;
-
-type Point = {x: number, y: number};
+// * what a bubble floats over its media: the message's time, a video's duration, its play button
+const FLOATINGS = '.video-time, .time.is-floating, .video-play';
 
 test.describe('the media peek', () => {
   test.skip(!process.env.PLAYWRIGHT_BASE_URL, 'needs an authorized preview (PLAYWRIGHT_BASE_URL)');
@@ -94,6 +90,89 @@ test.describe('the media peek', () => {
     await expect(page.locator(VIEWER)).toHaveCount(0);
   });
 
+  // * the media viewer takes those overlays away for as long as the media is out of the bubble; a
+  // * peek does the same, and they fade back once it has flown home
+  test('takes the time the bubble floats over its media away, and fades it back', async({page}) => {
+    await openMessage(page, found);
+    const target = await page.evaluate(({mediaSelector, floatings}) => {
+      // * the chat's own answer to what a peek shows: not a round video, a self-destructing or an
+      // * unbought one, all of which look the same here
+      const bubbles = (window as any).appImManager.chat.bubbles;
+      const bubble = Array.from(document.querySelectorAll<HTMLElement>('#column-center .bubble'))
+      // * one item only: an album's siblings keep their own overlays, which is a case of its own
+      .find((bubble) => {
+        const media = bubble.querySelector<HTMLElement>(mediaSelector);
+        return media && bubble.querySelector(floatings) && bubble.querySelectorAll('.album-item').length < 2 &&
+          !bubble.querySelector('.media-spoiler-container') && !!bubbles.getMediaPeekSource(media);
+      });
+      const media = bubble?.querySelector(mediaSelector);
+      if(!media) return;
+      media.scrollIntoView({block: 'center'});
+      const rect = media.getBoundingClientRect();
+      return {mid: bubble.dataset.mid, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2};
+    }, {mediaSelector: MESSAGE_MEDIA, floatings: FLOATINGS});
+    test.skip(!target, 'no bubble floating its time over a photo or video in this chat');
+
+    const opacities = () => page.evaluate(({mid, floatings}) => Array.from(
+      document.querySelector(`#column-center .bubble[data-mid="${mid}"]`)?.querySelectorAll<HTMLElement>(floatings) || [],
+      (el) => getComputedStyle(el).opacity
+    ), {mid: target.mid, floatings: FLOATINGS});
+    const lit = await opacities();
+    expect(lit.length, 'the bubble lost its floating overlays before the peek').toBeGreaterThan(0);
+    const shown = lit.map(() => '1');
+    expect(lit, 'they are not lit to begin with').toEqual(shown);
+
+    await page.mouse.move(target.x, target.y);
+    await page.mouse.down();
+    await expect(page.locator(PEEK)).toHaveClass(/_visible_/);
+    await page.waitForTimeout(400);
+    expect(await opacities(), 'they stay lit over the dimmed bubble while the peek has the media')
+    .toEqual(lit.map(() => '0'));
+
+    // * the fade itself, caught as it runs rather than by the clock - with every animation off they
+    // * are simply back
+    const fades = await page.evaluate(() => (window as any).liteMode.isAvailable('animations'));
+    await page.evaluate(({mid, floatings}) => {
+      const el = document.querySelector(`#column-center .bubble[data-mid="${mid}"]`).querySelector(floatings);
+      (window as any).__peekFade = [];
+      el.addEventListener('transitionend', (e) => (window as any).__peekFade.push((e as TransitionEvent).propertyName));
+    }, {mid: target.mid, floatings: FLOATINGS});
+    await page.mouse.up();
+    await expect.poll(opacities, {timeout: 5000}).toEqual(shown);
+    if(fades) {
+      expect(await page.evaluate(() => (window as any).__peekFade), 'they came back without a fade').toContain('opacity');
+    }
+  });
+
+  // * a GIF is mostly smaller than the peek's box: at its own size it came out no bigger than in the chat
+  test('grows a small GIF to fill its box', async({page}) => {
+    const gif = await findMessage(page, 'gif');
+    test.skip(!gif, 'no small GIF in the recent chats of this account');
+
+    const media = await openMessage(page, gif);
+    // * the GIF itself: one narrower than its caption is fitted into a box as wide as the text
+    const inChat = await page.evaluate(({x, y}) => {
+      const attachment = document.elementFromPoint(x, y).closest('.attachment');
+      const picture = attachment.querySelector(':scope > .media-container-aspecter') || attachment;
+      const {width, height} = picture.getBoundingClientRect();
+      return {width, height};
+    }, media);
+    await page.mouse.move(media.x, media.y);
+    await page.mouse.down();
+    await expect(page.locator(PEEK)).toHaveClass(/_visible_/);
+    await page.waitForTimeout(400);
+    const {box, shown} = await page.locator(PEEK_ITEM).evaluate((item) => {
+      const box = item.getBoundingClientRect();
+      const shown = item.querySelector('[class*="_MediaPeekMedia_"]').getBoundingClientRect();
+      return {box: {width: box.width, height: box.height}, shown: {width: shown.width, height: shown.height}};
+    });
+    await page.mouse.up();
+    await expect(page.locator(PEEK)).toHaveCount(0);
+
+    expect(Math.max(shown.width / box.width, shown.height / box.height), 'the GIF does not fill its box').toBeCloseTo(1, 2);
+    expect(shown.width, 'the GIF is no bigger than in the chat').toBeGreaterThan(inChat.width);
+  });
+
   test('opens on the media of a rich message', async({page}) => {
     const rich = await findMessage(page, 'rich');
     test.skip(!rich, 'no rich message with a photo or video in the recent chats of this account');
@@ -140,60 +219,6 @@ test.describe('the media peek', () => {
     await expect(page.locator(VIEWER), 'releasing the peek opened the viewer as well').toHaveCount(0);
   });
 });
-
-// * the first message in the chat list with a photo a peek can show, or a rich message whose page has
-// * a photo or a video
-async function findMessage(page: Page, kind: 'photo' | 'rich') {
-  return page.evaluate(async({kind, limit}) => {
-    const managers = (window as any).appImManager.managers;
-    const {dialogs} = await managers.dialogsStorage.getDialogs({filterId: 0, limit});
-    for(const {peerId} of dialogs) {
-      const result = await managers.appMessagesManager.getHistory({
-        peerId,
-        ...(kind === 'photo' ? {inputFilter: {_: 'inputMessagesFilterPhotos'}, limit: 10} : {limit: 50})
-      }).catch((): undefined => undefined);
-      for(const mid of result?.history || []) {
-        const message = await managers.appMessagesManager.getMessageByPeer(peerId, mid);
-        const media = message?.media;
-        const found = kind === 'photo' ?
-          media?._ === 'messageMediaPhoto' && !media.pFlags.spoiler && !media.ttl_seconds :
-          message?.rich_message && /pageBlock(Photo|Video)/.test(JSON.stringify(message.rich_message));
-        if(found) {
-          return {peerId, mid};
-        }
-      }
-    }
-  }, {kind, limit: DIALOGS_LIMIT});
-}
-
-async function openMessage(page: Page, {peerId, mid}: {peerId: number, mid: number}, mediaSelector = MESSAGE_MEDIA): Promise<Point> {
-  await page.evaluate(async({peerId, mid, limit}) => {
-    // * a fresh page knows only the chats its list has drawn: load as many as the search went through
-    const {appImManager} = window as any;
-    await appImManager.managers.dialogsStorage.getDialogs({filterId: 0, limit});
-    await appImManager.setInnerPeer({peerId, lastMsgId: mid});
-  }, {peerId, mid, limit: DIALOGS_LIMIT});
-  const args = {selector: `#column-center [data-mid="${mid}"]`, mediaSelector};
-  await page.waitForFunction(({selector, mediaSelector}) => {
-    const element = document.querySelector(selector);
-    const bubble = element?.closest('.bubble') || element;
-    return !!bubble?.querySelector(mediaSelector);
-  }, args, {timeout: 60_000});
-  await page.waitForTimeout(1500);
-  const findMedia = ({selector, mediaSelector, scroll}: typeof args & {scroll?: boolean}) => {
-    const element = document.querySelector(selector);
-    const bubble = element.closest('.bubble') || element;
-    const media = element.matches(mediaSelector) ? element : bubble.querySelector(mediaSelector);
-    if(scroll) media.scrollIntoView({block: 'center'});
-    const rect = media.getBoundingClientRect();
-    return {x: rect.x + rect.width / 2, y: rect.y + rect.height / 2};
-  };
-
-  await page.evaluate(findMedia, {...args, scroll: true});
-  // * scrolling there can bring in more of the chat around it: measured once it has settled
-  await page.waitForTimeout(800);
-  return page.evaluate(findMedia, args);
-}
 
 // * the first two tiles of the media tab of the open profile, not behind a spoiler
 async function getMediaTiles(page: Page): Promise<Point[]> {

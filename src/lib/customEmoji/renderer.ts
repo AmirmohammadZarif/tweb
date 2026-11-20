@@ -28,10 +28,16 @@ import {observeResize, unobserveResize} from '@components/resizeObserver';
 import {CUSTOM_EMOJI_FADE_IN_DURATION, CUSTOM_EMOJI_FRAME_INTERVAL, PAID_REACTION_EMOJI_DOCID} from '@lib/customEmoji/constants';
 import lottieLoader from '@lib/lottie/lottieLoader';
 import StickerType from '@config/stickerType';
-import {Accessor, createEffect, createMemo, createRoot, createSignal, Setter} from 'solid-js';
+import {Accessor, createEffect, createMemo, createRoot, createSignal, on, Setter} from 'solid-js';
 import readValue from '@helpers/solid/readValue';
+import {hotEffect, hotListen} from '@helpers/hotModule';
+import {isEmojiLayoutMoving, markEmojiLayoutChanged, measureEmojiLayout, unwatchEmojiLayout, watchEmojiLayout} from '@lib/customEmoji/layoutWatch';
+import {getAppWindow} from '@helpers/appWindow';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 const globalLazyLoadQueue = new LazyLoadQueue();
+
+const TAG_NAME = 'custom-emoji-renderer-element';
 
 export class CustomEmojiRendererElement extends HTMLElement {
   public static globalLazyLoadQueue: LazyLoadQueue = globalLazyLoadQueue;
@@ -54,6 +60,10 @@ export class CustomEmojiRendererElement extends HTMLElement {
 
   public lastRect: {width: number, height: number};
   public isDimensionsSet: boolean;
+
+  // * the state the emoji were last measured in, and (a legacy renderer's) where they were then
+  public measuredSignature: number;
+  public measuredOffsets: Map<CustomEmojiElements, {top: number, left: number, width: number}[]>;
 
   public animationGroup: AnimationItemGroup;
   public size: MediaSize;
@@ -457,6 +467,23 @@ export class CustomEmojiRendererElement extends HTMLElement {
   }
 
   /**
+   * What, besides the layout, decides which emoji are measured and how they are sent: the groups,
+   * which of them have a frame, which emoji are held still, which are in view. While it stays the
+   * same and nothing moved, the last measurement still holds (`renderEmojis`)
+   */
+  public stateSignature() {
+    let signature = this.customEmojis.size;
+    for(const [elements, player] of this.playersSynced) {
+      signature = (signature * 31 + elements.size * 2 + +this.hasFrame(player)) | 0;
+      for(const element of elements) {
+        signature = (signature * 31 + +isHeldStill(element) + 2 * +animationIntersector.isVisible(element)) | 0;
+      }
+    }
+
+    return signature;
+  }
+
+  /**
    * Whether every emoji it draws is held still - in the sense `getOffsets` leaves an element out
    * for, so a static emoji (no synced player) is never among them. Such a renderer has nothing new
    * to draw, and none of its emoji has gone anywhere either.
@@ -630,19 +657,21 @@ export class CustomEmojiRendererElement extends HTMLElement {
       return;
     }
 
-    if(this.offscreen) { // re-arm the compositor fade so the group fades again on viewport re-entry
-      const docId = elements.values().next().value?.docId;
-      if(docId !== undefined) {
-        this.sendCompositor('resetFade', {groupId: docId});
-      }
-    }
-
     elements.forEach((element) => {
       const saved = element.savedChildren;
       if(saved?.length && !element.firstChild) {
         element.replaceChildren(...saved);
       }
     });
+
+    this.onPlaceholdersShown(elements);
+  }
+
+  /** The group is shown by its placeholders again: they are cleared, and it fades in, once it is drawn anew */
+  private onPlaceholdersShown(elements: CustomEmojiElements, docId: DocId = elements.values().next().value?.docId) {
+    if(this.offscreen && docId !== undefined) { // re-arm the compositor fade so the group fades again on viewport re-entry
+      this.sendCompositor('resetFade', {groupId: docId});
+    }
 
     this.clearedElements.delete(elements);
     elementsFadeInStartTimes.delete(elements);
@@ -991,7 +1020,7 @@ export class CustomEmojiRendererElement extends HTMLElement {
   }) {
     const renderer = this;
     const size = this.size;
-    const managers = rootScope.managers;
+    const managers = bindManagersToSession(rootScope.managers);
     const middleware = this.middlewareHelper.get();
 
     const docId = doc.id;
@@ -1320,6 +1349,10 @@ export class CustomEmojiRendererElement extends HTMLElement {
       // * placeholder (wrap leaves the thumb out of a cleared group): one under the canvas until it is
       // * painted showed through it for a frame or two - a translucent emoji darkened, a thin one bold
       else if(this.isSelectable) this.clearedElements.delete(elements);
+      // * Thumbnails put on a group the canvas has drawn (a category of the emoji panel going out of sight: its emoji
+      // * leave the group and come back to it in one pass, which keeps it): the group is shown by its placeholders
+      // * again - still taken for drawn, it would never clear them, and they would show under it once it is drawn
+      else if(onlyThumb && this.clearedElements.has(elements)) this.onPlaceholdersShown(elements, docId);
 
       for(const el of addElements) {
         if(elements.has(el)) {
@@ -1348,7 +1381,7 @@ export class CustomEmojiRendererElement extends HTMLElement {
 
     const usingOwnQueue = !!(!lazyLoadQueue && lazyLoadQueue !== false && globalLazyLoadQueue);
     const docIds = Array.from(addCustomEmojis.keys());
-    const managers = rootScope.managers;
+    const managers = bindManagersToSession(rootScope.managers);
 
     const loadPromise = managers.appEmojiManager.getCachedCustomEmojiDocuments(docIds).then((docs) => {
       if(!middleware()) return;
@@ -1373,7 +1406,10 @@ export class CustomEmojiRendererElement extends HTMLElement {
               doc: {
                 _: 'document',
                 id: docId,
-                attributes: []
+                attributes: [],
+                // * an editor's emoji are not in the page, its canvas draws them: the Stars' animation
+                // * plays there as any animated emoji does
+                ...(this.isSelectable && {sticker: StickerType.Lottie, animated: true})
               } as MyDocument,
               isPaidReactionEmoji: true,
               loadPromises
@@ -1453,7 +1489,8 @@ export class CustomEmojiRendererElement extends HTMLElement {
   }
 
   public static create(options: CustomEmojiRendererElementOptions) {
-    const renderer = new CustomEmojiRendererElement();
+    // the registered class: after a hot update this module's class is a copy, which the element registry does not know
+    const renderer = new (customElements.get(TAG_NAME) as typeof CustomEmojiRendererElement)();
     renderer.animationGroup = options.animationGroup;
     renderer.size = options.customEmojiSize || mediaSizes.active.customEmoji;
     renderer.isSelectable = options.isSelectable;
@@ -1502,12 +1539,13 @@ export class CustomEmojiRendererElement extends HTMLElement {
     createRoot((dispose) => {
       renderer.textColor = createMemo(() => renderer._textColor() || readValue(options.textColor));
 
+      // * only the renderer's own color: nothing global may observe this root (the lite-mode fade is
+      // * followed for every renderer at once, next to theme_changed below)
       if(renderer.offscreen) {
         createEffect(() => {
           const property = renderer.textColor();
           renderer.sendCompositor('configRenderer', {
-            color: property ? customProperties.getProperty(property) : undefined,
-            fadeEnabled: liteMode.isAvailable('emoji_appear') // reads the reactive appSettings store - re-runs on lite-mode change
+            color: property ? customProperties.getProperty(property) : undefined
           });
         });
       }
@@ -1569,7 +1607,8 @@ const hasRasterThumbPlaceholder = (elements: CustomEmojiElements) => {
   return false;
 };
 
-let emojiRenderInterval: number;
+// * the tick's timer, the frame a measurement waits for, and when the emoji were last measured
+let emojiRenderInterval: number, emojiMeasureFrame: number, emojiMeasureWindow: Window, lastEmojiMeasure = 0;
 
 // * These registries must NOT own renderers. A renderer whose owner dropped it without calling
 // * destroy() used to sit here for the tab's lifetime, holding its canvas, its custom-emoji map and
@@ -1615,7 +1654,7 @@ const getOffscreenRenderer = (rendererId: number) => {
 // Placeholder-clear parity with the legacy render() path: clear the layout children once
 // the compositor reports the group is fully faded in (fired immediately when the fade was
 // skipped/disabled), so the thumb never lingers past the moment the canvas fully covers it.
-compositorMessagePort.addEventListener('groupPainted', ({rendererId, groupId}) => {
+hotListen(import.meta.hot, compositorMessagePort, 'groupPainted', ({rendererId, groupId}: {rendererId: number, groupId: DocId}) => {
   const renderer = getOffscreenRenderer(rendererId);
   const elements = renderer?.customEmojis.get(groupId);
   if(!elements || !renderer.isConnected || renderer.clearedElements.has(elements)) {
@@ -1625,27 +1664,61 @@ compositorMessagePort.addEventListener('groupPainted', ({rendererId, groupId}) =
   renderer.clearPlaceholders(elements);
 });
 
-// CSS-var resolution is not reactive to theme swaps - re-resolve and re-ship the color.
-rootScope.addEventListener('theme_changed', () => {
+const forEachOffscreenRenderer = (callback: (renderer: CustomEmojiRendererElement) => void) => {
   for(const rendererId of Array.from(offscreenRenderers.keys())) {
     const renderer = getOffscreenRenderer(rendererId);
-    const property = renderer?.textColor();
-    if(!property) {
-      continue;
+    if(renderer) {
+      callback(renderer);
     }
-
-    renderer.sendCompositor('configRenderer', {
-      color: customProperties.getProperty(property)
-    });
   }
+};
+
+// CSS-var resolution is not reactive to theme swaps - re-resolve and re-ship the color.
+hotListen(import.meta.hot, rootScope, 'theme_changed', () => {
+  forEachOffscreenRenderer((renderer) => {
+    const property = renderer.textColor();
+    if(property) {
+      renderer.sendCompositor('configRenderer', {
+        color: customProperties.getProperty(property)
+      });
+    }
+  });
 });
 
-export const renderEmojis = (renderers: CustomEmojiRenderer[] = liveEmojiRenderers()) => {
-  const t = renderers.filter((r) => r.isConnected && r.checkForAnyFrame() && !r.ignoreSettingDimensions);
-  if(!t.length) {
-    return false;
+// * The fade follows the lite-mode setting through ONE subscription that walks the
+// * weak registry. A per-renderer effect reading the settings store put every renderer on that store's
+// * observer list, so one its owner never destroyed - a chat list row whose subtitle was redrawn -
+// * stayed reachable from the store for good, and the whole detached row with it. A hot update disposes the previous
+// * run's root
+hotEffect(import.meta.hot, () => createRoot((dispose) => {
+  createEffect(on(() => liteMode.isAvailable('emoji_appear'), (fadeEnabled) => {
+    forEachOffscreenRenderer((renderer) => renderer.sendCompositor('configRenderer', {fadeEnabled}));
+  }, {defer: true}));
+
+  return dispose;
+}));
+
+/**
+ * Draws the emoji, and with `measure` reads where they are. Without it (the timer's ticks, between
+ * frames) nothing is read: a renderer whose state did not change since it was last measured keeps
+ * what it was measured at - an offscreen one has nothing to do then, a legacy one draws at the
+ * offsets it has - and one whose state did change asks for a measurement in the next frame
+ * (`layoutWatch.ts` tells when the layout itself may have changed). Only a measurement of every
+ * renderer settles what the watch was told: one of some (`forceRender`) leaves it for the next frame's
+ */
+export const renderEmojis = (renderers?: CustomEmojiRenderer[], measure = true) => {
+  const t = (renderers ?? liveEmojiRenderers()).filter((r) => r.isConnected && r.checkForAnyFrame() && !r.ignoreSettingDimensions);
+  if(measure && !renderers) {
+    lastEmojiMeasure = performance.now();
+    // * a pass with nothing to draw is a measurement too: what changes from here on asks for the next
+    // * one (left unasked, a renderer turning drawable waited for the measurement once a second)
+    return measureEmojiLayout(() => t.length ? renderEmojisPass(t, true) : false);
   }
 
+  return t.length ? renderEmojisPass(t, measure) : false;
+};
+
+const renderEmojisPass = (t: CustomEmojiRenderer[], measure: boolean) => {
   const legacy: [CustomEmojiRendererElement, ReturnType<CustomEmojiRendererElement['getOffsets']>][] = [];
   const batch: {rendererId: number, groups: {groupId: DocId, offsets: number[]}[]}[] = [];
   for(const renderer of t) {
@@ -1669,11 +1742,36 @@ export const renderEmojis = (renderers: CustomEmojiRenderer[] = liveEmojiRendere
     // * corner - either way the emoji would be taken for gone, taken off the canvas and faded in
     // * anew once they are drawn again, instead of being there all along. The flags are asked
     // * first: they cost nothing, while the layout is a read of it
-    if(renderer.isEveryElementHeldStill() || !renderer.hasLayout()) {
+    if(renderer.isEveryElementHeldStill()) {
       continue;
     }
 
-    const offsets = renderer.getOffsets(); // the layout reads stay UI-side
+    const signature = renderer.stateSignature();
+    let offsets: ReturnType<CustomEmojiRendererElement['getOffsets']>;
+    if(!measure) {
+      if(signature !== renderer.measuredSignature) {
+        markEmojiLayoutChanged();
+        continue;
+      }
+
+      if(renderer.offscreen || !renderer.measuredOffsets) { // * an offscreen one sent what it had
+        continue;
+      }
+
+      offsets = renderer.measuredOffsets;
+    } else {
+      renderer.measuredSignature = signature;
+      renderer.measuredOffsets = undefined;
+      if(!renderer.hasLayout()) {
+        continue;
+      }
+
+      offsets = renderer.getOffsets(); // the layout reads stay UI-side
+      if(!renderer.offscreen) {
+        renderer.measuredOffsets = offsets;
+      }
+    }
+
     if(renderer.offscreen) {
       const groups = renderer.diffOffsets(offsets); // also restores placeholders for non-visible groups
       if(groups.length) {
@@ -1707,13 +1805,59 @@ export const renderEmojis = (renderers: CustomEmojiRenderer[] = liveEmojiRendere
   // its pixels - a fallback-path behavior change.
   return true;
 };
+
+// * The tick draws on a timer, as before, and measures in a frame: the next one after something
+// * that can move an emoji, and every one while something moves; and once a second anyway, between
+// * frames, for whatever moves unseen (see layoutWatch.ts)
+const EMOJI_MEASURE_ANYWAY_MS = 1000;
+const onRenderTick = () => {
+  renderEmojis(undefined, performance.now() - lastEmojiMeasure >= EMOJI_MEASURE_ANYWAY_MS);
+};
+const onMeasureFrame = () => {
+  emojiMeasureFrame = undefined;
+  renderEmojis(undefined, true);
+  if(isEmojiLayoutMoving()) {
+    requestEmojiMeasure();
+  }
+};
+// * a frame of the window the app is in: the tab left behind by a move into Document PiP may be
+// * hidden, and give none (the watch asks again on a move, and a frame asked of the old one is let go)
+const requestEmojiMeasure = () => {
+  if(!emojiRenderInterval) {
+    return;
+  }
+
+  const win = getAppWindow();
+  if(emojiMeasureFrame) {
+    if(emojiMeasureWindow === win) {
+      return;
+    }
+
+    emojiMeasureWindow.cancelAnimationFrame(emojiMeasureFrame);
+  }
+
+  emojiMeasureWindow = win;
+  emojiMeasureFrame = win.requestAnimationFrame(onMeasureFrame);
+};
+// * what moves a renderer, or moves something next to it - not a viewer or a sidebar of their own
+const isEmojiLayoutRelevant = (node: Node) => {
+  for(const ref of emojiRenderers) {
+    const renderer = ref.deref();
+    if(renderer && (node.contains(renderer) || renderer.parentElement?.contains(node))) {
+      return true;
+    }
+  }
+
+  return false;
+};
 const setRenderInterval = () => {
   if(emojiRenderInterval) {
     return;
   }
 
-  emojiRenderInterval = window.setInterval(renderEmojis, CUSTOM_EMOJI_FRAME_INTERVAL);
-  renderEmojis();
+  emojiRenderInterval = window.setInterval(onRenderTick, CUSTOM_EMOJI_FRAME_INTERVAL);
+  watchEmojiLayout(requestEmojiMeasure, isEmojiLayoutRelevant);
+  requestEmojiMeasure(); // * the first measurement goes into the next frame
 };
 const clearRenderInterval = () => {
   if(!emojiRenderInterval) {
@@ -1721,7 +1865,10 @@ const clearRenderInterval = () => {
   }
 
   clearInterval(emojiRenderInterval);
-  emojiRenderInterval = undefined;
+  emojiMeasureWindow?.cancelAnimationFrame(emojiMeasureFrame);
+  emojiRenderInterval = emojiMeasureFrame = undefined;
+  emojiMeasureWindow = undefined;
+  unwatchEmojiLayout();
 };
 
 // JS-driven fade-in for DOM-rendered custom emojis (images and non-synced videos).
@@ -1792,4 +1939,9 @@ const fadeInMediaAndCleanupThumbs = (el: HTMLElement) => {
 (window as any).syncedPlayers = syncedPlayers;
 (window as any).emojiRenderers = emojiRenderers;
 
-customElements.define('custom-emoji-renderer-element', CustomEmojiRendererElement);
+if(!customElements.get(TAG_NAME)) {
+  customElements.define(TAG_NAME, CustomEmojiRendererElement);
+}
+
+// a method edited here takes effect on the renderers on screen, without a reload (see @helpers/hotRegistry)
+if(import.meta.hot) import.meta.hot.accept();

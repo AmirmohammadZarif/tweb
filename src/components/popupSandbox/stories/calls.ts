@@ -18,6 +18,7 @@ import type {GroupCallId} from '@appManagers/appGroupCallsManager';
 import {defineStories, PopupStory} from '../registry';
 import type {PopupStoryContext} from '../context';
 import {videoChatUsers} from '../fixtures';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 /** The SAS a connected call prints in its header. Derived from the shared key, of which there is none. */
 const FINGERPRINT: [string, string, string, string] = ['🐶', '🌴', '🎩', '🍎'];
@@ -226,7 +227,7 @@ async function createCall(peerId: PeerId, isOutgoing?: boolean) {
   return new CallInstance({
     isOutgoing: !!isOutgoing,
     interlocutorUserId: peerId.toUserId(),
-    managers: rootScope.managers
+    managers: bindManagersToSession(rootScope.managers)
   });
 }
 
@@ -309,7 +310,7 @@ function groupCallStory(id: string, title: string, options: GroupCallStoryOption
       const instance = new GroupCallInstance({
         id: sandboxGroupCall.id,
         chatId: ctx.peer('group').toChatId(),
-        managers: rootScope.managers,
+        managers: bindManagersToSession(rootScope.managers),
         // The panel reads its state off the transport and its microphone off the capture track.
         // There is neither, so stand in a connected-looking connection over the silent stream —
         // the same shape `src/tests/groupCallSelfRow.test.ts` drives the instance with.
@@ -382,11 +383,28 @@ function groupCallStory(id: string, title: string, options: GroupCallStoryOption
       return () => {
         rootScope.removeEventListener('group_call_participant', onParticipant);
         groupCallsController.setCurrentGroupCall(undefined);
+        // * its hidden player and its hold on the tab (hasCallInTab); the stand-in transport stops nothing
+        instance.cleanup();
         videos.forEach((video) => video.dispose());
         media.dispose();
       };
     }
   };
+}
+
+/**
+ * A video chat with no transport behind it, for the sheets it opens: they read the call off the
+ * instance and its chat off `chatId`, and a call that is not the current one keeps their actions inert.
+ */
+async function bareGroupCall(ctx: PopupStoryContext, id: string) {
+  const {default: GroupCallInstance} = await import('@lib/calls/groupCallInstance');
+  const instance = new GroupCallInstance({
+    id,
+    chatId: ctx.peer('supergroup').toChatId(),
+    managers: bindManagersToSession(rootScope.managers)
+  });
+  instance.groupCall = {...sandboxGroupCall, id};
+  return instance;
 }
 
 defineStories('Calls', [
@@ -575,5 +593,92 @@ defineStories('Calls', [
 
       return () => instance.cleanup();
     }
+  },
+  {
+    // The same sheet in a video chat, as its admin sees it: "Display me as..." when the account can
+    // speak as a channel there, then the title to edit and new participants to mute, above the
+    // devices. The rows open their boxes only for the call in progress — the next two stories show those.
+    id: 'call/groupCallSettings',
+    fixtureOnly: true,
+    title: 'Video chat settings — admin',
+    managers: (ctx) => ({
+      appGroupCallsManager: {
+        getGroupCallJoinAs: () => ({peerIds: [ctx.peer('self'), ctx.peer('channel')], defaultPeerId: ctx.peer('self')})
+      },
+      appChatsManager: {isBroadcast: () => false}
+    }),
+    open: async(ctx) => {
+      const [instance, {default: showCallSettingsPopup}] = await Promise.all([
+        bareGroupCall(ctx, 'sandbox-video-chat-settings'),
+        import('@components/call/settingsPopup')
+      ]);
+
+      showCallSettingsPopup({mode: 'groupCall', instance, canManage: true});
+
+      // * no transport to stop: what goes is its hidden player and its hold on the tab (hasCallInTab)
+      return () => instance.cleanup();
+    }
+  },
+  {
+    // tdesktop's EditGroupCallTitleBox: the chat's name labels the field, as an empty title falls back to it.
+    id: 'call/editGroupCallTitle',
+    fixtureOnly: true,
+    title: 'Edit video chat title',
+    open: async(ctx) => {
+      const [instance, {default: editGroupCallTitle}] = await Promise.all([
+        bareGroupCall(ctx, 'sandbox-video-chat-title'),
+        import('@components/groupCall/editTitle')
+      ]);
+
+      void editGroupCallTitle({instance, isBroadcast: false, isAlive: () => true});
+
+      return () => instance.cleanup();
+    }
+  },
+  {
+    // Asked before joining when the account can speak as a channel in the chat (ChooseJoinAsBox).
+    id: 'call/joinAs',
+    title: 'Join video chat as...',
+    open: async(ctx) => {
+      const {pickGroupCallJoinAs} = await import('@components/groupCall/joinAs');
+      const myId = ctx.peer('self');
+      void pickGroupCallJoinAs({
+        joinAs: {peerIds: [myId, ctx.peer('channel')], defaultPeerId: myId},
+        selected: myId,
+        context: 'join',
+        isBroadcast: false,
+        myId
+      });
+    }
+  },
+  {
+    // A link to a chat's running video chat joins only once asked (tdesktop's JoinWithConfirm).
+    id: 'call/joinFromLink',
+    title: 'Join a video chat from a link',
+    open: async(ctx) => {
+      const {showGroupCallJoinConfirmation} = await import('@components/groupCall/joinAs');
+      void showGroupCallJoinConfirmation({peerId: ctx.peer('supergroup'), isBroadcast: false});
+    }
+  },
+  {
+    // A call with a title of its own is named by it, not by the chat (tdesktop CreateOrJoinConfirmation)
+    id: 'call/joinTitledFromLink',
+    title: 'Join a video chat with a title from a link',
+    open: async(ctx) => {
+      const {showGroupCallJoinConfirmation} = await import('@components/groupCall/joinAs');
+      void showGroupCallJoinConfirmation({peerId: ctx.peer('supergroup'), isBroadcast: false, callTitle: 'Weekly sync 🗓'});
+    }
+  },
+  {
+    id: 'call/joinLiveStreamFromLink',
+    title: 'Join a live stream from a link',
+    open: async(ctx) => {
+      const {showGroupCallJoinConfirmation} = await import('@components/groupCall/joinAs');
+      void showGroupCallJoinConfirmation({peerId: ctx.peer('channel'), isBroadcast: true});
+    }
   }
 ]);
+
+// The sandbox reloads on an edit anyway (watchForEdits). Accepting here keeps an edit of a popup this story imports
+// from climbing through the story to the app's root once the sandbox has been opened on the dev server.
+if(import.meta.hot) import.meta.hot.accept();

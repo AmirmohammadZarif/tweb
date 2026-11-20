@@ -31,6 +31,8 @@ export function BubbleLayout(props: {
   justMedia?: boolean
   group?: 'first' | 'last' | 'single'
   via?: BotId
+  // * the sender's line, in place of "via @bot"
+  name?: JSX.Element
   attachment?: JSX.Element
   replyMarkup?: ReplyMarkup.replyInlineMarkup
 }) {
@@ -47,10 +49,10 @@ export function BubbleLayout(props: {
       class={classNames(
         'bubble',
         props.tail && 'can-have-tail',
-        props.out && 'is-out',
+        props.out ? 'is-out' : 'is-in',
         (props.group === 'first' || props.group === 'single') && 'is-group-first',
         (props.group === 'last' || props.group === 'single') && 'is-group-last',
-        props.via && 'must-have-name',
+        (props.via || props.name) && 'must-have-name',
         props.justMedia && 'just-media',
         props.replyMarkup && 'with-reply-markup',
         props.class
@@ -58,7 +60,7 @@ export function BubbleLayout(props: {
     >
       <div class="bubble-content-wrapper">
         <div class="bubble-content" style={props.contentStyle}>
-          {props.justMedia ? (
+          {(props.via || props.name) && (props.justMedia ? (
             <div class="floating-part name-with-reply" dir="auto">
               <div class="name">
                 {renderVia()}
@@ -72,12 +74,12 @@ export function BubbleLayout(props: {
               )}
               dir="auto"
             >
-              {renderVia()}
+              {props.name ?? renderVia()}
             </div>
-          )}
+          ))}
           {props.attachment}
           {(props.text || props.content) && (
-            <div class={classNames('message spoilers-container', props.attachment && 'mt-shorter')}>
+            <div class={classNames('message spoilers-container', props.attachment && 'mt-shorter')} dir="auto">
               {props.content ?? wrapRichText(props.text, {entities: props.textEntities})}
             </div>
           )}

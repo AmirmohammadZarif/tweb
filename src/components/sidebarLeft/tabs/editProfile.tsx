@@ -2,7 +2,7 @@ import {createEffect, createMemo, createResource, createSignal, JSX, on, onClean
 import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
 import {usePromiseCollector} from '@components/solidJsTabs/promiseCollector';
 import {useHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
-import {AppChatAutomationTab, type AppEditProfileTab} from '@components/solidJsTabs/tabs';
+import {type AppEditProfileTab} from '@components/solidJsTabs/tabs';
 import Section from '@components/section';
 import Row from '@components/rowTsx';
 import {InputFieldTsx} from '@components/inputFieldTsx';
@@ -10,7 +10,7 @@ import {i18n} from '@lib/langPack';
 import rootScope from '@lib/rootScope';
 import getPeerEditableUsername from '@appManagers/utils/peers/getPeerEditableUsername';
 import EditPeer from '@components/editPeer';
-import InputField from '@components/inputField';
+import InputField, {InputState} from '@components/inputField';
 import {UsernameInputField} from '@components/usernameInputField';
 import UsernamesSection from '@components/usernamesSection';
 import showBirthdayPopup, {saveMyBirthday} from '@components/popups/birthday';
@@ -18,10 +18,15 @@ import showPickUserPopup from '@components/popups/pickUser';
 import PopupElement from '@components/popups/indexTsx';
 import wrapPeerTitle from '@components/wrappers/peerTitle';
 import {toastNew} from '@components/toast';
+import toastError from '@components/toastError';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
 import {purchaseUsernameCaption} from '@components/sidebarLeft/tabs/purchaseUsernameCaption';
-import {ConnectedBot, User, UserFull} from '@layer';
+import {BusinessWorkHours, ConnectedBot, User, UserFull} from '@layer';
+import OpeningHours from '@helpers/openingHours';
 import {trackAvatarUpload} from '@stores/avatarUpload';
+import usePremium from '@stores/premium';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
+import Modes from '@config/modes';
 
 type AppEditProfileTabType = typeof AppEditProfileTab;
 
@@ -98,10 +103,24 @@ const EditProfileForm = (props: {
   const [personalChannelId, setPersonalChannelId] = createSignal<ChatId>(initialPersonalChannelId);
   const [personalChannelTitle, setPersonalChannelTitle] = createSignal<JSX.Element>(i18n('EditProfile.PersonalChannel.Add'));
   const [hasBirthday, setHasBirthday] = createSignal(!!userFull.birthday);
+  const premium = usePremium();
+  const [businessWorkHours, setBusinessWorkHours] = createSignal(userFull.business_work_hours);
+  const [businessLocation, setBusinessLocation] = createSignal(userFull.business_location);
   const [connectedBot, setConnectedBot] = createSignal<ConnectedBot.connectedBot>();
   const [connectedBotLoaded, setConnectedBotLoaded] = createSignal(false);
   const [connectedBotLoadFailed, setConnectedBotLoadFailed] = createSignal(false);
   const [chatAutomationTitle, setChatAutomationTitle] = createSignal<JSX.Element>(i18n('Loading'));
+
+  /** `open 24/7`, or how many days of the week have hours — the row's value. */
+  const businessHoursSummary = () => {
+    const hours = businessWorkHours() as BusinessWorkHours.businessWorkHours;
+    if(OpeningHours.is24x7(hours)) {
+      return i18n('BusinessHoursProfileFullOpen');
+    }
+
+    const openDays = OpeningHours.getDaysHours(hours.weekly_open).filter((periods) => periods.length);
+    return i18n('Days', [openDays.length]);
+  };
 
   let cleanedUp = false;
   let connectedBotVersion = 0;
@@ -178,6 +197,18 @@ const EditProfileForm = (props: {
 
   tab.listenerSetter.add(rootScope)('chat_automation_update', setConnectedBotFromUpdate);
 
+  // The business sub-tabs write straight into the cached userFull, so the two rows
+  // below follow along without re-opening Edit Profile.
+  tab.listenerSetter.add(rootScope)('user_full_update', async(userId) => {
+    if(userId !== rootScope.myId.toUserId()) return;
+
+    const fresh = await tab.managers.appProfileManager.getCachedFullUser(userId);
+    if(cleanedUp || !fresh) return;
+
+    setBusinessWorkHours(fresh.business_work_hours);
+    setBusinessLocation(fresh.business_location);
+  });
+
   const openChatAutomation = async() => {
     if(connectedBotLoadFailed()) {
       await loadConnectedBot(tab.managers.appBusinessManager.getConnectedBot(true));
@@ -191,7 +222,7 @@ const EditProfileForm = (props: {
       return;
     }
 
-    tab.slider.createTab(AppChatAutomationTab).open({connectedBot: connectedBot()});
+    tab.slider.createTab(hotReloadGuard.tabs.AppChatAutomationTab).open({connectedBot: connectedBot()});
   };
 
   const openPersonalChannelPicker = async() => {
@@ -248,8 +279,26 @@ const EditProfileForm = (props: {
       bioInputField.value
     ).then(() => {
       tab.close();
-    }, (err) => {
-      console.error('updateProfile error:', err);
+    }, (err: ApiError) => {
+      // * a field the server would not take turns red where it stands, as tdesktop shows it - a bio kept from Premium
+      // * is longer than the limit after it, and every field goes in the one request; any other refusal is said (but
+      // * not for a session the tab has left meanwhile - toastError keeps quiet then)
+      const field = ({
+        FIRSTNAME_INVALID: firstNameInputField,
+        LASTNAME_INVALID: lastNameInputField,
+        ABOUT_TOO_LONG: bioInputField
+      } as {[type: string]: InputField})[err?.type];
+      if(field) {
+        field.setError();
+        if(Modes.a11y) field.input.focus();
+        // * the first edit takes the refusal off, and the field's own checks (its length) run again after that
+        tab.listenerSetter.add(field.input)('input', () => {
+          field.setState(InputState.Neutral);
+          field.simulateInputEvent();
+        }, {once: true});
+      } else {
+        toastError(err, 'updateProfile error:');
+      }
     }));
 
     if(editPeer.uploadAvatar) {
@@ -367,6 +416,38 @@ const EditProfileForm = (props: {
           <Row.Title titleRight={!personalChannelId() && <span class="primary">{personalChannelTitle()}</span>}>
             {personalChannelId() ? personalChannelTitle() : i18n('EditProfile.PersonalChannel.Label')}
           </Row.Title>
+        </Row>
+      </Section>
+
+      <Section
+        name="TelegramBusiness"
+        caption={i18n(premium() ? 'TelegramBusinessSubscribedSubtitle' : 'TelegramBusinessSubtitle')}
+      >
+        <Row clickable={() => hotReloadGuard.tabs.openBusinessEditorTab(tab.slider, hotReloadGuard.tabs.AppBusinessHoursTab)}>
+          <Row.Icon icon="time_filled" />
+          <Row.Title
+            titleRight={businessWorkHours() ? businessHoursSummary() : i18n('Off')}
+            titleRightSecondary
+          >
+            {i18n('BusinessHours')}
+          </Row.Title>
+        </Row>
+        <Row clickable={() => hotReloadGuard.tabs.openBusinessEditorTab(tab.slider, hotReloadGuard.tabs.AppBusinessLocationTab)}>
+          <Row.Icon icon="location_filled" />
+          <Row.Title
+            titleRight={businessLocation()?.address || i18n('Off')}
+            titleRightSecondary
+          >
+            {i18n('BusinessLocation')}
+          </Row.Title>
+        </Row>
+        <Row clickable={() => hotReloadGuard.tabs.openBusinessEditorTab(tab.slider, hotReloadGuard.tabs.AppBusinessChatLinksTab)}>
+          <Row.Icon icon="link_filled" />
+          <Row.Title>{i18n('PremiumBusinessChatLinks')}</Row.Title>
+        </Row>
+        <Row clickable={() => hotReloadGuard.tabs.openBusinessEditorTab(tab.slider, hotReloadGuard.tabs.AppBusinessIntroTab)}>
+          <Row.Icon icon="message_quote" />
+          <Row.Title>{i18n('PremiumBusinessIntro')}</Row.Title>
         </Row>
       </Section>
 

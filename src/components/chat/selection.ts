@@ -7,7 +7,6 @@ import Button from '@components/button';
 import ButtonIcon from '@components/buttonIcon';
 import CheckboxField from '@components/checkboxField';
 import showDeleteMessagesPopup from '@components/popups/deleteMessages';
-import showForwardPopup from '@components/popups/forward';
 import {showSelectedMessagesReport} from '@components/popups/reportAd';
 import SetTransition from '@components/singleTransition';
 import getSelectionElementFromTarget from '@components/chat/getSelectionElementFromTarget';
@@ -32,9 +31,8 @@ import swallowNextClick from '@helpers/dom/swallowNextClick';
 import findUpAsChild from '@helpers/dom/findUpAsChild';
 import EventListenerBase from '@helpers/eventListenerBase';
 import safeAssign from '@helpers/object/safeAssign';
-import {AppManagers} from '@lib/managers';
+import {AppManagers, ReadingManagers} from '@lib/managers';
 import {attachContextMenuListener} from '@helpers/dom/attachContextMenuListener';
-import appImManager from '@lib/appImManager';
 import {Message} from '@layer';
 import {makeFullMid} from '@appManagers/utils/messages/fullMid';
 import flatten from '@helpers/array/flatten';
@@ -48,7 +46,10 @@ import {
 } from '@components/chat/selectionRange';
 import {ChatType} from './chatType';
 import ChatInputPlate from '@components/chat/controlPlate';
+import {isWidgetTarget} from '@lib/widgetSandbox/gestures';
 import isSameMessageSelectionGroup, {getMessageSelectionGroup} from '@components/chat/isSameMessageSelectionGroup';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 const accumulateMapSet = <T extends {size: number}>(map: Map<any, T>) => {
   return [...map.values()].reduce((acc, v) => acc + v.size, 0);
@@ -79,13 +80,13 @@ export class AppSelection extends EventListenerBase<{
   protected getElementFromTarget: (target: HTMLElement) => HTMLElement;
   protected verifyTarget: (e: MouseEvent, target: HTMLElement) => boolean;
   protected verifyMouseMoveTarget: (e: MouseEvent, element: HTMLElement, selecting: boolean) => boolean;
-  protected verifyTouchLongPress: () => boolean;
+  protected verifyTouchLongPress: (target: HTMLElement) => boolean;
   protected targetLookupClassName: string;
   protected lookupBetweenParentClassName: string;
   protected lookupBetweenElementsQuery: string;
 
   protected doNotAnimate: boolean;
-  protected managers: AppManagers;
+  protected managers: ReadingManagers;
   /**
    * How far the pointer has to travel before a press turns into a drag that selects what it runs
    * across. Without it the shake of an ordinary click counts as a drag, and the row it was meant to
@@ -94,10 +95,10 @@ export class AppSelection extends EventListenerBase<{
    */
   protected dragThreshold = 0;
 
-  protected onTouchLongPress: (e: Event) => void;
+  protected onTouchLongPress: () => void;
 
   constructor(options: {
-    managers: AppManagers,
+    managers: ReadingManagers,
     getElementFromTarget: AppSelection['getElementFromTarget'],
     verifyTarget?: AppSelection['verifyTarget'],
     verifyMouseMoveTarget?: AppSelection['verifyMouseMoveTarget'],
@@ -138,33 +139,7 @@ export class AppSelection extends EventListenerBase<{
       attachContextMenuListener({
         element: listenElement,
         callback: (e) => {
-          if(
-            this.isSelecting ||
-            (e.target as HTMLElement).closest('reaction-element') ||
-            (this.verifyTouchLongPress && !this.verifyTouchLongPress())
-          ) return;
-
-          this.onTouchLongPress?.(e);
-
-          // * these two lines will fix instant text selection on iOS Safari
-          document.body.classList.add('no-select'); // * need no-select on body because chat-input transforms in channels
-          listenElement.addEventListener('touchend', (e) => {
-            cancelEvent(e); // ! this one will fix propagation to document loader button, etc
-            document.body.classList.remove('no-select');
-
-            // this.chat.bubbles.onBubblesClick(e);
-          }, {once: true, capture: true});
-
-          if(IS_MOBILE_SAFARI && IS_STANDALONE) {
-            listenElement.addEventListener('mousedown', cancelEvent, {once: true, capture: true});
-          }
-
-          cancelSelection();
-          cancelEvent(e as any);
-          const element = this.getElementFromTarget(e.target as HTMLElement);
-          if(element) {
-            this.toggleByElement(element);
-          }
+          if(this.holdOn(e.target as HTMLElement)) cancelEvent(e as any);
         },
         listenerSetter
       });
@@ -173,6 +148,63 @@ export class AppSelection extends EventListenerBase<{
     }
 
     listenerSetter.add(listenElement)('mousedown', this.onMouseDown);
+  }
+
+  /**
+   * A finger held on `target` — the touch screen's long press, or one a widget's renderer gave the bubble at the
+   * shared gesture policy's moment: the selection starts with its message, or toggles it. The finger is still down.
+   * Returns what ends the hold (none: it selects nothing), for a press let go where this document does not see it (in a
+   * widget's frame); one it sees ends it by itself.
+   */
+  public holdOn(target: HTMLElement): (() => void) | undefined {
+    const listenElement = this.listenElement;
+    if(
+      !listenElement ||
+      this.isSelecting ||
+      target.closest('reaction-element') ||
+      (this.verifyTouchLongPress && !this.verifyTouchLongPress(target))
+    ) return;
+
+    this.onTouchLongPress?.();
+
+    // * these two lines will fix instant text selection on iOS Safari
+    document.body.classList.add('no-select'); // * need no-select on body because chat-input transforms in channels
+    // * until the press ends, however it does: a finger's with its touch, a pen's or a mouse's (a widget's hold) with its
+    // * pointer, which may be let go anywhere in the document
+    const doc = listenElement.ownerDocument;
+    const release = () => {
+      document.body.classList.remove('no-select');
+      listenElement.removeEventListener('touchend', onTouchEnd, {capture: true});
+      listenElement.removeEventListener('touchcancel', release, {capture: true});
+      doc.removeEventListener('pointerup', onPointerEnd, {capture: true});
+      doc.removeEventListener('pointercancel', onPointerEnd, {capture: true});
+    };
+    const onTouchEnd = (e: TouchEvent) => {
+      cancelEvent(e); // ! this one will fix propagation to document loader button, etc
+      release();
+
+      // this.chat.bubbles.onBubblesClick(e);
+    };
+    // * a finger's pointer goes before its touchend, which has to be cancelled
+    const onPointerEnd = (e: PointerEvent) => {
+      if(e.pointerType !== 'touch') release();
+    };
+    listenElement.addEventListener('touchend', onTouchEnd, {capture: true});
+    listenElement.addEventListener('touchcancel', release, {capture: true});
+    doc.addEventListener('pointerup', onPointerEnd, {capture: true});
+    doc.addEventListener('pointercancel', onPointerEnd, {capture: true});
+
+    if(IS_MOBILE_SAFARI && IS_STANDALONE) {
+      listenElement.addEventListener('mousedown', cancelEvent, {once: true, capture: true});
+    }
+
+    cancelSelection();
+    const element = this.getElementFromTarget(target);
+    if(element) {
+      this.toggleByElement(element);
+    }
+
+    return release;
   }
 
   private onMouseDown = (e: MouseEvent) => {
@@ -369,7 +401,8 @@ export class AppSelection extends EventListenerBase<{
 
     const firstRect = first.getBoundingClientRect();
     const lastRect = last.getBoundingClientRect();
-    const difference = (firstRect.top - lastRect.top) || (firstRect.left - lastRect.left);
+    // * on one row, what comes first is at the line's start: the right in RTL
+    const difference = (firstRect.top - lastRect.top) || (firstRect.left - lastRect.left) * (I18n.getIsRTL() ? -1 : 1);
     const isHigher = difference < 0;
 
     const parent = findUpClassName(first, this.lookupBetweenParentClassName);
@@ -451,7 +484,25 @@ export class AppSelection extends EventListenerBase<{
     return input as HTMLInputElement;
   }
 
+  /**
+   * Swallows a click the selection acts on. One on the element's own checkbox is not prevented: the
+   * browser has ticked the box before the click is dispatched, and puts it back once a prevented
+   * click is over - over the mark the selection has set by then. So the tick is undone here and the
+   * click keeps its default, which leaves the box to the selection
+   */
+  public cancelElementClick(e: Event, element: HTMLElement, cancel: (e: Event) => void = cancelEvent) {
+    const input = element && this.getCheckboxInputFromElement(element);
+    if(e.type !== 'click' || !input || e.target !== input) {
+      cancel(e);
+      return;
+    }
+
+    input.checked = !input.checked;
+    e.stopPropagation();
+  }
+
   protected async updateContainer(forceSelection = false) {
+    const managers = bindManagersToSession(this.managers);
     const size = this.selectedMids.size;
     if(!size && !forceSelection) return;
 
@@ -461,7 +512,7 @@ export class AppSelection extends EventListenerBase<{
 
     for(const [peerId, mids] of this.selectedMids) {
       const storageKey = this.getStorageKey(peerId);
-      const r = await this.managers.appMessagesManager.cantForwardDeleteMids(storageKey, Array.from(mids));
+      const r = await managers.appMessagesManager.cantForwardDeleteMids(storageKey, Array.from(mids));
       cantForward ||= r.cantForward;
       cantDelete ||= r.cantDelete;
 
@@ -674,7 +725,7 @@ export class SearchSelection extends AppSelection {
 
   constructor(
     private searchSuper: AppSearchSuper,
-    managers: AppManagers,
+    managers: ReadingManagers,
     listenerSetter: ListenerSetter
   ) {
     super({
@@ -785,7 +836,7 @@ export class SearchSelection extends AppSelection {
           const mid = [...this.selectedMids.get(peerId)][0];
           this.cancelSelection();
 
-          appImManager.setInnerPeer({
+          hotReloadGuard.appImManager.setInnerPeer({
             peerId,
             lastMsgId: mid,
             threadId: this.searchSuper.mediaTab.type === 'saved' ? this.searchSuper.searchContext.peerId : this.searchSuper.searchContext.threadId
@@ -799,7 +850,7 @@ export class SearchSelection extends AppSelection {
             obj[fromPeerId] = Array.from(mids).sort((a, b) => a - b);
           }
 
-          showForwardPopup(obj, () => {
+          hotReloadGuard.showForwardPopup(obj, () => {
             this.cancelSelection();
           });
         }, attachClickOptions);
@@ -886,7 +937,8 @@ export default class ChatSelection extends AppSelection {
           !this.selectedMids.size;
         return !bad;
       },
-      verifyTouchLongPress: () => !this.chat.input.recording,
+      // * a hold over a widget is the shared gesture policy's: its renderer gives the bubble's to `holdOn` (on the bubble)
+      verifyTouchLongPress: (target) => !this.chat.input.recording && !isWidgetTarget(target),
       targetLookupClassName: 'bubble',
       lookupBetweenParentClassName: 'bubbles-inner',
       lookupBetweenElementsQuery: '.bubble:not(.is-multiple-documents), .grouped-item',
@@ -1143,6 +1195,8 @@ export default class ChatSelection extends AppSelection {
   }
 
   protected onToggleSelection = async(forwards: boolean, animate: boolean) => {
+    // * the selection's actions stand in the composer, which the theme picker stands in for
+    if(forwards) this.chat.themeChooser?.close();
     // Every plate is the same width now, so this just cross-fades.
     await this.chat.input.center(animate);
 
@@ -1248,7 +1302,7 @@ export default class ChatSelection extends AppSelection {
               obj[fromPeerId] = Array.from(mids).sort((a, b) => a - b);
             }
 
-            showForwardPopup(obj, () => {
+            hotReloadGuard.showForwardPopup(obj, () => {
               this.cancelSelection();
             });
           }, attachClickOptions);
@@ -1323,3 +1377,6 @@ export default class ChatSelection extends AppSelection {
     // });
   };
 }
+
+// a method edited here takes effect on the open chats' and searches' selections, without a reload (see @helpers/hotRegistry)
+if(import.meta.hot) import.meta.hot.accept();

@@ -3,6 +3,7 @@ import confirmationPopup from '@components/confirmationPopup';
 import InputField from '@components/inputField';
 import {toastNew} from '@components/toast';
 import {useCrmUserId, useSensitiveRequireApproval} from '@stores/crmRole';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 // Single entry point for revealing a redacted item (a message's sensitive spans,
 // or a peer's contact info via CONTACT_INFO_MID). A "reason to view" is ALWAYS
@@ -15,6 +16,7 @@ import {useCrmUserId, useSensitiveRequireApproval} from '@stores/crmRole';
 // - approval OFF → the CRM approves immediately → returns 'approved' → we reveal
 //   right away by dispatching the reveal event locally (Reverb echo is a no-op).
 export async function triggerSensitiveReveal(peerId: PeerId, messageId: number, content?: string): Promise<void> {
+  const managers = bindManagersToSession(rootScope.managers);
   if(!peerId?.isUser()) return;
   const chatId = '' + peerId.toUserId();
   const requireApproval = useSensitiveRequireApproval()();
@@ -37,7 +39,7 @@ export async function triggerSensitiveReveal(peerId: PeerId, messageId: number, 
   }
 
   const reason = inputField.value.trim();
-  const status = await rootScope.managers.appCrmManager.requestSensitiveReveal(chatId, messageId, reason, content);
+  const status = await managers.appCrmManager.requestSensitiveReveal(chatId, messageId, reason, content);
   if(status === 'approved') {
     // Reveal now across every listener (bubbles + the contact-info store) without
     // waiting for the Reverb round-trip.

@@ -24,10 +24,11 @@ import rootScope from '@lib/rootScope';
 import {AnimationItemGroup} from '@components/animationIntersector';
 import appMediaPlaybackController from '@components/appMediaPlaybackController';
 import type ProgressivePreloader from '@components/preloader';
-import {EMOJI_TEXT_COLOR} from '@components/emoticonsDropdown';
+import {EMOJI_TEXT_COLOR} from '@components/emoticonsDropdown/constants';
 import wrapPhoto from '@components/wrappers/photo';
 import wrapSticker from '@components/wrappers/sticker';
 import wrapVideo from '@components/wrappers/video';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 export type MediaPeekPlayback = {
   // * starts the media moving once the peek has finished opening
@@ -70,6 +71,7 @@ export default async function renderMediaPeek({
   middleware: Middleware,
   getTextColor?: () => string
 }): Promise<MediaPeekPlayback> {
+  const managers = bindManagersToSession(rootScope.managers);
   const {width, height} = size;
   // * a copy of a rendered image draws from the picture the browser has decoded, once it has caught up
   const snapshotDecoded = snapshot instanceof HTMLImageElement && snapshot.decode().catch(noop);
@@ -90,7 +92,7 @@ export default async function renderMediaPeek({
         play: false,
         loop: true,
         middleware,
-        managers: rootScope.managers,
+        managers,
         needFadeIn: false,
         isOut,
         emoji: attribute ? undefined : emoji,
@@ -133,7 +135,7 @@ export default async function renderMediaPeek({
       const doc = media as MyDocument;
       // * streamed the way the media viewer streams it: over HLS when it comes in several qualities
       const altDocs = kind === 'video' && doc.supportsStreaming && apiManagerProxy.isServiceWorkerOnline() ?
-        await rootScope.managers.appDocsManager.getAltDocsByDocument(doc.id) :
+        await managers.appDocsManager.getAltDocsByDocument(doc.id) :
         undefined;
       if(!middleware()) return NO_PLAYBACK;
       // * a video nothing can stream is downloaded whole. Putting the peek away leaves the download
@@ -159,6 +161,13 @@ export default async function renderMediaPeek({
           streamablePreloader: true
         })
       });
+
+      // * a GIF file (not an MP4 one) is laid out by wrapPhoto, which never grows a picture past its own
+      // * size: it is shown at the peek's
+      if(kind === 'gif') {
+        container.style.width = width + 'px';
+        container.style.height = height + 'px';
+      }
 
       // * a GIF or a downloaded video loops from a shared blob URL: kept alive while the peek plays it
       result.loadPromise?.then(() => {

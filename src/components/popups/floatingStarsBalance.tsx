@@ -1,6 +1,6 @@
 import classNames from '@helpers/string/classNames';
 import useStars from '@stores/stars';
-import showStarsPopup, {StarsStar} from '@components/popups/stars';
+import {StarsStar} from '@components/stars/starsAmount';
 import styles from '@components/popups/floatingStarsBalance.module.scss';
 import {I18nTsx} from '@helpers/solid/i18n';
 import {i18n} from '@lib/langPack';
@@ -8,6 +8,7 @@ import {IconTsx} from '@components/iconTsx';
 import {createResource} from 'solid-js';
 import rootScope from '@lib/rootScope';
 import paymentsWrapCurrencyAmount, {formatNanoton, nanotonToJsNumber} from '@helpers/paymentsWrapCurrencyAmount';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
 
 export function FloatingStarsBalance(props: {
   class?: string;
@@ -29,7 +30,7 @@ export function FloatingStarsBalance(props: {
       <I18nTsx
         key="StarsBalanceLong"
         args={props.ton ? [
-          <IconTsx icon="ton" />,
+          <IconTsx icon="gram_filled" />,
           <b>{formatNanoton(balanceTon())}</b>
         ] : [
           <StarsStar />,
@@ -43,7 +44,7 @@ export function FloatingStarsBalance(props: {
       ) : (
         <a
           class={styles.getMore}
-          onClick={() => showStarsPopup()}
+          onClick={() => hotReloadGuard.showStarsPopup()}
         >
           {i18n('GetMoreStars')}
         </a>

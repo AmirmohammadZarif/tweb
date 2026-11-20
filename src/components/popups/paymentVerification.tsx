@@ -1,11 +1,11 @@
 import PopupElement, {createPopup} from '@components/popups/indexTsx';
-import appImManager from '@lib/appImManager';
 import TelegramWebView from '@components/telegramWebView';
 import getWebViewTgLink from '@helpers/getWebViewTgLink';
 import {createSignal, onCleanup, onMount} from 'solid-js';
 import I18n, {i18n} from '@lib/langPack';
 import Button from '@components/buttonTsx';
 import safeWindowOpen from '@helpers/dom/safeWindowOpen';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
 
 export function createVerificationIframe(options: ConstructorParameters<typeof TelegramWebView>[0]) {
   const result = new TelegramWebView({
@@ -36,7 +36,7 @@ export default function showPaymentVerificationPopup(options: {
     options.onFinish?.();
     setShow(false);
     if(options.openPathAfter) {
-      appImManager.openUrl(getWebViewTgLink(e.path_full));
+      hotReloadGuard.appImManager.openUrl(getWebViewTgLink(e.path_full));
     }
   });
 

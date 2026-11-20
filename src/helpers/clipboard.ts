@@ -1,4 +1,7 @@
+import Modes from '@config/modes';
 import {getAppWindow} from '@helpers/appWindow';
+import {FOCUS_TRAP_ATTACHED_ATTRIBUTE} from '@helpers/dom/focusTrap';
+import isLastInputPointer from '@helpers/dom/inputModality';
 
 export type CopyToClipboardOptions = {
   /** Re-throw the underlying error instead of swallowing it (e.g. so a caller can show a toast) */
@@ -40,13 +43,22 @@ function fallbackCopyTextToClipboard(
   appWindow = getAppWindow()
 ) {
   const {document} = appWindow;
-  const textArea = document.createElement(html ? 'div' : 'textarea');
+  const textArea = document.createElement('textarea');
+  textArea.value = text;
+  // an open dialog's focus trap would take the focus back, and its selection with it
+  textArea.setAttribute(FOCUS_TRAP_ATTACHED_ATTRIBUTE, '');
+  // the HTML goes to the clipboard as it is and is never parsed here: rendered in the app's document,
+  // the handlers of whatever text went into it would run in the app's origin
   if(html) {
-    textArea.tabIndex = 0;
-    textArea.contentEditable = 'true';
-    textArea.innerHTML = html;
-  } else {
-    (textArea as HTMLTextAreaElement).value = text;
+    textArea.addEventListener('copy', (e) => {
+      if(!e.clipboardData) {
+        return;
+      }
+
+      e.clipboardData.setData('text/plain', text);
+      e.clipboardData.setData('text/html', html);
+      e.preventDefault();
+    });
   }
 
   // Avoid scrolling to bottom
@@ -54,18 +66,11 @@ function fallbackCopyTextToClipboard(
   textArea.style.left = '0';
   textArea.style.position = 'fixed';
 
+  // with the keyboard layer, the focus the copy borrows goes back where it was (a dialog's Copy)
+  const focused = Modes.a11y ? document.activeElement as HTMLElement : undefined;
   document.body.appendChild(textArea);
   textArea.focus();
-  if(html) {
-    const selection = appWindow.getSelection();
-    selection.removeAllRanges();
-    const range = document.createRange();
-    range.setStartBefore(textArea.firstChild);
-    range.setEndAfter(textArea.lastChild);
-    selection.addRange(range);
-  } else {
-    (textArea as HTMLTextAreaElement).select();
-  }
+  textArea.select();
 
   try {
     document.execCommand('copy');
@@ -77,6 +82,9 @@ function fallbackCopyTextToClipboard(
     }
   } finally {
     document.body.removeChild(textArea);
+    if(focused?.isConnected && (!document.activeElement || document.activeElement === document.body)) {
+      focused.focus({preventScroll: true, ...(isLastInputPointer() && {focusVisible: false})});
+    }
   }
 }
 
@@ -103,4 +111,33 @@ export async function copyTextToClipboard(text: string, html?: string, options?:
     // The fallback will rethrow if it also fails and the caller opted in
     fallbackCopyTextToClipboard(text, html, options, appWindow);
   }
+}
+
+/**
+ * Copies a text that is still to come (one the worker answers with). Safari writes only within the click that asks
+ * for it, and an answer from the worker comes after it, so the write starts at once with the text promised; where a
+ * ClipboardItem cannot be written, or its write is refused, the text is written once it comes
+ * (`copyTextToClipboard`, down to `execCommand`). Rejects when it is not copied.
+ */
+export function copyPendingTextToClipboard(text: Promise<string>) {
+  const appWindow = getAppWindow();
+  const copyOnceCome = () => text.then((text) => copyTextToClipboard(text, undefined, {rethrow: true}));
+  if(!canWriteClipboardItem('text/plain', appWindow)) {
+    return copyOnceCome();
+  }
+
+  const BlobConstructor = (appWindow as any).Blob as typeof Blob;
+  let written: Promise<void>;
+  try {
+    written = writeClipboardItem({
+      'text/plain': text.then((text) => new BlobConstructor([text], {type: 'text/plain'}))
+    }, appWindow);
+  } catch(err) {
+    written = Promise.reject(err);
+  }
+
+  return written.catch((err) => {
+    console.error('clipboard error', err);
+    return copyOnceCome();
+  });
 }

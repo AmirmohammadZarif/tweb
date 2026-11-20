@@ -6,7 +6,9 @@ import {registerChatInputEditor} from '@components/chat/inputEditor/registry';
 import type {ChatInputEditor} from '@components/chat/inputEditor/types';
 import rootScope from '@lib/rootScope';
 import deferredPromise from '@helpers/cancellablePromise';
+import {PAYMENT_REJECTED} from '@components/chat/paidMessagesInterceptor';
 import type {DraftMessage, Message, MessageEntity, RichMessage} from '@layer';
+import type {AppManagers} from '@lib/managers';
 
 vi.mock('@lib/appImManager', () => ({AppImManager: class {}, APP_TABS: {}, default: {}}));
 
@@ -51,6 +53,7 @@ function setup(partial = false) {
     getPlaceholderParams: vi.fn(async(_editing: boolean) => ({key: 'Message' as const})),
     setMessageInputEditable: vi.fn((editable: boolean) => {}),
     updateMessageInputPlaceholder: vi.fn(() => ({oldKey: 'Message', oldArgs: []})),
+    updateKeyboardPlaceholder: vi.fn(),
     editMsgId: undefined as number,
     editMessage: undefined as Message.message,
     restoreInputLock: undefined as (() => void),
@@ -220,7 +223,7 @@ function setupSending() {
   const options: Parameters<typeof ChatInput.sendMessageWithForward>[0] = {
     sendingParams: {peerId: 42 as PeerId},
     chatType: ChatType.Chat,
-    slowModeParams: {peerId: 42 as PeerId, managers: rootScope.managers, element: document.createElement('div')},
+    slowModeParams: {peerId: 42 as PeerId, managers: managers as unknown as AppManagers, element: document.createElement('div')},
     paidMessageInterceptor: {prepareStarsForPayment: pay} as unknown as Parameters<typeof ChatInput.sendMessageWithForward>[0]['paidMessageInterceptor']
   };
   return {
@@ -276,7 +279,8 @@ test('blocks composer submission while department access is read-only', async() 
     clearInput: vi.fn()
   };
   try {
-    await ChatInput.prototype.sendMessage.call(host as unknown as ChatInput);
+    // the field's own send path (`sendMessage` hands a non-edit send to it)
+    await (ChatInput.prototype as any).sendFieldMessage.call(host as unknown as ChatInput, false, undefined, {});
     expect(send).not.toHaveBeenCalled();
     expect(host.clearInput).toHaveBeenCalledOnce();
     expect(mocks.toast).toHaveBeenCalledWith({langPackKey: 'Crm.ReadOnly.Blocked'});
@@ -285,31 +289,51 @@ test('blocks composer submission while department access is read-only', async() 
   }
 });
 
-for(const interruption of ['none', 'peer', 'typed', 'new-edit'] as const) test(`only cleans the submitted composer after send (interruption=${interruption})`, async() => {
-  const pending = deferredPromise<{value: string, messageCount: number}>();
-  const send = vi.spyOn(ChatInput, 'sendMessageWithForward').mockReturnValueOnce(pending);
+for(const interruption of ['none', 'peer', 'typed', 'rewritten', 'new-edit'] as const) test(`only cleans the submitted composer after send (interruption=${interruption})`, async() => {
+  const pending = deferredPromise<void>();
+  const send = vi.spyOn(ChatInput, 'sendMessageWithForward').mockImplementationOnce(async({onSending}) => {
+    await pending;
+    onSending(1);
+    return {value: 'Submitted', messageCount: 1};
+  });
   let current = true;
   let revision = 1;
-  const host = {
+  const input = document.createElement('div');
+  input.textContent = 'Submitted';
+  const host = Object.assign(Object.create(ChatInput.prototype), {
     editMsgId: undefined as number,
     inputValueGeneration: 0,
+    ownSends: [],
     getMiddleware: () => () => current,
-    messageInputEditor: {captureSelection: () => ({revision})},
-    messageInputField: {input: document.createElement('div')},
+    messageInput: input,
+    richMessageInput: {
+      editor: {captureSelection: () => ({revision}), isEmpty: () => false, getLegacyValueIfLossless: () => ({})},
+      field: {input}
+    },
+    effect: (): undefined => undefined,
     chat: {type: ChatType.Chat, peerId: 42, getMessageSendingParams: () => ({peerId: 42})},
+    managers: {appMessagesManager: {readAllHistory: vi.fn()}, appEmojiManager: {pushRecentEmoji: vi.fn()}},
     verifyEphemeralCommand: () => true,
     checkWelcomeMessagesLimit: () => Promise.resolve(true),
     getDefaultParamsForSlowModeTooltip: () => ({}),
-    onMessageSent: vi.fn()
-  };
+    clearInput: vi.fn(),
+    clearHelper: vi.fn(),
+    setMessageInputExpanded: vi.fn(),
+    updateSendBtn: vi.fn()
+  }) as any;
   try {
-    const task = ChatInput.prototype.sendMessage.call(host as unknown as ChatInput);
+    const task = host.sendMessage();
+    await vi.waitFor(() => expect(send).toHaveBeenCalled());
     if(interruption === 'peer') current = false;
-    if(interruption === 'typed') ++revision;
+    if(interruption === 'typed') ++revision, input.textContent = 'Submitted and more';
+    if(interruption === 'rewritten') ++revision, input.textContent = 'Something else';
     if(interruption === 'new-edit') host.editMsgId = 2;
-    pending.resolve({value: 'Submitted', messageCount: 1});
+    pending.resolve();
     await task;
-    expect(host.onMessageSent).toHaveBeenCalledTimes(interruption === 'none' ? 1 : 0);
+    // the field goes whole, with what was typed while it was checked; one gone or holding an edit stays
+    const left = interruption !== 'peer' && interruption !== 'new-edit';
+    expect(host.clearInput).toHaveBeenCalledTimes(left ? 1 : 0);
+    expect(host.managers.appMessagesManager.readAllHistory).toHaveBeenCalledTimes(left ? 1 : 0);
   } finally {
     send.mockRestore();
   }
@@ -355,6 +379,54 @@ test('keeps the submitted forwarding selection stable while preparation waits', 
     await task;
     expect(sending.pay).toHaveBeenCalledWith(2);
     expect(sending.forwardMessages.mock.calls[0][0].mids).toEqual([11, 12]);
+  } finally {sending.restore();}
+});
+
+test.each([
+  {name: 'sent', text: 'x'.repeat(5000), forwarding: true, expected: [[2]]},
+  {name: 'only forwarded', text: '', forwarding: true, expected: [[0]]},
+  {name: 'stopped by slow mode', text: 'a', slowMode: true, expected: []},
+  {name: 'not paid for', text: 'a', rejected: true, expected: []},
+  {name: 'empty', text: '', expected: []}
+])('lets the field go once the checks are through, right before anything goes ($name)', async({text, forwarding, slowMode, rejected, expected}) => {
+  const sending = setupSending();
+  if(slowMode) sending.slowMode.mockResolvedValueOnce(true);
+  if(rejected) sending.pay.mockResolvedValueOnce(PAYMENT_REJECTED as never);
+  const onSending = vi.fn();
+  try {
+    await ChatInput.sendMessageWithForward({
+      ...sending.options,
+      text: {text},
+      forwarding: forwarding ? {[51 as PeerId]: [11]} : undefined,
+      onSending
+    });
+    expect(onSending.mock.calls).toEqual(expected);
+    const sent = [...sending.sendText.mock.invocationCallOrder, ...sending.forwardMessages.mock.invocationCallOrder];
+    expect(sent).toHaveLength(expected.length && (text ? 1 : 0) + (forwarding ? 1 : 0));
+    sent.forEach((order) => expect(onSending.mock.invocationCallOrder[0]).toBeLessThan(order));
+  } finally {sending.restore();}
+});
+
+test('looks the forwarded messages up before the field goes, so that everything goes at once', async() => {
+  const sending = setupSending();
+  const order: string[] = [];
+  const lookups = [deferredPromise<object>(), deferredPromise<object>()];
+  const managers = rootScope.managers as any;
+  managers.appMessagesManager.getMessageByPeer = vi.fn(() => lookups[managers.appMessagesManager.getMessageByPeer.mock.calls.length - 1]);
+  sending.sendText.mockImplementation(() => order.push('text'));
+  sending.forwardMessages.mockImplementation(async() => (order.push('forward'), undefined));
+  try {
+    const task = ChatInput.sendMessageWithForward({
+      ...sending.options,
+      text: {text: 'with forwards'},
+      forwarding: {[51 as PeerId]: [11], [52 as PeerId]: [12]},
+      onSending: () => order.push('field let go')
+    });
+    await vi.waitFor(() => expect(managers.appMessagesManager.getMessageByPeer).toHaveBeenCalledTimes(2));
+    expect(order).toEqual([]);
+    lookups.forEach((lookup) => lookup.resolve({pFlags: {}}));
+    await task;
+    expect(order).toEqual(['field let go', 'text', 'forward', 'forward']);
   } finally {sending.restore();}
 });
 

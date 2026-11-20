@@ -9,6 +9,7 @@ import rootScope from '@lib/rootScope';
 import agentIdentity from '@lib/agentIdentity';
 import {toast, toastNew} from '@components/toast';
 import {HelpCountry, HelpCountryCode} from '@layer';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 const showCrmError = (err: any, fallback: LangPackKey) => {
   const msg = typeof err?.message === 'string' && !err.message.startsWith('CRM_') ? err.message : '';
@@ -58,6 +59,7 @@ function CrmLoginForm(props: {onDone: () => void}) {
   });
 
   const sendCode = async() => {
+    const managers = bindManagersToSession(rootScope.managers);
     const baseUrl = baseUrlField.value.trim();
     const mobile = telField.value.trim();
     if(!baseUrl || !mobile || mobile === '+') {
@@ -66,8 +68,8 @@ function CrmLoginForm(props: {onDone: () => void}) {
     }
     setBusy(true);
     try {
-      await rootScope.managers.appCrmManager.setConfig({baseUrl});
-      await rootScope.managers.appCrmManager.sendOtp(mobile);
+      await managers.appCrmManager.setConfig({baseUrl});
+      await managers.appCrmManager.sendOtp(mobile);
       setOtpSent(true);
     } catch(err) {
       showCrmError(err, 'Crm.SendFailed');

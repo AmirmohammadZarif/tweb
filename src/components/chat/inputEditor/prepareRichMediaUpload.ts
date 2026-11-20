@@ -9,11 +9,13 @@ import gifToVideo, {canConvertGifToVideo} from '@helpers/gifToVideo';
 import movToVideo, {isConvertibleMov} from '@helpers/movToVideo';
 import {ObjectURLScope} from '@helpers/objectUrlScope';
 import onMediaLoad from '@helpers/onMediaLoad';
+import readAudioTags from '@helpers/files/readAudioTags';
 import {renderImageFromUrlPromise} from '@helpers/dom/renderImageFromUrl';
 import {
   getRichMessageMediaFileType,
   isVisualRichMessageMimeType,
-  normalizeRichMessageMediaFile
+  normalizeRichMessageMediaFile,
+  type RichMessageMediaFileType
 } from '@helpers/files/richMessageMediaInsertPolicy';
 
 function convertedVideoFile(file: File, blob: Blob) {
@@ -92,6 +94,7 @@ async function prepareVideo(file: File): Promise<SendFileDetails> {
 }
 
 async function prepareAudio(file: File): Promise<SendFileDetails> {
+  const tagsPromise = readAudioTags(file);
   const objectURLs = new ObjectURLScope();
   const objectUrl = objectURLs.create(file);
   const audio = document.createElement('audio');
@@ -113,11 +116,15 @@ async function prepareAudio(file: File): Promise<SendFileDetails> {
       // Upload it anyway; duration is optional in that case.
       audio.addEventListener('error', finish, {once: true});
     });
+    const {title, performer, cover} = await tagsPromise;
     return {
       file,
       duration: Number.isFinite(audio.duration) ?
         Math.max(0, Math.floor(audio.duration)) :
-        0
+        0,
+      audioTitle: title,
+      audioPerformer: performer,
+      thumb: cover
     };
   } finally {
     audio.removeAttribute('src');
@@ -160,11 +167,14 @@ async function prepareImage(file: File): Promise<SendFileDetails> {
 }
 
 export default async function prepareRichMediaUpload(
-  inputFile: File
+  inputFile: File,
+  type?: RichMessageMediaFileType
 ): Promise<SendFileDetails> {
+  // a file block goes as it is: nothing converted, nothing scaled down
+  if(type === 'document') return {file: inputFile};
   const file = normalizeRichMessageMediaFile(inputFile);
   const mimeType = getFileMimeType(file);
-  if(getRichMessageMediaFileType(mimeType, file.name) === 'audio') {
+  if((type || getRichMessageMediaFileType(mimeType, file.name)) === 'audio') {
     return prepareAudio(file);
   }
   if(!isVisualRichMessageMimeType(mimeType)) {

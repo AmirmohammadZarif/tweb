@@ -6,8 +6,10 @@ import {StarGiftsGrid} from '@components/stargifts/stargiftsGrid';
 import {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import createButtonMenuCheckboxFilters from '@components/buttonMenuCheckboxFilters';
 import {AnimationList} from '@helpers/solid/animationList';
+import Animated from '@helpers/solid/animations';
 import {ChipTab, ChipTabs} from '@components/chipTabs';
 import {I18nTsx} from '@helpers/solid/i18n';
+import I18n, {i18n} from '@lib/langPack';
 import classNames from '@helpers/string/classNames';
 import {StickerTsx} from '@components/wrappers/sticker';
 import {MyDocument} from '@appManagers/appDocsManager';
@@ -16,6 +18,9 @@ import {IconTsx} from '@components/iconTsx';
 import InputField from '@components/inputField';
 import confirmationPopup, {PopupConfirmationOptions} from '@components/confirmationPopup';
 import Button from '@components/buttonTsx';
+import Row from '@components/rowTsx';
+import CheckboxFieldTsx from '@components/checkboxFieldTsx';
+import {attachReorder, createReorderMode, REORDERABLE_CLASS_NAME, ReorderBarContent, SelectionPlate} from '@components/reorderMode';
 
 import styles from '@components/stargifts/profileList.module.scss';
 import {ALL_COLLECTIONS_ID, createProfileGiftsStore, StarGiftsProfileActions, StarGiftsProfileStore} from '@components/stargifts/profileStore';
@@ -25,11 +30,13 @@ import showChooseGiftPopup from '@components/popups/chooseGiftPopup';
 import {MyStarGift} from '@appManagers/appGiftsManager';
 import {copyTextToClipboard} from '@helpers/clipboard';
 import {toastNew} from '@components/toast';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 async function openCreateCollectionPopup({actions, peerId}: {
   actions: StarGiftsProfileActions
   peerId: PeerId
 }): Promise<void> {
+  const managers = bindManagersToSession(rootScope.managers);
   const buttonOptions: PopupConfirmationOptions['button'] = {
     langKey: 'Create'
   };
@@ -51,11 +58,7 @@ async function openCreateCollectionPopup({actions, peerId}: {
     return
   }
 
-  const collection = await rootScope.managers.apiManager.invokeApi('payments.createStarGiftCollection', {
-    title: inputField.value,
-    peer: await rootScope.managers.appPeersManager.getInputPeerById(peerId),
-    stargift: []
-  })
+  const collection = await managers.appGiftsManager.createCollection(peerId, inputField.value)
 
   actions.updateCollection(collection)
 }
@@ -65,6 +68,7 @@ async function openRenameCollectionPopup({actions, collection, peerId}: {
   collection: StarGiftCollection
   peerId: PeerId
 }): Promise<void> {
+  const managers = bindManagersToSession(rootScope.managers);
   const buttonOptions: PopupConfirmationOptions['button'] = {
     langKey: 'Edit'
   };
@@ -88,7 +92,7 @@ async function openRenameCollectionPopup({actions, collection, peerId}: {
 
   if(inputField.value === collection.title) return
 
-  const newCollection = await rootScope.managers.appGiftsManager.updateCollection({
+  const newCollection = await managers.appGiftsManager.updateCollection({
     peerId,
     collectionId: collection.collection_id,
     title: inputField.value
@@ -102,6 +106,7 @@ async function openAddGiftsPopup({actions, collectionId, peerId}: {
   collectionId: number
   peerId: PeerId
 }): Promise<void> {
+  const managers = bindManagersToSession(rootScope.managers);
   const result = await new Promise<{selected: MyStarGift[], deselected: MyStarGift[]} | null>((resolve) => {
     showChooseGiftPopup({
       peerId,
@@ -112,7 +117,7 @@ async function openAddGiftsPopup({actions, collectionId, peerId}: {
 
   if(!result) return
 
-  const collection = await rootScope.managers.appGiftsManager.updateCollection({
+  const collection = await managers.appGiftsManager.updateCollection({
     peerId,
     collectionId,
     add: result.selected.map((it) => it.input),
@@ -200,12 +205,26 @@ const ADD_COLLECTION_ID = -2
 export function StarGiftsProfileTab(props: {
   peerId: PeerId
   scrollParent?: HTMLElement
+  /** the profile's tab row, which the bar of the collections' reorder takes while it is on */
+  selectionMount?: HTMLElement
+  /** the reorder starts: a selection of another list that holds the tab row ends */
+  onReorderStart?: () => void
   onCountChange?: (count: number) => void
 }) {
   const [store, actions] = createProfileGiftsStore({
     peerId: props.peerId,
-    onCountChange: props.onCountChange
+    onCountChange: props.onCountChange,
+    onSaveFailed: () => toastNew({langPackKey: 'Error.AnError'})
   });
+
+  // * as the albums of the stories: each drop is saved as it lands, so leaving the mode has nothing left to save
+  const reorder = createReorderMode({onStart: props.onReorderStart});
+  const moveCollections = (ids: number[]) => actions.reorderCollections(ids)
+
+  const onNotifyChange = (enabled: boolean) => {
+    toastNew({langPackKey: enabled ? 'Gift2ChannelNotifyChecked' : 'Gift2ChannelNotifyNotChecked'})
+    actions.toggleChatNotifications(enabled)
+  }
 
   onMount(() => actions.loadNext())
 
@@ -222,7 +241,8 @@ export function StarGiftsProfileTab(props: {
   }
 
   const slideKeyframes = (_element: Element, removed: boolean): Keyframe[] => {
-    const dir = direction()
+    // * the next collection's chip is toward the inline end — to the left in a right-to-left layout
+    const dir = direction() * (I18n.getIsRTL() ? -1 : 1)
     const yOffset = scrollDiff ? ` translateY(${scrollDiff}px)` : ''
     if(removed) {
       // AnimationList reverses these for exit; Y offset compensates scroll change
@@ -267,48 +287,51 @@ export function StarGiftsProfileTab(props: {
 
   const collectionContent = createMemo(() => {
     store.chosenCollection
+    // * the preloader, the gifts and a notice of none take one another's place with a crossfade
     return untrack(() => (
-      <div class={styles.collectionContent}>
-        <Switch>
-          <Match when={store.loading && store.items.length === 0}>
-            <PreloaderTsx />
-          </Match>
-          <Match when={store.items.length === 0 && store.chosenCollection !== ALL_COLLECTIONS_ID && store.canManageGifts}>
-            <div class={/* @once */ styles.empty}>
-              <I18nTsx class={/* @once */ styles.emptyTitle} key="StarGiftCollectionsEmptyTitle" />
-              <I18nTsx class={/* @once */ styles.emptySubtitle} key="StarGiftCollectionsEmptySubtitle" />
-              <Button
-                class="btn-primary btn-color-primary btn-control"
-                text="StarGiftCollectionsAddGifts"
-                onClick={() => openAddGiftsPopup({
-                  actions,
-                  collectionId: store.chosenCollection,
-                  peerId: props.peerId
-                })}
+      <div class={classNames(styles.collectionContent, 'crossfade-block')}>
+        <Animated type="cross-fade" noItemClass itemClass="crossfade-block-item">
+          <Switch>
+            <Match when={store.loading && store.items.length === 0}>
+              <PreloaderTsx />
+            </Match>
+            <Match when={store.items.length === 0 && store.chosenCollection !== ALL_COLLECTIONS_ID && store.canManageGifts}>
+              <div class={/* @once */ styles.empty}>
+                <I18nTsx class={/* @once */ styles.emptyTitle} key="StarGiftCollectionsEmptyTitle" />
+                <I18nTsx class={/* @once */ styles.emptySubtitle} key="StarGiftCollectionsEmptySubtitle" />
+                <Button
+                  class="btn-primary btn-color-primary btn-control"
+                  text="StarGiftCollectionsAddGifts"
+                  onClick={() => openAddGiftsPopup({
+                    actions,
+                    collectionId: store.chosenCollection,
+                    peerId: props.peerId
+                  })}
+                />
+              </div>
+            </Match>
+            <Match when={store.items.length === 0}>
+              <div class={/* @once */ styles.empty}>
+                <I18nTsx class={/* @once */ styles.emptySubtitle} key="StarGiftCollectionsEmptyOther" />
+              </div>
+            </Match>
+            <Match when={true}>
+              <StarGiftsGrid
+                class={/* @once */ styles.grid}
+                items={unwrap(store.items)}
+                view='profile'
+                profilePeerId={props.peerId}
+                canManageGifts={store.canManageGifts}
+                profileCollections={store.collections ? unwrap(store.collections) : undefined}
+                scrollParent={props.scrollParent}
+                autoplay={false}
+                onClick={(item) => {
+                  showStarGiftInfoPopup({gift: item});
+                }}
               />
-            </div>
-          </Match>
-          <Match when={store.items.length === 0}>
-            <div class={/* @once */ styles.empty}>
-              <I18nTsx class={/* @once */ styles.emptySubtitle} key="StarGiftCollectionsEmptyOther" />
-            </div>
-          </Match>
-          <Match when={true}>
-            <StarGiftsGrid
-              class={/* @once */ styles.grid}
-              items={unwrap(store.items)}
-              view='profile'
-              profilePeerId={props.peerId}
-              canManageGifts={store.canManageGifts}
-              profileCollections={store.collections ? unwrap(store.collections) : undefined}
-              scrollParent={props.scrollParent}
-              autoplay={false}
-              onClick={(item) => {
-                showStarGiftInfoPopup({gift: item});
-              }}
-            />
-          </Match>
-        </Switch>
+            </Match>
+          </Switch>
+        </Animated>
       </div>
     ))
   })
@@ -327,9 +350,18 @@ export function StarGiftsProfileTab(props: {
             }
             setCollection(Number(id))
           }}
+          scrollableRef={(list) => attachReorder({
+            list,
+            axis: 'x',
+            scrollable: {container: list},
+            active: reorder.active,
+            key: 'value',
+            onMove: moveCollections
+          })}
           contextMenuButtons={(id_) => {
             const id = Number(id_)
-            if(id === ALL_COLLECTIONS_ID || id === ADD_COLLECTION_ID) return []
+            // * a long press is what picks a chip up while they are being rearranged
+            if(id === ALL_COLLECTIONS_ID || id === ADD_COLLECTION_ID || reorder.active()) return []
 
 
             const buttons: ButtonMenuItemOptionsVerifiable[] = [
@@ -365,10 +397,17 @@ export function StarGiftsProfileTab(props: {
                   }
                 },
                 {
+                  icon: 'menu',
+                  text: 'Gift2Reorder',
+                  verify: () => store.collections.length > 1,
+                  onClick: () => reorder.start()
+                },
+                {
                   icon: 'delete',
                   text: 'Delete',
                   danger: true,
                   onClick: async() => {
+                    const managers = bindManagersToSession(rootScope.managers);
                     const collection = store.collections.find((it) => it.collection_id === id)
                     if(!collection) return
                     await confirmationPopup({
@@ -380,10 +419,7 @@ export function StarGiftsProfileTab(props: {
                         isDanger: true
                       }
                     })
-                    rootScope.managers.apiManager.invokeApi('payments.deleteStarGiftCollection', {
-                      collection_id: id,
-                      peer: await rootScope.managers.appPeersManager.getInputPeerById(props.peerId)
-                    })
+                    managers.appGiftsManager.deleteCollection(props.peerId, id)
                     actions.deleteCollection(id)
                   }
                 }
@@ -400,7 +436,10 @@ export function StarGiftsProfileTab(props: {
           </ChipTab>
           <For each={store.collections}>
             {(collection) => (
-              <ChipTab value={collection.collection_id.toString()}>
+              <ChipTab
+                class={classNames('gift-collection-chip', reorder.active() && REORDERABLE_CLASS_NAME)}
+                value={collection.collection_id.toString()}
+              >
                 {collection.icon && (
                   <StickerTsx
                     sticker={unwrap(collection.icon) as MyDocument}
@@ -431,8 +470,28 @@ export function StarGiftsProfileTab(props: {
           {collectionContent()}
         </AnimationList>
       </div>
+
+      {/* the server says it only to who can manage a channel's gifts; pinned to the bottom, as the other apps keep it */}
+      <Show when={store.chatNotificationsEnabled !== undefined}>
+        <div class={/* @once */ styles.notify}>
+          <Row>
+            <Row.CheckboxField>
+              <CheckboxFieldTsx checked={store.chatNotificationsEnabled} onChange={onNotifyChange} />
+            </Row.CheckboxField>
+            <Row.Title>{i18n('Gift2ChannelNotify')}</Row.Title>
+          </Row>
+        </div>
+      </Show>
+
+      {/* only while it is on: the tab row it takes is shared with the other lists' bars */}
+      <Show when={reorder.active()}>
+        <SelectionPlate shown={reorder.active} mount={props.selectionMount} giveWay={reorder.stop}>
+          <ReorderBarContent titleKey="Gift2Reorder" onDone={reorder.stop} />
+        </SelectionPlate>
+      </Show>
     </div>
   );
 
-  return {render, store, actions, setCollection};
+  // * `stopReorder`: the reorder is of this list, it ends as another is shown
+  return {render, store, actions, setCollection, stopReorder: reorder.stop};
 }

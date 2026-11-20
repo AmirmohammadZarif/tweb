@@ -25,6 +25,7 @@ import {
 import '@helpers/peerIdPolyfill';
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 import SearchIndex from '@lib/searchIndex';
+import DialogsStorage from '@lib/storages/dialogs';
 import type {Dialog} from '@appManagers/appMessagesManager';
 import hasRights from '@appManagers/utils/chats/hasRights';
 import deferred from './helpers/deferred';
@@ -458,13 +459,15 @@ function createHarness(options: {
     appNotificationsManager: {
       // the real predicate — the Community row's mute state is derived from it
       isMuted: AppNotificationsManager.prototype.isMuted,
-      isPeerLocalMuted: vi.fn(() => false)
+      isPeerLocalMuted: vi.fn(() => false),
+      getSettingsClock: () => 0
     },
     appStateManager: {getState, pushToState},
     dialogsStorage: {
       getDialogOnly,
       getPinnedOrders: (folderId: number) => pinnedOrders[folderId] ||= [],
       savePinnedOrders,
+      togglePinInOrder: DialogsStorage.prototype.togglePinInOrder,
       getForumUnreadCount: vi.fn(),
       getDialogActivityDate: (dialog: Dialog) => {
         const message = (manager as any).appMessagesManager.getMessageByPeer(

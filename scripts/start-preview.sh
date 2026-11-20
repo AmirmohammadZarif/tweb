@@ -94,10 +94,16 @@
 #                 test DCs is a master seed with "isTest": 1 in it
 #                 (TWEB_MASTER_SEED=<it> ... --id <another>): it is minted there,
 #                 and its preview boots in test mode with no ?test=1 needed.
-#   --port        port for a new preview. Default: first free port from 9001
-#                 upward. With --detach a preview of this checkout running on
-#                 another port is still handed out (the script says so); a
-#                 foreground run fails instead.
+#                 TWEB_SECOND_SEED=<master seed of another account> signs that
+#                 account in as the preview's SECOND account too (minted once
+#                 into account-2/<id>.json) — for multi-account work.
+#   --port        port for a new preview. Default: 9001 for the main checkout's
+#                 own preview (its default id) — the port is kept for it, so a
+#                 fixed address can point at it — and the first free port from
+#                 9002 upward for any other. Only that preview may ask for 9001.
+#                 With --detach a preview of this checkout running on another
+#                 port is still handed out (the script says so); a foreground
+#                 run fails instead.
 #   --remint      discard the cached auth for this id and mint a fresh one.
 #   --no-worker   run MTProto + crypto in the main thread (debug only). Sets
 #                 Modes.noWorker at build time so breakpoints span the full
@@ -179,10 +185,21 @@ ID="$(sanitize "$ID")"
 # TWEB_MASTER_SEED may be: unset (default seed.json), an absolute path, or a
 # bare filename which we resolve against the main worktree's tmp/.
 MAIN="$(cd "$(dirname "$(git rev-parse --git-common-dir)")" && pwd -P)"
+# The main checkout's own preview — its default id — always gets this port, and no other preview
+# takes it: one address that always shows master.
+MAIN_PORT=9001
+if [ "$REPO" = "$MAIN" ] && [ "$ID" = "$(sanitize "$(basename "$MAIN")")" ]; then IS_MAIN_PREVIEW=1; else IS_MAIN_PREVIEW=0; fi
 MASTER_SEED="${TWEB_MASTER_SEED:-seed.json}"
 case "$MASTER_SEED" in
   /*) ;;  # already absolute — leave as-is
   *) MASTER_SEED="$MAIN/tmp/$MASTER_SEED" ;;
+esac
+# TWEB_SECOND_SEED: a master seed of ANOTHER account, signed in as the second
+# account of the same preview (slot 2) — for multi-account work. Same forms.
+SECOND_SEED="${TWEB_SECOND_SEED:-}"
+case "$SECOND_SEED" in
+  ''|/*) ;;
+  *) SECOND_SEED="$MAIN/tmp/$SECOND_SEED" ;;
 esac
 
 # --- the registry -------------------------------------------------------------
@@ -531,6 +548,8 @@ fi
 
 LOG_FILE=""
 SEED="$REPO/tmp/preview-sessions/$ID.json"
+# * in a folder of its own: an id may end in -2 and name another preview's own seed
+SEED_2="$REPO/tmp/preview-sessions/account-2/$ID.json"
 
 if [ "$SERVE" = 1 ]; then
   [ -n "$PORT" ] || die "--serve needs --port"
@@ -588,6 +607,9 @@ else
   done
 
   if [ -n "$PORT" ]; then
+    if [ "$PORT" = "$MAIN_PORT" ] && [ "$IS_MAIN_PREVIEW" = 0 ]; then
+      die "port $MAIN_PORT is kept for the main checkout's own preview — pick another port, or none"
+    fi
     if [ -d "$REG/$PORT" ]; then
       say "port $PORT is taken by another preview:" >&2
       describe "$REG/$PORT" | sed 's/^/[start-preview]   /' >&2
@@ -595,10 +617,23 @@ else
     fi
     if port_busy "$PORT"; then die "port $PORT is taken by something that is not a preview"; fi
   else
-    # pick the first free port from 9001 upward
-    for p in $(seq 9001 9099); do
-      [ -d "$REG/$p" ] || port_busy "$p" || { PORT="$p"; break; }
-    done
+    if [ "$IS_MAIN_PREVIEW" = 1 ]; then
+      if [ -d "$REG/$MAIN_PORT" ]; then
+        say "warning: :$MAIN_PORT, kept for this preview, is taken by another one — using the next free port:" >&2
+        describe "$REG/$MAIN_PORT" | sed 's/^/[start-preview]   /' >&2
+        say "to get :$MAIN_PORT back, stop that one and this one, then start this again" >&2
+      elif port_busy "$MAIN_PORT"; then
+        say "warning: :$MAIN_PORT, kept for this preview, is taken by something that is not a preview — using the next free port" >&2
+      else
+        PORT=$MAIN_PORT
+      fi
+    fi
+    # any other preview: the first free port above the main checkout's
+    if [ -z "$PORT" ]; then
+      for p in $(seq $((MAIN_PORT + 1)) 9099); do
+        [ -d "$REG/$p" ] || port_busy "$p" || { PORT="$p"; break; }
+      done
+    fi
     [ -n "$PORT" ] || die "no free port in 9001-9099"
   fi
 
@@ -610,7 +645,7 @@ else
 
   if [ "$DETACH" = 1 ]; then
     : >"$LOG_FILE"
-    CMD=(env PATH="$PATH" TWEB_MASTER_SEED="$MASTER_SEED")
+    CMD=(env PATH="$PATH" TWEB_MASTER_SEED="$MASTER_SEED" TWEB_SECOND_SEED="$SECOND_SEED")
     [ -z "${TWEB_PREVIEW_REMOTE:-}" ] || CMD+=(TWEB_PREVIEW_REMOTE="$TWEB_PREVIEW_REMOTE")
     CMD+=(bash "$REPO/scripts/start-preview.sh" --serve --id "$ID" --port "$PORT")
     [ "$NO_WORKER" = 0 ] || CMD+=(--no-worker)
@@ -670,18 +705,19 @@ else
 fi
 
 # --- serve (a foreground run, or the background half of --detach) -------------
-mkdir -p "$REPO/tmp/preview-sessions"
-[ "$REMINT" = 1 ] && rm -f "$SEED"
+mkdir -p "$REPO/tmp/preview-sessions/account-2"
+[ "$REMINT" = 1 ] && rm -f "$SEED" "$SEED_2"
 
-# mint a fresh, independent authorization for this preview (once per id)
-if [ ! -f "$SEED" ]; then
-  if [ ! -f "$MASTER_SEED" ]; then
-    echo "[start-preview] master seed not found: $MASTER_SEED" >&2
+# mint a fresh, independent authorization (once per id): mint <master seed> <out>
+mint() {
+  [ ! -f "$2" ] || return 0
+  if [ ! -f "$1" ]; then
+    echo "[start-preview] master seed not found: $1" >&2
     echo "[start-preview] set TWEB_MASTER_SEED or place tmp/seed.json in the main repo" >&2
     exit 1
   fi
   MINT_LOCK="$MAIN/tmp/.preview-mint.lock"
-  echo "[start-preview] minting a fresh authorization for id='$ID'..."
+  echo "[start-preview] minting a fresh authorization: $(basename "$2")..."
   for i in $(seq 1 180); do
     if mkdir "$MINT_LOCK" 2>/dev/null; then MINT_LOCKED=1; break; fi
     if [ "$i" = 180 ]; then echo "[start-preview] timed out waiting for mint lock" >&2; exit 1; fi
@@ -691,12 +727,14 @@ if [ ! -f "$SEED" ]; then
   # test passed; the real success signal is whether the seed file was written.
   # `verify-deps-before-run` off for the same reason as the vite run below: in a worktree
   # node_modules is a symlink and pnpm's pre-run check aborts on it without a TTY.
-  TG_API_TEST=1 TG_API_PROD_DC=1 TG_API_SEED="$MASTER_SEED" PREVIEW_SEED_OUT="$SEED" \
+  TG_API_TEST=1 TG_API_PROD_DC=1 TG_API_SEED="$1" PREVIEW_SEED_OUT="$2" \
     pnpm --config.verify-deps-before-run=false test --run src/tests/api/previewAuth || true
   rmdir "$MINT_LOCK" 2>/dev/null || true
   MINT_LOCKED=0
-  if [ ! -f "$SEED" ]; then echo "[start-preview] mint failed — $SEED not produced" >&2; exit 1; fi
-fi
+  if [ ! -f "$2" ]; then echo "[start-preview] mint failed — $2 not produced" >&2; exit 1; fi
+}
+mint "$MASTER_SEED" "$SEED"
+[ -z "$SECOND_SEED" ] || mint "$SECOND_SEED" "$SEED_2"
 
 if [ "$BUNDLED" = 1 ]; then MODE_TEXT="dev server, full bundle mode";
 elif [ "$HMR" = 1 ]; then MODE_TEXT="dev server + static for remotes";
@@ -713,7 +751,7 @@ echo "[start-preview] preview: http://localhost:$PORT"
 # that dialled the IPv4 literal — a proxy in front of it, for one. Keep the flag
 # and a preview answers whichever form the caller uses, by name or by literal.
 # Still loopback: not exposed to the LAN.
-VITE=(env PREVIEW_SEED="$SEED" TWEB_PREVIEW=1 TWEB_NO_WORKER="$NO_WORKER"
+VITE=(env PREVIEW_SEED="$SEED" PREVIEW_SEED_2="${SECOND_SEED:+$SEED_2}" TWEB_PREVIEW=1 TWEB_NO_WORKER="$NO_WORKER"
       pnpm --config.verify-deps-before-run=false exec vite --config vite.preview.config.ts)
 
 if [ "$BUNDLED" = 1 ]; then
@@ -765,8 +803,10 @@ fi
 # as Vite's publicDir, and `node server.js --dist` layers it under dist/ — a bare
 # `vite preview` would serve neither, and the app would boot without its 38 MB of
 # runtime assets (chat pattern, fonts, tgs, emoji). Symlink, don't copy: per-id
-# copies of the same 38 MB add up, and sirv resolves through the link.
+# copies of the same 38 MB add up, and sirv resolves through the link. Instant View's
+# HTML embeds load public/embed.html (components/telegramWebView.ts), which no build emits.
 ln -sfn "$REPO/public/assets" "$OUT/assets"
+ln -sfn "$REPO/public/embed.html" "$OUT/embed.html"
 
 # `vite preview` is a plain static server: no /@vite/client, no websocket, so a
 # backgrounded mobile tab has nothing to lose and nothing to reload for.

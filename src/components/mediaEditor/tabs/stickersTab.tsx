@@ -20,6 +20,9 @@ import {delay} from '@components/mediaEditor/utils';
 import {TabContentContext} from '@components/mediaEditor/tabs/tabContent';
 import {getStickerSetInputById} from '@lib/appManagers/utils/stickers/getStickerSetInput';
 import A11yButton from '@components/a11yButton';
+import smoothScrollBehavior from '@helpers/dom/smoothScrollBehavior';
+import createStickersSearch from '@components/emoticonsDropdown/stickersSearch';
+import Modes from '@config/modes';
 
 export default function StickersTab() {
   const {wrapStickerSetThumb, EmoticonsSearch} = useHotReloadGuard();
@@ -60,7 +63,7 @@ export default function StickersTab() {
     setActiveSet(String(id));
     setScrolling(true);
     container()?.querySelector(`[data-set-id="${id}"]`)?.scrollIntoView({
-      behavior: 'smooth',
+      behavior: smoothScrollBehavior(),
       block: 'start'
     });
     await delay(1000);
@@ -188,20 +191,25 @@ export default function StickersTab() {
     let thumbsListScrollable: HTMLDivElement;
 
     onMount(() => {
-      thumbsListScrollable.ownerDocument.querySelector('.media-editor__tabs')?.append(thumbsListScrollable);
+      // * the tabs of this editor, from the tab content it is in: the strip is in no document yet (a template's clone
+      // * belongs to the template's own), so its ownerDocument found nothing and the strip never showed
+      container().closest('.media-editor__toolbar')?.querySelector('.media-editor__tabs')?.append(thumbsListScrollable);
       new ScrollableX(thumbsListScrollable);
     });
     onCleanup(() => {
       thumbsListScrollable.remove();
     });
 
-    const visible = () => stickerSets() && !filteredStickers();
+    // * the strip is outside the panel, which its tab's leaving does not hide: it goes with the tab at once
+    const visible = () => editorState.currentTab === 'stickers' && stickerSets() && !filteredStickers();
     <div
       class="media-editor__stickers-thumb-list-scrollable"
       classList={{
         'media-editor__stickers-thumb-list-scrollable--hidden': !visible(),
         'media-editor__stickers-thumb-list-scrollable--has-scroll': scrollAmount() > 8
       }}
+      inert={Modes.a11y && !visible()}
+      aria-hidden={!visible()}
       ref={thumbsListScrollable}
     >
       <div
@@ -260,29 +268,45 @@ export default function StickersTab() {
     }
   });
 
-  createEffect(async() => {
-    if(search()) {
-      setFilteredStickers(await managers.appStickersManager.searchStickers(search()));
+  let filteredEnd: HTMLDivElement;
+  createEffect(() => {
+    const query = search();
+    const g = !query && group();
+    if(!query && !g) {
+      setFilteredStickers();
       return;
     }
-    if(group()) {
-      const g = group();
-      if(g._ === 'emojiGroupPremium') {
-        setFilteredStickers(await managers.appStickersManager.getPremiumStickers());
-        return;
-      }
-      setFilteredStickers(
-        await managers.appStickersManager.getStickersByEmoticon({
+
+    // * an answer for a query or a group already left behind must not land
+    let active = true;
+    onCleanup(() => active = false);
+
+    if(g) {
+      const promise = g._ === 'emojiGroupPremium' ?
+        managers.appStickersManager.getPremiumStickers() :
+        managers.appStickersManager.getStickersByEmoticon({
           emoticon: g.emoticons,
           includeServerStickers: true
-        })
-      );
-
+        });
+      promise.then((stickers) => active && setFilteredStickers(stickers));
       return;
     }
-    if(!group() && !search()) {
-      setFilteredStickers();
-    }
+
+    // * the user's own stickers first, then the server's, page by page as the grid is scrolled on
+    const stickersSearch = createStickersSearch(managers, query);
+    onCleanup(stickersSearch.destroy);
+    stickersSearch.local().then(stickersSearch.first).then((stickers) => {
+      if(!active) {
+        return;
+      }
+
+      setFilteredStickers(stickers);
+      stickersSearch.paginate(filteredEnd, container(), (more) => {
+        if(active) {
+          setFilteredStickers((stickers) => [...stickers, ...more]);
+        }
+      });
+    });
   });
 
   return (
@@ -323,6 +347,7 @@ export default function StickersTab() {
         <div class="media-editor__stickers-grid">
           <For each={filteredStickers()}>{(doc) => <Sticker doc={doc} />}</For>
         </div>
+        <div ref={filteredEnd} />
       </Show>
 
       <Show when={stickerSets() && !filteredStickers()}>

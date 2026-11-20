@@ -88,6 +88,8 @@ export default function showCallPopup(instance: AnyCallInstance, options: {
    */
   const callInstance = inviteInstance ? undefined : instance as CallInstance;
   const peerId = instance.interlocutorUserId.toPeerId();
+  // * the call's: the tab may switch to another account while the panel is up
+  const {accountNumber} = instance;
 
   const [show, setShow] = createSignal(true);
   const [noVideo, setNoVideo] = createSignal(true);
@@ -108,11 +110,11 @@ export default function showCallPopup(instance: AnyCallInstance, options: {
   let movablePanel: MovablePanel;
   let controlsHover: ControlsHover;
 
-  // One renderer per gradient state. All three drift continuously; only the
-  // canvas matching `gradientState` is opaque, the others sit at opacity 0
-  // and crossfade in/out on state change. Pre-warming all of them means the
-  // newly-revealed canvas already has a live, moving gradient — no "static
-  // until first tick" pop during the fade.
+  // One renderer per gradient state. Only the canvas matching `gradientState`
+  // is opaque and drifts; the others sit at opacity 0, holding the picture they
+  // were drawn with, and crossfade in/out on state change. Pre-warming all of
+  // them means the newly-revealed canvas already has a gradient, which starts
+  // moving as its fade starts — no "static until first tick" pop.
   let gradientRenderers: Record<GradientStateKey, ChatBackgroundGradientRenderer>;
   let gradientCanvases: Record<GradientStateKey, HTMLCanvasElement>;
   let gradientCancels: Partial<Record<GradientStateKey, () => void>> = {};
@@ -137,9 +139,13 @@ export default function showCallPopup(instance: AnyCallInstance, options: {
   // motion. The renderer computes `transitionValue = 2v - v²`; setting
   // `v = 1 - sqrt(1 - t)` makes `transitionValue ≡ t`, i.e. constant tail
   // velocity, i.e. constant-speed drift.
+  //
+  // Only the canvas shown drifts: a faded-out one keeps the picture it stood at, and starts again as
+  // it is shown - three loops for one visible backdrop cost two full redraws of nothing every frame
+  // for the whole call.
   const tickGradient = (state: GradientStateKey) => {
     const renderer = gradientRenderers?.[state];
-    if(!renderer) return;
+    if(!renderer || gradientCancels[state]) return;
     let progress = 0;
     gradientCancels[state] = animateValue(0, 1, 2000, (t) => {
       progress = 1 - Math.sqrt(1 - t);
@@ -147,6 +153,7 @@ export default function showCallPopup(instance: AnyCallInstance, options: {
       easing: (p) => p,
       onEnd: () => {
         gradientCancels[state] = undefined;
+        if(gradientCanvases?.[state]?.classList.contains('is-hidden')) return;
         tickGradient(state);
       }
     });
@@ -196,6 +203,7 @@ export default function showCallPopup(instance: AnyCallInstance, options: {
     // and the canvas snaps to opacity 1 with no fade.
     void nextCanvas.offsetWidth;
     nextCanvas.classList.remove('is-hidden');
+    tickGradient(next);
 
     // Cancel any pending hide from a prior transition — the canvas it was
     // meant to hide may now be the active one.
@@ -210,6 +218,8 @@ export default function showCallPopup(instance: AnyCallInstance, options: {
       // Skip if the state has flipped back to `prev` since we scheduled
       // (i.e. prev is now the active canvas).
       if(gradientState === prev) return;
+      // * its drift goes on to the end of the move it is in (cut short, the renderer's own loop would
+      // * wait for the rest of it for good), and no other starts (tickGradient)
       prevCanvas.classList.add('is-hidden');
     }, FADE_MS + 50);
   };
@@ -303,12 +313,14 @@ export default function showCallPopup(instance: AnyCallInstance, options: {
       middleware,
       isBig: true,
       peerId,
-      size: 'full'
+      size: 'full',
+      accountNumber
     });
     avatarContainer.append(node);
 
     const title = new PeerTitle({
-      peerId
+      peerId,
+      accountNumber
     }).element;
 
     title.classList.add(className + '-title');
@@ -331,6 +343,8 @@ export default function showCallPopup(instance: AnyCallInstance, options: {
 
     emojisSubtitle = document.createElement('div');
     emojisSubtitle.classList.add(className + '-emojis');
+    // The key is a hash: both sides compare it in the same order, whatever their languages.
+    emojisSubtitle.dir = 'ltr';
 
     // iOS-style gradient backdrop. Uses the same renderer as chat backgrounds
     // (Telegram "swirl" gradient): 50×50 ImageData blended in JS, stretched
@@ -353,7 +367,9 @@ export default function showCallPopup(instance: AnyCallInstance, options: {
       }
       gradientCanvases[key] = created.canvas;
       gradientRenderers[key] = created.gradientRenderer;
-      tickGradient(key);
+      if(key === gradientState) {
+        tickGradient(key);
+      }
     }
 
     /**
@@ -372,7 +388,8 @@ export default function showCallPopup(instance: AnyCallInstance, options: {
 
       const stackedAvatars = new StackedAvatars({
         avatarSize: 30,
-        middleware
+        middleware,
+        accountNumber
       });
       stackedAvatars.render(peerIds);
 
@@ -453,7 +470,7 @@ export default function showCallPopup(instance: AnyCallInstance, options: {
 
       weakNetworkNotice = createCallNotice({text: () => i18n('VoipWeakNetwork')});
 
-      const peerName = () => new PeerTitle({peerId, onlyFirstName: true, limitSymbols: 18}).element;
+      const peerName = () => new PeerTitle({peerId, onlyFirstName: true, limitSymbols: 18, accountNumber}).element;
 
       const mutedIcon = new GroupCallMicrophoneIconMini(false, true, 36);
       mutedIcon.setState(false, false);
@@ -810,6 +827,8 @@ export default function showCallPopup(instance: AnyCallInstance, options: {
   createPopup(() => (
     <PopupElement
       class={classNames('popup-call', IS_MOVABLE_PANEL && 'movable-element')}
+      managers={instance.managers}
+      keepOnAccountSwitch
       withoutOverlay
       closable
       show={show()}

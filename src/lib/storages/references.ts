@@ -8,6 +8,7 @@ import type {MyStickerSetInput} from '@lib/appManagers/utils/stickers/constants'
 export type ReferenceContext =
   ReferenceContext.referenceContextProfilePhoto |
   ReferenceContext.referenceContextMessage |
+  ReferenceContext.referenceContextScheduledMessage |
   ReferenceContext.referenceContextMessageRich |
   ReferenceContext.referenceContextMessageRichTranslation |
   ReferenceContext.referenceContextEmojiesSounds |
@@ -20,6 +21,7 @@ export type ReferenceContext =
   ReferenceContext.referenceContextPremiumPromo |
   ReferenceContext.referenceContextWebPage |
   ReferenceContext.referenceContextBotApp |
+  ReferenceContext.referenceContextBotPreview |
   ReferenceContext.referenceContextChatInvite |
   ReferenceContext.referenceContextEffects |
   ReferenceContext.referenceContextStarsTransaction |
@@ -29,7 +31,9 @@ export type ReferenceContext =
   ReferenceContext.referenceContextStickerSet |
   ReferenceContext.referenceContextAvailableEffects |
   ReferenceContext.referenceContextStickerSearch |
-  ReferenceContext.referenceContextSavedMusic;
+  ReferenceContext.referenceContextStickerSearchQuery |
+  ReferenceContext.referenceContextSavedMusic |
+  ReferenceContext.referenceContextDraft;
 
 export namespace ReferenceContext {
   export type referenceContextProfilePhoto = {
@@ -39,6 +43,13 @@ export namespace ReferenceContext {
 
   export type referenceContextMessage = {
     type: 'message',
+    peerId: PeerId,
+    messageId: number
+  };
+
+  /** A scheduled message has ids of its own, which `messages.getMessages` does not know */
+  export type referenceContextScheduledMessage = {
+    type: 'scheduledMessage',
     peerId: PeerId,
     messageId: number
   };
@@ -105,6 +116,12 @@ export namespace ReferenceContext {
     appName: string
   };
 
+  /** A bot's preview media, shown in its profile (`bots.getPreviewMedias`) */
+  export type referenceContextBotPreview = {
+    type: 'botPreview',
+    botId: BotId
+  };
+
   export type referenceContextChatInvite = {
     type: 'chatInvite',
     hash: string
@@ -146,10 +163,25 @@ export namespace ReferenceContext {
     emoticon: string
   };
 
+  /** A page of the server's sticker search for a query (messages.searchStickers) */
+  export type referenceContextStickerSearchQuery = {
+    type: 'stickerSearchQuery',
+    q: string,
+    offset: number,
+    langCodes: string[]
+  };
+
   export type referenceContextSavedMusic = {
     type: 'savedMusic',
     userId: UserId,
     docId: DocId
+  };
+
+  /** The media of a rich draft: a topic's, or a monoforum thread's, under `threadId` */
+  export type referenceContextDraft = {
+    type: 'draft',
+    peerId: PeerId,
+    threadId?: number
   };
 }
 
@@ -254,6 +286,9 @@ export class ReferencesStorage extends AppManager {
         // });
       }
 
+      case 'scheduledMessage':
+        return this.appMessagesManager.reloadScheduledMessage(context.peerId, context.messageId);
+
       case 'messageRich':
         return this.appMessagesManager.refreshRichMessage(
           context.peerId,
@@ -296,20 +331,24 @@ export class ReferencesStorage extends AppManager {
       case 'botApp':
         return this.appAttachMenuBotsManager.getBotApp(context.botId, context.appName);
 
+      case 'botPreview':
+        return this.appBotsManager.getPreviewMedias(context.botId, true);
+
       case 'chatInvite':
         return this.appChatInvitesManager.checkChatInvite(context.hash);
 
       case 'effects':
         return this.appReactionsManager.getAvailableEffects(true);
 
+      // * the lists themselves stay as they are: they may hold a change going back for a fresh reference
       case 'savedGifs':
-        return this.appGifsManager.getGifs(true);
+        return this.appGifsManager.refreshGifsReferences();
 
       case 'recentStickers':
-        return this.appStickersManager.getRecentStickers(true);
+        return this.appStickersManager.refreshStickersReferences('recent');
 
       case 'favedStickers':
-        return this.appStickersManager.getFavedStickers(true);
+        return this.appStickersManager.refreshStickersReferences('faved');
 
       case 'stickerSet':
         return this.appStickersManager.getStickerSet(context.input, {overwrite: true});
@@ -318,16 +357,24 @@ export class ReferencesStorage extends AppManager {
         return this.appReactionsManager.getAvailableEffects(true);
 
       case 'stickerSearch':
+        // * asked anew: the search kept for the emoji is the one that brought the reference
         return this.appStickersManager.getStickersByEmoticon({
           emoticon: context.emoticon,
           includeServerStickers: true,
-          includeOurStickers: false
+          includeOurStickers: false,
+          overwrite: true
         });
+
+      case 'stickerSearchQuery':
+        return this.appStickersManager.searchStickersOnServer(context.q, context.offset, true, context.langCodes);
 
       case 'savedMusic':
         // Ask for the exact document rather than re-reading page 0 — a track that sits deeper in
         // the playlist would never be covered by the first page.
         return this.appSavedMusicManager.getSavedMusicByIds(context.userId, [context.docId]);
+
+      case 'draft':
+        return this.appDraftsManager.refreshRichMessageMedia();
 
       default: {
         this.log.warn('not implemented context', context);

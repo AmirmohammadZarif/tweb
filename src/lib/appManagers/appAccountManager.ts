@@ -2,9 +2,13 @@ import App from '@config/app';
 import ctx from '@environment/ctx';
 import longFromBytes from '@helpers/long/longFromBytes';
 import tsNow from '@helpers/tsNow';
-import {AccountAuthorizations, Authorization, EmailVerification, EmailVerifyPurpose, InputCheckPasswordSRP, InputPasskeyCredential, Update} from '@layer';
+import createSerializedQueue from '@helpers/createSerializedQueue';
+import noop from '@helpers/noop';
+import readBlobAsDataURL from '@helpers/blob/readBlobAsDataURL';
+import {AccountAuthorizations, AuthSignIn, AuthSignUp, Authorization, EmailVerification, EmailVerifyPurpose, InputCheckPasswordSRP, InputPasskeyCredential, Update, User, UserProfilePhoto} from '@layer';
 import {DcId, TrueDcId} from '@types';
 import AccountController from '@lib/accounts/accountController';
+import type {SessionUserFields} from '@lib/accounts/types';
 import {AppManager} from '@appManagers/manager';
 import {
   DEFAULT_AUTHORIZATION_AUTOCONFIRM_PERIOD,
@@ -88,6 +92,12 @@ export default class AppAccountManager extends AppManager {
   private authorizationAutoconfirmPeriod = DEFAULT_AUTHORIZATION_AUTOCONFIRM_PERIOD;
   private authorizationAutoconfirmPeriodVersion = 0;
   private authorizationExpirationTimeout: number;
+  // * who the account's slot says it is: the fields last written there, and the photo of its avatar
+  private sessionUserFields: SessionUserFields;
+  private sessionAvatarPhotoId: string;
+  // * the inactivity periods reach the server in the order they were picked, whichever screen picked them
+  private accountTTLSaves = createSerializedQueue();
+  private authorizationTTLSaves = createSerializedQueue();
 
   protected after() {
     const pendingUpdates: Update.updateNewAuthorization[] = [];
@@ -107,6 +117,16 @@ export default class AppAccountManager extends AppManager {
     this.rootScope.addEventListener('app_config', (appConfig) => {
       ++this.authorizationAutoconfirmPeriodVersion;
       this.setAuthorizationAutoconfirmPeriod(appConfig.authorization_autoconfirm_period, loaded);
+    });
+
+    // * Web A lists the accounts of the browser in its menu from their slots, K's accounts among them:
+    // * who the account is goes into its slot, and again whenever that changes (the sign-in itself
+    // * writes it once the slot holds the account, see ApiManager.setUserAuth)
+    this.rootScope.addEventListener('managers_ready', () => this.saveSessionUser(), {once: true});
+    this.rootScope.addEventListener('user_update', (userId) => {
+      if(userId === this.appUsersManager.getSelf()?.id) {
+        this.saveSessionUser();
+      }
     });
 
     // `user_auth` also fires on every start of an already signed-in account
@@ -293,6 +313,70 @@ export default class AppAccountManager extends AppManager {
     .sort((a, b) => b.date - a.date);
   }
 
+  /**
+   * Writes who the account is to its slot, the way Web A does it for its own accounts
+   */
+  public saveSessionUser() {
+    const user = this.appUsersManager.getSelf() as User.user;
+    if(!user) {
+      return;
+    }
+
+    const accountNumber = this.getAccountNumber();
+    const peerId = user.id.toPeerId(false);
+    const fields = AccountController.getSessionUserFields(user);
+    // * at first what the slot says is taken for the current: what is known here at the start may be older
+    // * than what Web A has written there since
+    const onlyMissing = !this.sessionUserFields;
+    if(onlyMissing || !AccountController.isSameSessionUserFields(fields, this.sessionUserFields)) {
+      this.sessionUserFields = fields;
+      AccountController.update(accountNumber, (data) => {
+        // * the slot is another account's by now, or nobody's
+        return data.userId === peerId ? AccountController.getSessionUserFieldsChanges(fields, data, onlyMissing) : undefined;
+      });
+    }
+
+    const photo = user.photo as UserProfilePhoto.userProfilePhoto;
+    const photoId = photo ? '' + photo.photo_id : '';
+    if(photoId !== this.sessionAvatarPhotoId) {
+      const onlyIfMissing = this.sessionAvatarPhotoId === undefined;
+      this.sessionAvatarPhotoId = photoId;
+      this.saveSessionAvatar(peerId, photo, onlyIfMissing);
+    }
+  }
+
+  private async saveSessionAvatar(peerId: PeerId, photo: UserProfilePhoto.userProfilePhoto, onlyIfMissing: boolean) {
+    const accountNumber = this.getAccountNumber();
+    const photoId = this.sessionAvatarPhotoId;
+    if(onlyIfMissing && (await AccountController.get(accountNumber)).avatarUri) {
+      return;
+    }
+
+    let avatarUri: string;
+    if(photo) {
+      try {
+        const blob = await this.appAvatarsManager.downloadAvatar(peerId, photo, 'photo_small');
+        avatarUri = await readBlobAsDataURL(blob);
+      } catch(err) {
+        // * tried again with the next change of the user
+        if(this.sessionAvatarPhotoId === photoId) {
+          this.sessionAvatarPhotoId = undefined;
+        }
+
+        return;
+      }
+    }
+
+    // * another photo came meanwhile, and its avatar is on its way
+    if(this.sessionAvatarPhotoId !== photoId) {
+      return;
+    }
+
+    AccountController.update(accountNumber, (data) => {
+      return data.userId === peerId && data.avatarUri !== avatarUri ? {avatarUri} : undefined;
+    });
+  }
+
   public getUnconfirmedAuthorizations() {
     if(this.isCurrentAuthorizationFresh()) return [];
 
@@ -330,9 +414,9 @@ export default class AppAccountManager extends AppManager {
         from_dc_id: fromDcId,
         from_auth_key_id: longFromBytes(fromAuthKey.id)
       } : {})
-    }, {ignoreErrors: true}).then((authorization) => {
+    }, {ignoreErrors: true}).then(async(authorization) => {
       if(authorization._ === 'auth.authorization') {
-        this.apiManager.setUser(authorization.user);
+        await this.apiManager.setUser(authorization.user);
       }
 
       return authorization;
@@ -372,6 +456,68 @@ export default class AppAccountManager extends AppManager {
     }, {dcId, ignoreErrors: true}).catch((err) => {
       this.log.error('web token cancellation error:', err);
     });
+  }
+
+  // * the phone sign-in: what the cards ask the server, without the answer's handling — which card
+  // * comes next stays theirs
+
+  public sendCode(phoneNumber: string) {
+    return this.apiManager.invokeApi('auth.sendCode', {
+      phone_number: phoneNumber,
+      api_id: App.id,
+      api_hash: App.hash,
+      settings: {
+        _: 'codeSettings',
+        pFlags: {}
+      }
+    });
+  }
+
+  public resendCode(phoneNumber: string, phoneCodeHash: string) {
+    return this.apiManager.invokeApi('auth.resendCode', {
+      phone_number: phoneNumber,
+      phone_code_hash: phoneCodeHash
+    });
+  }
+
+  public resetLoginEmail(phoneNumber: string, phoneCodeHash: string) {
+    return this.apiManager.invokeApi('auth.resetLoginEmail', {
+      phone_number: phoneNumber,
+      phone_code_hash: phoneCodeHash
+    });
+  }
+
+  /**
+   * The code was sent to a number the user is leaving for another one, so the server may stop
+   * delivering it. Fire-and-forget like the other clients: the way back never waits on it, and a
+   * code the server already forgot is not worth reporting.
+   */
+  public cancelCode(phoneNumber: string, phoneCodeHash: string) {
+    this.apiManager.invokeApi('auth.cancelCode', {
+      phone_number: phoneNumber,
+      phone_code_hash: phoneCodeHash
+    }, {ignoreErrors: true}).catch(() => {});
+  }
+
+  public signIn(params: AuthSignIn) {
+    return this.apiManager.invokeApi('auth.signIn', params, {ignoreErrors: true});
+  }
+
+  public signUp(params: AuthSignUp) {
+    return this.apiManager.invokeApi('auth.signUp', params);
+  }
+
+  public exportLoginToken(exceptIds: UserId[]) {
+    return this.apiManager.invokeApi('auth.exportLoginToken', {
+      api_id: App.id,
+      api_hash: App.hash,
+      except_ids: exceptIds
+    }, {ignoreErrors: true});
+  }
+
+  /** The token of a QR login whose account lives on another DC, asked on that DC */
+  public importLoginToken(token: Uint8Array, dcId: DcId) {
+    return this.apiManager.invokeApi('auth.importLoginToken', {token}, {dcId, ignoreErrors: true});
   }
 
   public sendVerifyEmailCode(purpose: EmailVerifyPurpose, email: string) {
@@ -425,7 +571,34 @@ export default class AppAccountManager extends AppManager {
   // inactive for longer than `days`. The current value ships with
   // account.getAuthorizations as `authorization_ttl_days`.
   public setAuthorizationTTL(days: number) {
-    return this.apiManager.invokeApi('account.setAuthorizationTTL', {authorization_ttl_days: days});
+    return this.authorizationTTLSaves.enqueue(() => {
+      return this.apiManager.invokeApi('account.setAuthorizationTTL', {authorization_ttl_days: days});
+    });
+  }
+
+  /** The period the server holds, asked once every one on its way has been answered */
+  public getAuthorizationTTL() {
+    return this.authorizationTTLSaves.enqueue(async() => {
+      // * a list asked for before the last period was answered may still hold the one before it
+      await this.authorizationsPromise?.catch(noop);
+      return (await this.getAuthorizations()).authorization_ttl_days;
+    });
+  }
+
+  // account.getAccountTTL / account.setAccountTTL: the server deletes the
+  // account once it stays offline for longer than `days`. Asked once every
+  // period on its way has been answered.
+  public getAccountTTL() {
+    return this.accountTTLSaves.enqueue(() => this.apiManager.invokeApiSingleProcess({
+      method: 'account.getAccountTTL',
+      processResult: (ttl) => ttl.days
+    }));
+  }
+
+  public setAccountTTL(days: number) {
+    return this.accountTTLSaves.enqueue(() => {
+      return this.apiManager.invokeApi('account.setAccountTTL', {ttl: {_: 'accountDaysTTL', days}});
+    });
   }
 
   public resetAuthorization(hash: string | number) {

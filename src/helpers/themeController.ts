@@ -1,9 +1,10 @@
 import type {AppTheme, AppThemeSettings} from '@config/state';
 import type {AccentPreset} from '@config/themePresets';
-import type {BaseTheme, Theme, ThemeSettings} from '@layer';
-import {blendWallpaperForTinted, presetThemeId, presetToThemeSettings} from '@config/themePresets';
+import type {BaseTheme, Theme, ThemeSettings, WallPaper} from '@layer';
+import {blendWallpaperForTinted, getCloudThemeWallpaper, presetThemeId, presetToThemeSettings} from '@config/themePresets';
 import type {AppBackgroundTab} from '@components/sidebarLeft/tabs/background';
 import type {AppChatBackground} from '@components/chat/bubbles/chatBackground';
+import {applyOutgoingMessageGradient, getOutgoingMessageGradient, keepReadableOnOutgoingMessageGradient, MESSAGE_OUT_TINT} from '@helpers/outgoingMessageGradient';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import rootScope from '@lib/rootScope';
 import {changeColorAccent, ColorRgb, ensureTextContrast, getAccentColor, getAverageColor, getRgbColorFromTelegramColor, hexToRgb, hslaStringToHex, hslaStringToRgba, hslaToRgba, hsvToRgb, mixColors, relativeLuminance, rgbaToHexa, rgbaToHsla, rgbToHsv} from '@helpers/color';
@@ -14,6 +15,7 @@ import customProperties from '@helpers/dom/customProperties';
 import {TelegramWebViewTheme} from '@types';
 import windowSize from '@helpers/windowSize';
 import liteMode from '@helpers/liteMode';
+import {untrack} from 'solid-js';
 import {useAppSettings} from '@stores/appSettings';
 import {joinDeepPath} from '@helpers/object/setDeepProperty';
 import {logger} from '@lib/logger';
@@ -32,7 +34,8 @@ export type AppColorName = 'primary-color' | 'message-out-primary-color' |
   'secondary-text-color' | 'message-out-background-color' |
   'saved-color' | 'message-background-color' | 'green-color' |
   'background-color' | 'body-background-color' | 'border-color' |
-  'secondary-color' | 'link-color' | 'input-search-background-color';
+  'secondary-color' | 'link-color' | 'input-search-background-color' |
+  'reaction-paid-outside-background-color' | 'reaction-paid-outside-color' | 'reaction-paid-outside-chosen-background-color';
 type AppColor = {
   rgb?: boolean,
   light?: boolean,
@@ -52,6 +55,8 @@ const appColorMap: {[name in AppColorName]: AppColor} = {
     darkRgb: true
   },
   'message-out-primary-color': {
+    // * the tint, over a gradient of the bubbles (`--message-out-gradient-light-primary-color`)
+    light: true,
     lightFilled: true,
     rgb: true
   },
@@ -99,7 +104,18 @@ const appColorMap: {[name in AppColorName]: AppColor} = {
   'border-color': {},
   'secondary-color': {},
   'link-color': {},
-  'input-search-background-color': {}
+  'input-search-background-color': {},
+  // * a paid reaction on the wallpaper (iOS's freeform `reactionStars*` colours)
+  'reaction-paid-outside-background-color': {},
+  'reaction-paid-outside-color': {},
+  'reaction-paid-outside-chosen-background-color': {}
+};
+
+// * a paid reaction on the wallpaper in the day themes (iOS's freeform day colours)
+const PAID_REACTION_OUTSIDE_DAY_COLORS: {[name in AppColorName]?: string} = {
+  'reaction-paid-outside-background-color': '#FEF1D4',
+  'reaction-paid-outside-color': '#D3720A',
+  'reaction-paid-outside-chosen-background-color': '#FFBC2E'
 };
 
 const colorMap: {
@@ -123,7 +139,8 @@ const colorMap: {
     'border-color': '#dfe1e5',
     'secondary-color': '#c4c9cc',
     'link-color': '#502675',
-    'input-search-background-color': '#ffffff'
+    'input-search-background-color': '#ffffff',
+    ...PAID_REACTION_OUTSIDE_DAY_COLORS
   },
   night: {
     'primary-color': '#A979D2',
@@ -141,7 +158,10 @@ const colorMap: {
     'border-color': '#0f0f0f',
     'secondary-color': '#707579',
     'link-color': '#A979D2', // SCSS resolves to var(--primary-color)
-    'input-search-background-color': '#181818'
+    'input-search-background-color': '#181818',
+    'reaction-paid-outside-background-color': '#D3720A33',
+    'reaction-paid-outside-color': '#FFD738',
+    'reaction-paid-outside-chosen-background-color': '#D3720A'
   },
   tinted: {
     // base colors ported from Telegram-Android darkblue.attheme (Dark Blue / Tinted)
@@ -159,13 +179,15 @@ const colorMap: {
     'saved-color': '#3685FA',
     'green-color': '#61D36B',
     // background / body-bg ← windowBackgroundGray, border ← divider (alpha-stripped),
-    // input-search-bg ← chat_messagePanelBackground, link ← windowBackgroundWhiteLinkText
+    // input-search-bg ← chat_messagePanelBackground
     'background-color': '#151E27',
     'body-background-color': '#151E27',
     'border-color': '#0F151B',
     'secondary-color': '#7D8B99',
-    'link-color': '#5EABE1',
-    'input-search-background-color': '#212D3B'
+    'input-search-background-color': '#212D3B',
+    'reaction-paid-outside-background-color': '#FEF1D4',
+    'reaction-paid-outside-color': '#D3720A',
+    'reaction-paid-outside-chosen-background-color': '#D3720A'
   },
   light: {
     // base colors ported from Telegram-Android day.attheme (Android's "Day" / baseThemeDay)
@@ -184,8 +206,8 @@ const colorMap: {
     'body-background-color': '#FFFFFF',
     'border-color': '#DFE1E5',
     'secondary-color': '#C4C9CC',
-    'link-color': '#238AE3', // windowBackgroundWhiteBlueText
-    'input-search-background-color': '#FFFFFF'
+    'input-search-background-color': '#FFFFFF',
+    ...PAID_REACTION_OUTSIDE_DAY_COLORS
   }
 };
 
@@ -359,9 +381,10 @@ export class ThemeController {
 
   public setTheme(coordinates?: {x: number, y: number}) {
     const _log = log.bindPrefix('setTheme');
-    const fast = !('startViewTransition' in document) || !this.applied;
-    const animationsAvailable = liteMode.isAvailable('animations');
-    _log(`start, fast=${fast}, coordinates=${JSON.stringify(coordinates)}, animations=${animationsAvailable}`);
+    // off: the theme changes at once; reduced: it crossfades instead of spreading from the click
+    const animationLevel = liteMode.getAnimationLevel();
+    const fast = !('startViewTransition' in document) || !this.applied || !animationLevel;
+    _log(`start, fast=${fast}, coordinates=${JSON.stringify(coordinates)}, animationLevel=${animationLevel}`);
 
     if(fast) {
       const silent = !this.applied;
@@ -376,7 +399,7 @@ export class ThemeController {
       return;
     }
 
-    if(!animationsAvailable) {
+    if(animationLevel < 2) {
       coordinates = undefined;
     }
 
@@ -638,13 +661,9 @@ export class ThemeController {
   public applyAccentPreset(preset: AccentPreset) {
     const currentTheme = this.getTheme();
     const baseTheme = this.getBaseThemeForName(currentTheme.name);
-    const settings = presetToThemeSettings(preset, baseTheme);
     // iOS dayColorPresets have `wallpaper: nil` — those presets only swap accent + bubbles
-    // and keep the current wallpaper. Mirror that here: setBackgroundDocument requires a
-    // WallPaper, so fall back to the current AppTheme's wallpaper when the preset omits one.
-    if(!settings.wallpaper) {
-      settings.wallpaper = this.getThemeSettings(currentTheme)?.wallpaper;
-    }
+    // and keep the current wallpaper, which applyNewTheme does for any theme without one.
+    const settings = presetToThemeSettings(preset, baseTheme);
     const synthetic: Theme = {
       _: 'theme',
       id: presetThemeId(preset),
@@ -690,10 +709,12 @@ export class ThemeController {
     // (accent preset). Server cloud themes carry numeric/hash ids.
     const themeId = String(theme.id ?? '');
     const isCurated = themeId === '' || themeId.startsWith('preset:');
-    let effectiveWallpaper = themeSettings.wallpaper;
+    let effectiveWallpaper = getCloudThemeWallpaper(theme, themeSettings);
     if(themeName === 'tinted' && !isCurated && effectiveWallpaper) {
       effectiveWallpaper = blendWallpaperForTinted(effectiveWallpaper, themeSettings.accent_color);
     }
+    // setBackgroundDocument requires a WallPaper; the current one is already of this base
+    effectiveWallpaper ??= this.getThemeWallpaper(currentTheme);
 
     // Preserve every base entry from the cloud theme (mirrors iOS' `[TelegramThemeSettings]`).
     // Only the entry matching the current base gets the (optionally tinted-blended) wallpaper.
@@ -746,6 +767,18 @@ export class ThemeController {
     const baseTheme = this.getBaseThemeForName(themeName);
     return theme.settings.find((s) => s.base_theme._ === baseTheme) ??
       theme.settings.find((s) => s.base_theme._ === ((isNight ?? this.isNightThemeName(themeName)) ? 'baseThemeNight' : 'baseThemeClassic'));
+  }
+
+  // What the chat is drawn on under a theme. Cloud themes often give a base no wallpaper of its own
+  // (mostly baseThemeDay's): those keep the current one, or the factory one where a theme without
+  // one was saved as the current theme.
+  public getThemeWallpaper(theme: Theme | AppTheme): WallPaper {
+    const settings = this.getThemeSettings(theme);
+    // * an AppTheme keeps what was picked; a theme of a chat comes as the server gave it
+    const own = settings && ((theme as AppTheme).name ? settings.wallpaper : getCloudThemeWallpaper(theme as Theme, settings as ThemeSettings));
+    return own ??
+      this.getThemeSettings(this.getTheme())?.wallpaper ??
+      this.getThemeSettings(SETTINGS_INIT.themes.find((t) => t.name === this.getResolvedThemeName())).wallpaper;
   }
 
   // Persist a wallpaper pick (Chat Wallpaper tab grid click / upload) onto the *current*
@@ -853,6 +886,12 @@ export class ThemeController {
       darkenAlpha: 0.04
     });
 
+    // links are in the accent colour, whichever it is
+    applyAppColor({
+      name: 'link-color',
+      hex: newAccentHex
+    });
+
     applyAppColor({
       name: 'saved-color',
       hex: newAccentHex,
@@ -875,7 +914,19 @@ export class ThemeController {
       applyAppColor({name: 'secondary-text-color', hex: mainSecondaryTextColor!});
     }
 
-    if(!themeSettings.message_colors?.length) {
+    // * a theme that leaves the bubbles alone (a gift's, say) gets the app's own for this base —
+    // * not whatever the theme applied before it left on the element
+    const bubbleSettings = themeSettings.message_colors?.length ?
+      themeSettings :
+      untrack(() => this.getThemeSettings(this.getTheme(themeName)));
+    const messageColors = bubbleSettings?.message_colors;
+
+    // * increased contrast keeps the bubbles of the one colour it adjusts for the text
+    const outgoingTextColor = hexToRgb(baseColors['primary-text-color']);
+    const outgoingGradient = this.isHighContrast() ? undefined : getOutgoingMessageGradient(messageColors, !!bubbleSettings?.pFlags?.message_colors_animated, outgoingTextColor);
+    applyOutgoingMessageGradient(element, outgoingGradient);
+
+    if(!messageColors?.length) {
       return;
     }
 
@@ -887,13 +938,13 @@ export class ThemeController {
     const surfaceForMessage = tintedSurfaceRgb ?? hexToRgb(baseColors['surface-color']);
     const baseMessageOutBackgroundColor = mixColors(baseMessageColor, surfaceForMessage, messageLightenAlpha);
 
-    const firstColor = getRgbColorFromTelegramColor(themeSettings.message_colors[0]);
+    const firstColor = getRgbColorFromTelegramColor(messageColors[0]);
 
     let myMessagesAccent = firstColor;
-    if(themeSettings.message_colors.length > 1) {
+    if(messageColors.length > 1) {
       // const w = getAccentColor(hsvTemp1, baseMessageOutBackgroundColor, myMessagesAccent);
 
-      themeSettings.message_colors.slice(1).forEach((nextColor) => {
+      messageColors.slice(1).forEach((nextColor) => {
         myMessagesAccent = getAverageColor(myMessagesAccent, getRgbColorFromTelegramColor(nextColor));
       });
 
@@ -929,10 +980,14 @@ export class ThemeController {
       lightenAlpha: messageLightenAlpha
     });
 
+    const outgoingAccent = rgbaToHexa(accentColor2 ? hsvToRgb(...accentColor2) : myMessagesAccent);
     applyAppColor({
       name: 'message-out-primary-color',
-      hex: isNight ? '#ffffff' : rgbaToHexa(accentColor2 ? hsvToRgb(...accentColor2) : myMessagesAccent),
-      mixColor: newMessageOutBackgroundColor
+      // * the time, the ticks and the links of a bubble of a gradient are read on all of it
+      hex: isNight ? '#ffffff' : outgoingGradient ? keepReadableOnOutgoingMessageGradient(outgoingAccent, outgoingGradient) : outgoingAccent,
+      mixColor: newMessageOutBackgroundColor,
+      // * a reaction's tint, which the colour is read on over a gradient
+      lightenAlpha: MESSAGE_OUT_TINT
     });
 
     // if(accentColor2) {

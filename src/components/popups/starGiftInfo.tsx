@@ -3,17 +3,16 @@ import PopupElement, {createPopup, PopupContext} from './indexTsx';
 import {Peer, PaymentsUniqueStarGiftValueInfo, StarGift, StarGiftAttribute, StarGiftAttributeRarity} from '@layer';
 import {MyDocument} from '@appManagers/appDocsManager';
 import I18n, {i18n, LangPackKey} from '@lib/langPack';
-import {StarsStar} from '@components/popups/stars';
+import {StarsStar} from '@components/stars/starsAmount';
 import {PeerTitleTsx} from '@components/peerTitleTsx';
 import Button from '@components/buttonTsx';
 import {formatDate, formatFullSentTime} from '@helpers/date';
-import appImManager from '@lib/appImManager';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
 import {MyStarGift} from '@appManagers/appGiftsManager';
 import getPeerId from '@appManagers/utils/peers/getPeerId';
 import numberThousandSplitter from '@helpers/number/numberThousandSplitter';
 import showSendGiftPopup from '@components/popups/sendGift';
-import Table, {TableButton, TableButtonWithTooltip, TablePeer, TableRow} from '@components/table';
+import Table, {TableButton, TablePeer, TableRow} from '@components/table';
 import {NULL_PEER_ID, STARS_CURRENCY, TON_CURRENCY} from '@appManagers/constants';
 import rootScope from '@lib/rootScope';
 import {toastNew} from '@components/toast';
@@ -22,10 +21,8 @@ import {StarGiftBackdrop} from '@components/stargifts/stargiftBackdrop';
 import MediaHeader from '@components/mediaHeader';
 import {ButtonMenuToggleTsx} from '@components/buttonMenuToggleTsx';
 import {copyTextToClipboard} from '@helpers/clipboard';
-import {showSharingPicker2Popup} from '@components/popups/pickUser';
+import {showPickUser2Popup, showSharingPicker2Popup} from '@components/popups/pickUser';
 import {I18nTsx} from '@helpers/solid/i18n';
-import buttonKeyDown from '@helpers/solid/buttonKeyDown';
-import Modes from '@config/modes';
 import tsNow from '@helpers/tsNow';
 import {useAppState} from '@stores/appState';
 import transferStarGift from '@components/popups/transferStarGift';
@@ -60,55 +57,10 @@ import {ConfettiContainer, ConfettiRef} from '@components/confetti';
 import {PreloaderTsx} from '@components/putPreloader';
 import {showCreateStarGiftOfferPopup} from '@components/popups/createStarGiftOffer';
 import {getCanManagePeerGifts} from '@components/stargifts/canManageGifts';
-
-function AttributeTableButton(props: {rarity: StarGiftAttributeRarity}) {
-  if(props.rarity._ !== 'starGiftAttributeRarity') {
-    const map: Record<Exclude<StarGiftAttributeRarity['_'], 'starGiftAttributeRarity'>, {langKey: LangPackKey, color: string}> = {
-      'starGiftAttributeRarityUncommon': {langKey: 'StarGiftRarityUncommon', color: 'green'},
-      'starGiftAttributeRarityRare': {langKey: 'StarGiftRarityRare', color: 'blue'},
-      'starGiftAttributeRarityEpic': {langKey: 'StarGiftRarityEpic', color: 'violet'},
-      'starGiftAttributeRarityLegendary': {langKey: 'StarGiftRarityLegendary', color: 'gold'}
-    };
-
-    return (
-      <TableButtonWithTooltip
-        class={`rarity rarity-${map[props.rarity._].color} disable-hover`}
-      >
-        {i18n(map[props.rarity._].langKey)}
-      </TableButtonWithTooltip>
-    );
-  }
-
-  // * the server rounds a rarity below 0.1% down to zero
-  const percent = props.rarity.permille > 0 ? `${props.rarity.permille / 10}%` : '< 0.1%';
-  return (
-    <TableButtonWithTooltip
-      tooltipTextElement={i18n('StarGiftAttributeTooltip', [percent])}
-      tooltipClass="popup-star-gift-info-tooltip"
-    >
-      {percent}
-    </TableButtonWithTooltip>
-  );
-}
-
-export function AttributeValue(props: {name: string, rarity: StarGiftAttributeRarity, onClick?: () => void}) {
-  return (
-    <div class="popup-star-gift-info-attribute-value">
-      {props.onClick ? (
-        <span
-          class="popup-star-gift-info-attribute-clickable"
-          role="button"
-          tabindex={Modes.a11y ? 0 : undefined}
-          onClick={props.onClick}
-          onKeyDown={buttonKeyDown}
-        >
-          {props.name}
-        </span>
-      ) : props.name}
-      <AttributeTableButton rarity={props.rarity} />
-    </div>
-  )
-}
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
+import {GiftAttributeValue} from '@components/stargifts/giftAttributeValue';
+import toastError from '@components/toastError';
 
 const attributeValueKeyFrames = (element: Element, removed: boolean) => [
   {opacity: 0, transform: `translateY(${removed ? '-14px' : '14px'}) scaleY(0.5)`},
@@ -195,7 +147,7 @@ function AnimatedAttributeValue(props: {
         <Index each={items}>
           {(item, index) => (
             <Match when={index === position()}>
-              <AttributeValue
+              <GiftAttributeValue
                 name={item().name}
                 rarity={item().rarity}
                 onClick={props.onClick}
@@ -290,8 +242,11 @@ function UpgradeAnimation(props: {
 
     const containerWidth = modelsContainer.parentElement!.offsetWidth;
     const totalModelsWidth = MODELS_COUNT * MODEL_WIDTH + (MODELS_COUNT - 1) * MODEL_GAP;
-    const startOffset = (containerWidth - MODEL_WIDTH) / 2;
-    const endOffset = -(totalModelsWidth - containerWidth + startOffset);
+    // * the strip starts at the inline start and rolls toward it: rightward in a right-to-left layout
+    const reflect = I18n.getIsRTL() ? -1 : 1;
+    const startGap = (containerWidth - MODEL_WIDTH) / 2;
+    const startOffset = startGap * reflect;
+    const endOffset = -(totalModelsWidth - containerWidth + startGap) * reflect;
     const containerCenter = containerWidth / 2;
     const modelDivs = Array.from(modelsContainer.children) as HTMLDivElement[];
 
@@ -345,9 +300,10 @@ function UpgradeAnimation(props: {
       props.confetti.create({mode: 'poppers'});
     }, MODELS_DURATION - 750);
 
+    // * the colours follow the models: the gradient runs toward the inline end (see its style)
     setTimeout(() => backdropEl.animate([
-      {backgroundPosition: '0% 0%'},
-      {backgroundPosition: '100% 0%'}
+      {backgroundPosition: `${reflect > 0 ? 0 : 100}% 0%`},
+      {backgroundPosition: `${reflect > 0 ? 100 : 0}% 0%`}
     ], {
       duration: BACKDROPS_DURATION,
       easing: 'linear',
@@ -365,7 +321,7 @@ function UpgradeAnimation(props: {
         ref={backdropEl}
         class="popup-star-gift-info-upgrade-backdrops"
         style={{
-          'background': `linear-gradient(to right, ${gradientStopsStr})`,
+          'background': `linear-gradient(to ${I18n.getIsRTL() ? 'left' : 'right'}, ${gradientStopsStr})`,
           'background-size': `${totalSections * 100}% 100%`
         }}
       />
@@ -586,7 +542,7 @@ export default function showStarGiftInfoPopup(options: {
     })
 
     const openPeer = (peerId: PeerId) => {
-      appImManager.setInnerPeer({peerId})
+      hotReloadGuard.appImManager.setInnerPeer({peerId})
       onClickAway?.()
       context.hide()
     }
@@ -721,7 +677,7 @@ export default function showStarGiftInfoPopup(options: {
               started={upgradeAnimationStarted()}
             />
           ) : (
-            <AttributeValue
+            <GiftAttributeValue
               name={collectibleAttributes.model.name}
               rarity={collectibleAttributes.model.rarity}
               onClick={() => handleAttributeClick(collectibleAttributes.model)}
@@ -741,7 +697,7 @@ export default function showStarGiftInfoPopup(options: {
               started={upgradeAnimationStarted()}
             />
           ) : (
-            <AttributeValue
+            <GiftAttributeValue
               name={collectibleAttributes.backdrop.name}
               rarity={collectibleAttributes.backdrop.rarity}
               onClick={() => handleAttributeClick(collectibleAttributes.backdrop)}
@@ -761,7 +717,7 @@ export default function showStarGiftInfoPopup(options: {
               started={upgradeAnimationStarted()}
             />
           ) : (
-            <AttributeValue
+            <GiftAttributeValue
               name={collectibleAttributes.pattern.name}
               rarity={collectibleAttributes.pattern.rarity}
               onClick={() => handleAttributeClick(collectibleAttributes.pattern)}
@@ -781,7 +737,7 @@ export default function showStarGiftInfoPopup(options: {
           rows.push([
             'StarGiftValue',
             <>
-              ~{paymentsWrapCurrencyAmount(props.value.value, props.value.currency)}
+              <span dir="ltr">~{paymentsWrapCurrencyAmount(props.value.value, props.value.currency)}</span>
               <TableButton
                 text="StarGiftValueLearnMore"
                 onClick={() => {
@@ -850,13 +806,30 @@ export default function showStarGiftInfoPopup(options: {
             <TableButton
               text="StarGiftConvertButton"
               textArgs={[saved.convert_stars]}
-              onClick={() => {
-                rootScope.managers.appGiftsManager.convertGift(input)
-                .then(() => {
-                  context.hide()
-                }).catch(() => {
-                  toastNew({langPackKey: 'Error.AnError'})
-                })
+              onClick={async() => {
+                const managers = context.managers;
+                try {
+                  await confirmationPopup({
+                    managers,
+                    titleLangKey: 'StarGiftSellTitlePopup',
+                    descriptionLangKey: 'StarGiftConvertText',
+                    descriptionLangArgs: [saved.convert_stars],
+                    button: {
+                      langKey: 'StarGiftConvertButton',
+                      langArgs: [saved.convert_stars]
+                    }
+                  });
+                } catch(err) {
+                  return;
+                }
+
+                try {
+                  await managers.appGiftsManager.convertGift(input);
+                  context.hide();
+                  toastNew({langPackKey: 'StarGiftGotStars', langPackArguments: [+saved.convert_stars]});
+                } catch(err) {
+                  toastNew({langPackKey: 'Error.AnError'});
+                }
               }}
             />
           )}
@@ -926,12 +899,18 @@ export default function showStarGiftInfoPopup(options: {
                 icon="delete"
                 aria-label={I18n.format('Delete', true)}
                 onClick={async() => {
-                  const popup = await createPaymentPopup({
-                    inputInvoice: {
-                      _: 'inputInvoiceStarGiftDropOriginalDetails',
-                      stargift: input
-                    }
-                  });
+                  let popup: Awaited<ReturnType<typeof createPaymentPopup>>;
+                  try {
+                    popup = await createPaymentPopup({
+                      inputInvoice: {
+                        _: 'inputInvoiceStarGiftDropOriginalDetails',
+                        stargift: input
+                      }
+                    });
+                  } catch(err) {
+                    toastError(err as ApiError, 'drop original details form error');
+                    return;
+                  }
 
                   popup.addEventListener('finish', (result) => {
                     if(result === 'paid') {
@@ -952,12 +931,37 @@ export default function showStarGiftInfoPopup(options: {
     }
 
     const handleShare = () => {
+      const managers = bindManagersToSession(rootScope.managers);
       showSharingPicker2Popup().then(({peerId, threadId, monoforumThreadId}) => {
-        rootScope.managers.appMessagesManager.sendText({peerId, threadId, replyToMonoforumPeerId: monoforumThreadId, text: 'https://t.me/nft/' + (gift as StarGift.starGiftUnique).slug});
-        appImManager.setInnerPeer({peerId, threadId, monoforumThreadId});
+        managers.appMessagesManager.sendText({peerId, threadId, replyToMonoforumPeerId: monoforumThreadId, text: 'https://t.me/nft/' + (gift as StarGift.starGiftUnique).slug});
+        hotReloadGuard.appImManager.setInnerPeer({peerId, threadId, monoforumThreadId});
         context.hide();
       });
     }
+
+    // * as tdesktop does it: the chat is picked, the theme set there and the chat opened
+    const handleSetAsTheme = async() => {
+      let peerId: PeerId;
+      try {
+        peerId = await showPickUser2Popup({
+          peerType: ['dialogs', 'contacts'],
+          filterPeerTypeBy: ['isRegularUser', 'isBot'],
+          titleLangKey: 'SelectChat'
+        });
+      } catch(err) {
+        return;
+      }
+
+      context.managers.appThemesManager.setChatTheme(peerId, {
+        _: 'chatThemeUniqueGift',
+        gift,
+        theme_settings: []
+      }).catch(() => {
+        toastNew({langPackKey: 'Error.AnError'});
+      });
+      hotReloadGuard.appImManager.setInnerPeer({peerId});
+      context.hide();
+    };
 
     const handleSell = async(changePrice = false) => {
       if(!isEditableUniqueGift || !saved) return;
@@ -1078,53 +1082,63 @@ export default function showStarGiftInfoPopup(options: {
             aria-label={I18n.format('Close', true)}
             onClick={() => context.hide()}
           />
-          <ButtonMenuToggleTsx
-            class="popup-star-gift-info-menu-toggle"
-            icon="more"
-            buttonOptions={{ariaLabel: 'MultiAccount.More'}}
-            direction="bottom-left"
-            buttons={[
-              {
-                icon: saved?.pFlags.pinned_to_top ? 'unpin' : 'pin',
-                text: saved?.pFlags.pinned_to_top ? 'StarGiftUnpin' : 'StarGiftPin',
-                verify: () => isEditableUniqueGift,
-                onClick: () => {
-                  if(ownerPeerId === undefined) return;
-                  context.managers.appGiftsManager.togglePinnedGift(input, ownerPeerId).then(() => {
-                    context.hide();
-                  });
+          {gift._ === 'starGiftUnique' && (
+            <ButtonMenuToggleTsx
+              class="popup-star-gift-info-menu-toggle"
+              icon="more"
+              buttonOptions={{ariaLabel: 'MultiAccount.More'}}
+              direction="bottom-left"
+              buttons={[
+                {
+                  icon: saved?.pFlags.pinned_to_top ? 'unpin' : 'pin',
+                  text: saved?.pFlags.pinned_to_top ? 'StarGiftUnpin' : 'StarGiftPin',
+                  verify: () => isEditableUniqueGift,
+                  onClick: () => {
+                    if(ownerPeerId === undefined) return;
+                    context.managers.appGiftsManager.togglePinnedGift(input, ownerPeerId).then(() => {
+                      context.hide();
+                    });
+                  }
+                },
+                {
+                  icon: 'tag_alt',
+                  text: 'StarGiftChangePrice',
+                  verify: () => isEditableUniqueGift && isListed(),
+                  onClick: () => handleSell(true)
+                },
+                {
+                  icon: 'tag_alt',
+                  text: 'StarGiftOffer.CreateOffer',
+                  verify: () => gift.offer_min_stars !== undefined,
+                  onClick: () => showCreateStarGiftOfferPopup({
+                    gift: myGift,
+                    onFinish: (res) => res === 'created' && context.hide()
+                  })
+                },
+                {
+                  icon: 'image',
+                  text: 'GiftThemesSetIn',
+                  // * a gift of this account's, owned or hosted, as Android offers it
+                  verify: () => !!gift.pFlags.theme_available &&
+                    [gift.owner_id, gift.host_id].some((peer) => peer && getPeerId(peer) === rootScope.myId),
+                  onClick: handleSetAsTheme
+                },
+                {
+                  icon: 'forward',
+                  text: 'ShareFile',
+                  onClick: handleShare
+                },
+                {
+                  icon: 'link',
+                  text: 'CopyLink',
+                  onClick: () => {
+                    copyTextToClipboard('https://t.me/nft/' + gift.slug);
+                    toastNew({langPackKey: 'LinkCopied'});
+                  }
                 }
-              },
-              {
-                icon: 'tag_alt',
-                text: 'StarGiftChangePrice',
-                verify: () => isEditableUniqueGift && isListed(),
-                onClick: () => handleSell(true)
-              },
-              {
-                icon: 'tag_alt',
-                text: 'StarGiftOffer.CreateOffer',
-                verify: () => gift._ === 'starGiftUnique' && gift.offer_min_stars !== undefined,
-                onClick: () => showCreateStarGiftOfferPopup({
-                  gift: myGift,
-                  onFinish: (res) => res === 'created' && context.hide()
-                })
-              },
-              {
-                icon: 'forward',
-                text: 'ShareFile',
-                onClick: handleShare
-              },
-              {
-                icon: 'link',
-                text: 'CopyLink',
-                onClick: () => {
-                  copyTextToClipboard('https://t.me/nft/' + (gift as StarGift.starGiftUnique).slug);
-                  toastNew({langPackKey: 'LinkCopied'});
-                }
-              }
-            ]}
-          />
+              ]}
+            />
+          )}
 
           <MediaHeader.Title>
             {gift._ === 'starGift' ?
@@ -1186,7 +1200,7 @@ export default function showStarGiftInfoPopup(options: {
 
           {isEditableUniqueGift && (
             <div class="popup-star-gift-info-actions">
-              <Button
+              <Button.Tile
                 noRipple
                 class="popup-star-gift-info-action"
                 icon="gem_transfer_filled"
@@ -1197,26 +1211,22 @@ export default function showStarGiftInfoPopup(options: {
                   }
                 })}
               />
-              <Button
+              <Button.Tile
                 noRipple
                 class="popup-star-gift-info-action"
                 icon={isWearing() ? 'crownoff_filled' : 'crown_filled'}
                 text={isWearing() ? 'StarGiftWearStop' : 'StarGiftWear'}
-                onClick={async() => {
+                onClick={() => {
+                  const managers = bindManagersToSession(rootScope.managers);
                   if(ownerPeerId === undefined) return;
                   if(isWearing()) {
                     if(ownerPeerId === rootScope.myId) {
-                      rootScope.managers.appUsersManager.updateEmojiStatus({_: 'emojiStatusEmpty'});
+                      managers.appUsersManager.updateEmojiStatus({_: 'emojiStatusEmpty'});
                     } else {
-                      rootScope.managers.apiManager.invokeApiSingleProcess({
-                        method: 'channels.updateEmojiStatus',
-                        params: {
-                          channel: await rootScope.managers.appChatsManager.getChannelInput(ownerPeerId.toChatId()),
-                          emoji_status: {_: 'emojiStatusEmpty'}
-                        }
-                      }).then((updates) => {
-                        rootScope.managers.apiUpdatesManager.processUpdateMessage(updates);
-                      }).catch(() => {
+                      managers.appChatsManager.updateEmojiStatus(
+                        ownerPeerId.toChatId(),
+                        {_: 'emojiStatusEmpty'}
+                      ).catch(() => {
                         toastNew({langPackKey: 'Error.AnError'});
                       });
                     }
@@ -1225,7 +1235,7 @@ export default function showStarGiftInfoPopup(options: {
                   }
                 }}
               />
-              <Button
+              <Button.Tile
                 noRipple
                 class="popup-star-gift-info-action"
                 icon={isListed() ? 'tag_alt_crossed_filled' : 'tag_alt_filled'}
@@ -1283,6 +1293,7 @@ export default function showStarGiftInfoPopup(options: {
   }
 
   (async() => {
+    const managers = bindManagersToSession(rootScope.managers);
     const raw = myGift.raw;
     const [value, canManageGifts] = await Promise.all([
       raw._ === 'starGiftUnique' ? rootScope.managers.appGiftsManager.getGiftValue(raw.slug) : Promise.resolve(null),
@@ -1294,6 +1305,7 @@ export default function showStarGiftInfoPopup(options: {
 
     createPopup(() => (
       <PopupElement
+        managers={managers}
         class="popup-star-gift-info"
         closable
         show={show()}

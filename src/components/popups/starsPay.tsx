@@ -1,12 +1,10 @@
 import PopupElement, {createPopup} from '@components/popups/indexTsx';
 import {copyTextToClipboard} from '@helpers/clipboard';
 import {formatFullSentTime} from '@helpers/date';
-import {renderImageFromUrlPromise} from '@helpers/dom/renderImageFromUrl';
-import maybe2x from '@helpers/maybe2x';
 import MediaHeader from '@components/mediaHeader';
+import StarsHero, {createStarsParticles} from '@components/popups/starsHero';
 import getGiftAssetName from '@helpers/getGiftAssetName';
 import {InputInvoice, MessageMedia, PaymentsPaymentForm, PaymentsPaymentReceipt, StarsTransaction, Message, Photo, Document, Chat, WebDocument} from '@layer';
-import appImManager from '@lib/appImManager';
 import getPeerId from '@appManagers/utils/peers/getPeerId';
 import {i18n, LangPackKey} from '@lib/langPack';
 import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
@@ -15,12 +13,13 @@ import {putPreloader} from '@components/putPreloader';
 import Table, {TablePeer} from '@components/table';
 import {toastNew} from '@components/toast';
 import type {PopupPaymentOptions, PopupPaymentResult} from '@components/popups/payment';
-import showStarsPopup, {STARS_POPUP_KIND, getStarsTransactionTitleAndMedia, StarsAmount, StarsBalance, StarsChange} from '@components/popups/stars';
+import paymentErrorLangKey from '@components/popups/paymentErrorLangKey';
+import {STARS_POPUP_KIND, getStarsTransactionTitleAndMedia} from '@components/popups/stars';
+import {StarsAmount, StarsBalance, StarsChange} from '@components/stars/starsAmount';
 import {createSignal, JSX} from 'solid-js';
 import partition from '@helpers/array/partition';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
 import cancelEvent from '@helpers/dom/cancelEvent';
-import AppMediaViewer from '@components/mediaViewer';
 import {NULL_PEER_ID, TON_CURRENCY} from '@appManagers/constants';
 import tsNow from '@helpers/tsNow';
 import classNames from '@helpers/string/classNames';
@@ -42,6 +41,9 @@ import paymentsWrapCurrencyAmount, {formatNanoton} from '@helpers/paymentsWrapCu
 import confirmationPopup from '@components/confirmationPopup';
 import EventListenerBase from '@helpers/eventListenerBase';
 import {getMiddleware} from '@helpers/middleware';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
+import type AppMediaViewer from '@components/mediaViewer';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 const TEST_FIRST_TIME = DEBUG && false;
 
@@ -59,7 +61,8 @@ export type StarsPayHandle = EventListenerBase<{
 
 export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHandle {
   const emitter: StarsPayHandle = new EventListenerBase();
-  const managers = rootScope.managers;
+  // * the account the payment is asked on: a step after a switch (a retry, a form fetched again) does not go
+  const managers = bindManagersToSession(rootScope.managers);
   const middlewareHelper = getMiddleware();
   const middleware = middlewareHelper.get();
 
@@ -90,6 +93,8 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
   let result: PopupPaymentResult = 'cancelled';
   let finished = false;
   let popupOpened = false;
+  // the popup can be closed while a payment is on its way: `finish` then waits for how it went
+  let popupClosed = false;
   const deferredCloseCallbacks: (() => void)[] = [];
 
   const [show, setShow] = createSignal(true);
@@ -116,6 +121,23 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
     drainDeferred();
   };
 
+  /** The payment is over, one way or the other. */
+  const finishPayment = () => popupClosed ? emitFinish() : closePopup();
+
+  const onPopupClose = () => {
+    popupClosed = true;
+    if(!paying()) emitFinish();
+  };
+
+  /** A payment that did not go through: the payer is told, and with no popup to stay on, the caller is too. */
+  const failPayment = (err: ApiError) => {
+    result = 'failed';
+    setPaying(false);
+    toastNew({langPackKey: paymentErrorLangKey(err?.type)});
+    if(err) err.handled = true;
+    if(popupClosed || !popupOpened) finishPayment();
+  };
+
   const hidePopupsWithCallback = (callback: () => void, e?: Event) => {
     cancelEvent(e);
     deferredCloseCallbacks.push(callback);
@@ -138,6 +160,7 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
     const {currency, prices: [{amount}]} = paymentForm.invoice;
     if(currency !== expectedPrice.currency) {
       result = 'failed';
+      toastNew({langPackKey: 'Error.AnError'});
       return false;
     }
 
@@ -166,19 +189,22 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
   };
 
   let test = TEST_FIRST_TIME;
-  const onConfirm = async() => {
+  // `retried`: the form has just been fetched again after it expired — once is enough
+  const onConfirm = async(retried?: boolean) => {
     if(isReceipt || subscription?.pFlags.bot_canceled || (!paymentForm && !chatInvite && !subscription)) {
       closePopup();
       return;
     }
 
+    // one payment at a time, and none for a popup the user has already closed
+    if(paying() || popupClosed) return;
+
     if(expectedPrice && paymentForm) {
-      if(paying()) return;
       setPaying(true);
       const confirmed = await confirmFormPrice();
       setPaying(false);
       if(!confirmed) {
-        closePopup();
+        finishPayment();
         return;
       }
     }
@@ -188,72 +214,95 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
     setPaying(true);
     result = 'pending';
 
-    let promise: Promise<any>;
-    if(test) {
-      test = false;
-      promise = Promise.reject(makeError('BALANCE_TOO_LOW'));
-    } else if(subscription) {
-      promise = managers.appPaymentsManager.changeStarsSubscription(
-        subscription.id,
-        !subscription.pFlags.canceled
-      );
-    } else {
-      const balance = await managers.appPaymentsManager[isTon ? 'getStarsStatusTon' : 'getStarsStatus']();
-      if(bigInt(balance.balance.amount as number).lt(itemPrice)) {
-        promise = Promise.reject(makeError('BALANCE_TOO_LOW'));
+    try {
+      if(test) {
+        test = false;
+        throw makeError('BALANCE_TOO_LOW');
+      } else if(subscription) {
+        await managers.appPaymentsManager.changeStarsSubscription(
+          subscription.id,
+          !subscription.pFlags.canceled
+        );
       } else {
-        promise = managers.appPaymentsManager.sendStarsForm(
+        const balance = await managers.appPaymentsManager[isTon ? 'getStarsStatusTon' : 'getStarsStatus']();
+        if(bigInt(balance.balance.amount as number).lt(itemPrice)) {
+          throw makeError('BALANCE_TOO_LOW');
+        }
+
+        await managers.appPaymentsManager.sendStarsForm(
           inputInvoice,
           (paymentForm as PaymentsPaymentForm.paymentsPaymentFormStars)?.form_id || chatInvite.subscription_form_id
         );
       }
-    }
-
-    try {
-      await promise;
-      result = 'paid';
-      closePopup();
     } catch(err) {
-      let shouldRetry = false;
-      if((err as ApiError).type === 'BALANCE_TOO_LOW') {
-        showStarsPopup({
+      const type = (err as ApiError).type;
+      if(type === 'BALANCE_TOO_LOW' && !popupClosed) {
+        // nothing is on its way while the top-up is offered: callers take 'pending' for a payment that is
+        result = 'cancelled';
+        setPaying(false);
+        hotReloadGuard.showStarsPopup({
           itemPrice,
           paymentForm: paymentForm as PaymentsPaymentForm.paymentsPaymentFormStars,
           ton: isTon,
           onTopup: async() => {
-            await reloadForm();
+            try {
+              // the purchase is checked against the balance the top-up has just changed
+              await Promise.all([
+                reloadForm(),
+                managers.appPaymentsManager[isTon ? 'getStarsStatusTon' : 'getStarsStatus'](true)
+              ]);
+            } catch(err) {
+              failPayment(err as ApiError);
+              return;
+            }
+
             onConfirm();
           },
           onCancel: () => {
             result = 'cancelled';
-            closePopup();
+            finishPayment();
           },
           purpose,
           spendPurposePeerId: peerId
         });
-      } else if((err as ApiError).type === 'FORM_EXPIRED') {
-        await reloadForm();
-        shouldRetry = true;
+      } else if(type === 'FORM_EXPIRED' && paymentForm && !retried && !popupClosed) {
+        // an invite's subscription has no form to fetch again: it would only expire once more
+        try {
+          await reloadForm();
+        } catch(err) {
+          failPayment(err as ApiError);
+          return;
+        }
+
+        setPaying(false);
+        if(popupClosed) { // closed while the form was fetched again: nothing was paid, and `finish` waits
+          result = 'cancelled';
+          finishPayment();
+          return;
+        }
+
+        onConfirm(true);
+      } else if(type === 'BALANCE_TOO_LOW') { // the popup is gone, and with it the offer to top up
+        result = 'cancelled';
+        setPaying(false);
+        finishPayment();
       } else {
-        result = 'failed';
+        failPayment(err as ApiError);
       }
 
-      setPaying(false);
-
-      if(shouldRetry) {
-        onConfirm();
-      }
+      return;
     }
+
+    result = 'paid';
+    setPaying(false);
+    finishPayment();
   };
 
   const construct = async() => {
+    const managers = bindManagersToSession(rootScope.managers);
     const [image, {title: transactionTitle, media: avatar}, link] = await Promise.all([
       (async() => {
-        const img = document.createElement('img');
-        img.alt = '';
-        img.classList.add('popup-stars-image');
-        await renderImageFromUrlPromise(img, `assets/img/${maybe2x(boost ? 'stars' : 'stars_pay')}.png`);
-        return img;
+        return (boost ? undefined : createStarsParticles());
       })(),
       (async() => {
         const result = await getStarsTransactionTitleAndMedia({
@@ -283,7 +332,7 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
             container.style.width = container.style.height = size + 'px';
             // A decorative first frame must not delay opening a receipt (the container is still detached).
             void promise.catch(() => {
-              if(middleware()) container.replaceChildren(IconTsx({icon: transaction.amount._ === 'starsTonAmount' ? 'ton' : 'gift'}) as HTMLElement);
+              if(middleware()) container.replaceChildren(IconTsx({icon: transaction.amount._ === 'starsTonAmount' ? 'gram_filled' : 'gift'}) as HTMLElement);
             });
             return container as HTMLDivElement;
           });
@@ -361,7 +410,7 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
           }
         } else {
           confirmText = i18n('Stars.ConfirmPurchaseButton', [amount]);
-          confirmIcon = isTon ? 'ton' : 'star';
+          confirmIcon = isTon ? 'gram_filled' : 'star';
         }
 
         const onFulfill = async() => {
@@ -369,10 +418,11 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
           try {
             await managers.appPaymentsManager.fulfillStarsSubscription(subscription.id);
             hidePopupsWithCallback(() => {
-              appImManager.setInnerPeer({peerId});
+              hotReloadGuard.appImManager.setInnerPeer({peerId});
             });
           } catch(err) {
             console.error('fulfill error', err);
+            toastNew({langPackKey: paymentErrorLangKey((err as ApiError).type)});
             setFulfilling(false);
           }
         };
@@ -482,7 +532,7 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
         const messagePeerId = transaction && getStarsTransactionMessagePeerId(transaction, ledgerPeerId || rootScope.myId, rootScope.myId);
         const messageMid = transaction && (transaction.giveaway_post_id || transaction.msg_id);
         const messageAnchor = messagePeerId && messageMid && anchorCallback((e) => {
-          hidePopupsWithCallback(() => appImManager.setInnerPeer({peerId: messagePeerId, lastMsgId: messageMid}), e);
+          hidePopupsWithCallback(() => hotReloadGuard.appImManager.setInnerPeer({peerId: messagePeerId, lastMsgId: messageMid}), e);
         });
         if(messageAnchor) messageAnchor.append(link || i18n('Message'));
 
@@ -490,7 +540,7 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
           peerId: tablePeerId,
           onClick: () => {
             hidePopupsWithCallback(() => {
-              appImManager.setInnerPeer({
+              hotReloadGuard.appImManager.setInnerPeer({
                 peerId: tablePeerId,
                 stack: message ? {
                   peerId: message.peerId,
@@ -503,7 +553,7 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
 
         const tablePeer = (isReceipt || subscription) && peerId && makeTablePeer(peerId);
 
-        const transactionIdSpan = transactionId && (<span onClick={onTransactionClick}>{wrapRichText(transactionId, {entities: [{_: 'messageEntityCode', length: transactionId.length, offset: 0}]})}</span>);
+        const transactionIdSpan = transactionId && (<span dir="ltr" onClick={onTransactionClick}>{wrapRichText(transactionId, {entities: [{_: 'messageEntityCode', length: transactionId.length, offset: 0}]})}</span>);
 
         let tableContent: Parameters<typeof Table>[0]['content'];
         if(subscription) {
@@ -535,7 +585,7 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
           if(gift) {
             const giftTitle = gift._ === 'starGiftUnique' ? `${gift.title} #${gift.num}` : gift.title || i18n('StarGiftTitle');
             const giftAnchor = gift._ === 'starGiftUnique' && anchorCallback(() => {
-              hidePopupsWithCallback(() => appImManager.openUrl(`https://t.me/nft/${gift.slug}`));
+              hidePopupsWithCallback(() => hotReloadGuard.appImManager.openUrl(`https://t.me/nft/${gift.slug}`));
             });
             if(giftAnchor) giftAnchor.append(giftTitle);
             tableContent.push(['StarGiftTitle', giftAnchor || giftTitle]);
@@ -607,7 +657,7 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
         return (
           <div class="popup-stars-pay-padding">
             <MediaHeader class="popup-stars-intro">
-              {image}
+              {boost ? <StarsHero /> : image}
               <div class="popup-stars-pay-images">
                 <div
                   class="popup-stars-pay-avatar"
@@ -633,16 +683,18 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
                     standaloneMessage.id = getServerMessageId(transaction.msg_id);
                     standaloneMessage.mid = transaction.msg_id;
 
+                    // * the message's own ids: the viewer tells the items of one message apart by them and the index
                     const targets: AppMediaViewer['target'][] = media.map((media, index) => {
-                      return {element: null as HTMLElement, mid: 0, peerId: 0, index, message: standaloneMessage};
+                      return {element: null as HTMLElement, mid: standaloneMessage.mid, peerId: standaloneMessage.peerId, index, message: standaloneMessage};
                     });
 
                     targets[0].element = avatar;
 
-                    new AppMediaViewer(true)
+                    new hotReloadGuard.AppMediaViewer(true)
                     .setSearchContext({peerId: 0, inputFilter: {_: 'inputMessagesFilterEmpty'}, useSearch: false})
                     .openMedia({
                       message: standaloneMessage,
+                      index: 0,
                       target: targets[0].element,
                       fromRight: 0,
                       reverse: false,
@@ -683,11 +735,12 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
 
       return (
         <PopupElement
+          managers={managers}
           class="popup-stars popup-stars-pay"
           closable
           old
           show={show()}
-          onClose={emitFinish}
+          onClose={onPopupClose}
           onCloseAfterTimeout={() => {
             middlewareHelper.destroy();
             drainDeferred();

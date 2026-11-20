@@ -1,10 +1,12 @@
-import {expect} from '@playwright/test';
+import {expect, type Page} from '@playwright/test';
 import {test} from './workerContext';
 import type {CreateLinkPopupResult} from '@components/popups/createLink';
+import type {RichMediaComposerHarness} from './fixtures/richMediaComposer';
 
 declare global {
   interface Window {
-    linkPickerResult: {text: string, url: string} | 'cancelled' | undefined
+    linkPickerResult: {text: string, url: string} | 'cancelled' | undefined,
+    richMediaComposerHarness: RichMediaComposerHarness
   }
 }
 
@@ -16,7 +18,7 @@ test('link popup validates, moves focus with Enter, submits and cancels through 
   await page.evaluate(() => window.popupSandbox.ready());
   const open = (editing: boolean) => page.evaluate(async editing => {
     const path = '/src/components/popups/createLink.tsx';
-    const {default: showPicker} = await import(/* @vite-ignore */ path);
+    const {default: showPicker} = await window.e2eImport(path);
     window.linkPickerResult = undefined;
     void showPicker(editing ? {editing: true, text: 'Link', url: 'https://example.com'} : {})
     .then((result: CreateLinkPopupResult) => window.linkPickerResult = result, () => window.linkPickerResult = 'cancelled');
@@ -78,7 +80,7 @@ test('media caption keyboard formatting preserves text and does not submit the p
   await expect(popup).toBeVisible();
   const richValue = () => input.evaluate(async(element) => {
     const path = '/src/helpers/dom/getRichValueWithCaret.ts';
-    const {default: getValue} = await import(/* @vite-ignore */ path);
+    const {default: getValue} = await window.e2eImport(path);
     return getValue(element, true, false);
   });
   await expect.poll(async() => (await richValue()).entities).toEqual([{_: 'messageEntityBold', offset: 0, length: 7}]);
@@ -123,7 +125,7 @@ for(const {name, html, value, entities} of CAPTION_PASTE_CASES) {
 
     const pasted = await input.evaluate(async(element, html) => {
       const registryPath = '/src/components/chat/inputEditor/registry.ts';
-      const {getChatInputEditor} = await import(/* @vite-ignore */ registryPath);
+      const {getChatInputEditor} = await window.e2eImport(registryPath);
       const editor = getChatInputEditor(element as HTMLElement);
       editor.setTextWithEntities('');
       (editor as unknown as {editor: {view: {pasteHTML(html: string): void}}}).editor.view.pasteHTML(html);
@@ -149,7 +151,7 @@ test('an empty or explicitly disabled first selection does not poison the next f
   // a caption or a poll description does.
   await page.evaluate(async() => {
     const plainFieldPath = '/src/components/chat/inputEditor/plainField.ts';
-    const {default: attachPlainMessageEditor} = await import(/* @vite-ignore */ plainFieldPath);
+    const {default: attachPlainMessageEditor} = await window.e2eImport(plainFieldPath);
     for(const id of ['first', 'second']) {
       const input = document.createElement('div');
       input.id = `qa-${id}`;
@@ -197,7 +199,7 @@ test('the selection tooltip stands over the text of a Select All, not over the b
   await page.getByRole('button', {name: '◂ Hide', exact: true}).click();
   await page.evaluate(async() => {
     const path = '/e2e/fixtures/richMediaComposer.ts';
-    const {mountRichMediaComposerHarness} = await import(/* @vite-ignore */ path);
+    const {mountRichMediaComposerHarness} = await window.e2eImport(path);
     const paragraph = (text?: string) => ({type: 'paragraph', content: text ? [{type: 'text', text}] : undefined});
     mountRichMediaComposerHarness().setDocument({type: 'doc', content: [paragraph('hello'), paragraph('world'), paragraph()]});
   });
@@ -227,4 +229,112 @@ test('the selection tooltip stands over the text of a Select All, not over the b
     // placed (it is kept within the field), then over the text
     return box.x >= text.field - 1 && box.x <= center && center <= box.x + box.width;
   }).toBe(true);
+});
+
+const mountFoldedComposer = async(page: Page, sendsRich: boolean) => {
+  await page.goto('/?popups=1');
+  await page.waitForFunction(() => !!window.popupSandbox);
+  await page.evaluate(() => window.popupSandbox.ready());
+  await page.getByRole('button', {name: '◂ Hide', exact: true}).click();
+  await page.evaluate(async(sendsRich) => {
+    const path = '/e2e/fixtures/richMediaComposer.ts';
+    const {mountRichMediaComposerHarness} = await window.e2eImport(path);
+    const harness = window.richMediaComposerHarness = mountRichMediaComposerHarness({sendsRich});
+    await harness.ready();
+    harness.setExpanded(false);
+  }, sendsRich);
+  return page.locator('.input-message-input');
+};
+
+// The tooltip's row scrolls along. Where it does not fit whole, the tooltip ends in the middle of a button, so the
+// half that shows says there is more: an end between two buttons reads as the end of the row. In a wide field and a
+// narrow one, with the folded field's shorter row, and laid out right to left.
+for(const {name, rtl, width, sendsRich} of [
+  {name: 'a wide field', rtl: false, width: 1280, sendsRich: true},
+  {name: 'a narrow field', rtl: false, width: 400, sendsRich: true},
+  {name: 'the folded field', rtl: false, width: 1280, sendsRich: false},
+  {name: 'right to left', rtl: true, width: 1280, sendsRich: true}
+]) {
+  test(`the selection tooltip cuts the next button in half in ${name}`, async({page}) => {
+    await page.setViewportSize({width, height: 720});
+    const input = await mountFoldedComposer(page, sendsRich);
+    if(rtl) await page.evaluate(() => window.popupSandbox.setDirection('rtl'));
+    await page.evaluate(() => window.richMediaComposerHarness.setText('formatted words'));
+    await input.click();
+    await page.keyboard.press('ControlOrMeta+a');
+    const tooltip = page.locator('.markup-tooltip.is-visible');
+    await expect(tooltip).toBeVisible();
+
+    const cut = () => tooltip.evaluate((tooltip) => {
+      const box = tooltip.getBoundingClientRect();
+      const rtl = getComputedStyle(tooltip).direction === 'rtl';
+      // how far along the row each button runs, from the tooltip's inline start
+      const buttons = [...tooltip.querySelectorAll('.markup-tooltip-row > .btn-icon')].map((button) => {
+        const rect = button.getBoundingClientRect();
+        return {start: rtl ? box.right - rect.right : rect.left - box.left, width: rect.width};
+      }).filter(({width}) => width);
+      const index = buttons.findIndex(({start, width}) => start + width > box.width + .5);
+      const button = buttons[index];
+      return {
+        rtl,
+        // the first that does not fit whole, and how much of it shows
+        index,
+        shown: button && box.width - button.start,
+        half: button && button.width / 2
+      };
+    });
+    await expect.poll(async() => (await cut()).index).toBeGreaterThan(0);
+    const {rtl: laidOutRtl, shown, half} = await cut();
+    expect(laidOutRtl).toBe(rtl);
+    expect(Math.abs(shown - half)).toBeLessThanOrEqual(1);
+  });
+}
+
+// Without Premium a rich message would not go out as it is, and the folded field is a plain one: what is
+// typed there is the message as it will be sent. The expanded editor is where a rich one is written, and
+// what was written there stays rich when the field folds, until it is gone.
+test('without Premium the folded field types a list as text, the expanded editor makes one', async({page}) => {
+  const input = await mountFoldedComposer(page, false);
+  const tooltip = page.locator('.markup-tooltip');
+
+  await input.click();
+  await page.keyboard.type('1. one');
+  await expect(input).toHaveText('1. one');
+  await expect(input.locator('ol')).toHaveCount(0);
+  // nor does the folded field offer formatting only a rich message carries
+  await page.keyboard.press('ControlOrMeta+a');
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip.getByRole('button', {name: 'Bold', exact: true})).toBeVisible();
+  await expect(tooltip.getByRole('button', {name: 'Highlight', exact: true})).toHaveCount(0);
+
+  await page.evaluate(() => {
+    window.richMediaComposerHarness.setText('');
+    window.richMediaComposerHarness.setExpanded(true);
+  });
+  await input.click();
+  await page.keyboard.type('1. one');
+  await expect(input.locator('ol')).toHaveCount(1);
+  await page.keyboard.press('ControlOrMeta+a');
+  await expect(tooltip.getByRole('button', {name: 'Highlight', exact: true})).toBeVisible();
+
+  await page.evaluate(() => window.richMediaComposerHarness.setExpanded(false));
+  await expect(input.locator('ol')).toHaveCount(1);
+  await expect(input).toHaveAttribute('data-chat-input-editor-mode', 'rich');
+
+  // sent (the field let go of and folded): plain again
+  await page.evaluate(() => {
+    window.richMediaComposerHarness.setText('');
+    window.richMediaComposerHarness.setExpanded(false);
+  });
+  await input.click();
+  await page.keyboard.type('- two');
+  await expect(input).toHaveText('- two');
+  await expect(input.locator('ul')).toHaveCount(0);
+});
+
+test('with Premium the folded field makes a list of a typed `1. `', async({page}) => {
+  const input = await mountFoldedComposer(page, true);
+  await input.click();
+  await page.keyboard.type('1. one');
+  await expect(input.locator('ol')).toHaveCount(1);
 });

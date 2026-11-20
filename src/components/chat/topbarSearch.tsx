@@ -1,6 +1,6 @@
 import type {ReactionsContext} from '@appManagers/appReactionsManager';
 import type {RequestHistoryOptions} from '@appManagers/appMessagesManager';
-import {createEffect, createSignal, onCleanup, JSX, createMemo, onMount, on, untrack, batch, Accessor} from 'solid-js';
+import {createEffect, createSignal, onCleanup, JSX, createMemo, onMount, on, untrack, batch, Accessor, Show} from 'solid-js';
 import Modes from '@config/modes';
 import InputSearch from '@components/inputSearch';
 import {ButtonIconTsx} from '@components/buttonIconTsx';
@@ -8,15 +8,13 @@ import classNames from '@helpers/string/classNames';
 import showDatePickerPopup from '@components/popups/datePicker';
 import rootScope, {BroadcastEvents} from '@lib/rootScope';
 import apiManagerProxy from '@lib/apiManagerProxy';
-import appDialogsManager from '@lib/appDialogsManager';
 import {ChannelsChannelParticipants, Message, MessageReactions, Reaction, ReactionCount, SavedReactionTag} from '@layer';
 import getPeerId from '@appManagers/utils/peers/getPeerId';
 import placeCaretAtEnd from '@helpers/dom/placeCaretAtEnd';
-import {createLoadableList} from '@components/sidebarRight/tabs/statistics';
-import {Middleware, getMiddleware} from '@helpers/middleware';
+import {createLoadableList} from '@helpers/solid/createLoadableList';
+import {Middleware, MiddlewareHelper, getMiddleware} from '@helpers/middleware';
 import {NULL_PEER_ID} from '@appManagers/constants';
 import whichChild from '@helpers/dom/whichChild';
-import appImManager from '@lib/appImManager';
 import attachListNavigation from '@helpers/dom/attachListNavigation';
 import blurActiveElement from '@helpers/dom/blurActiveElement';
 import I18n, {i18n} from '@lib/langPack';
@@ -26,6 +24,9 @@ import appNavigationController, {NavigationItem} from '@components/appNavigation
 import getTextWidth from '@helpers/canvas/getTextWidth';
 import {FontFull} from '@config/font';
 import RowTsx from '@components/rowTsx';
+import {StackedAvatarsTsx} from '@components/stackedAvatars';
+import noop from '@helpers/noop';
+import openStoriesSearch from '@components/stories/openStoriesSearch';
 import {wrapSolidComponent} from '@helpers/solid/wrapSolidComponent';
 import wrapPeerTitle from '@components/wrappers/peerTitle';
 import getParticipantPeerId from '@appManagers/utils/chats/getParticipantPeerId';
@@ -44,7 +45,6 @@ import reactionsEqual from '@appManagers/utils/reactions/reactionsEqual';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import fastSmoothScroll from '@helpers/fastSmoothScroll';
 import Icon from '@components/icon';
-import showPremiumPopup from '@components/popups/premium';
 import usePremium from '@stores/premium';
 import createMiddleware from '@helpers/solid/createMiddleware';
 import Animated from '@helpers/solid/animations';
@@ -56,13 +56,24 @@ import {ScreenSize, useMediaSizes} from '@helpers/mediaSizes';
 import ButtonCorner from '@components/buttonCorner';
 import deferSideEffect from '@helpers/solid/deferSideEffect';
 import A11yButton from '@components/a11yButton';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
 
 type SearchType = RequestHistoryOptions['hashtagType'];
 const SEARCH_TYPES: SearchType[] = ['this', 'my', 'public'];
 const DEFAULT_SEARCH_TYPE: SearchType = undefined;
+const STORIES_AVATAR_SIZE = 30;
+const STORIES_ROW_CLASS = 'topbar-search-left-stories';
+
+// * a result's place among the messages found: the row of public stories goes before them
+const whichMessage = (target: Element) => {
+  const idx = whichChild(target);
+  return idx > 0 && target.parentElement.firstElementChild.classList.contains(STORIES_ROW_CLASS) ? idx - 1 : idx;
+};
 
 type LoadOptions = {
   middleware: Middleware,
+  /** what the rendered rows live by: the list they go in, which outlives its search on screen */
+  rowsMiddleware: Middleware,
   peerId: PeerId,
   threadId: number,
   monoforumThreadId: PeerId,
@@ -72,11 +83,11 @@ type LoadOptions = {
   searchType?: SearchType
 };
 
-const renderHistoryResult = ({middleware, peerId, fromSavedDialog, messages, query, searchType/* , fromPeerId */}: LoadOptions & {fromSavedDialog: boolean, messages: (Message.message | Message.messageService)[]}) => {
+const renderHistoryResult = ({rowsMiddleware, peerId, fromSavedDialog, messages, query, searchType/* , fromPeerId */}: LoadOptions & {fromSavedDialog: boolean, messages: (Message.message | Message.messageService)[]}) => {
   const promises = messages.map(async(message) => {
     const fromPeerId = message.fromId;
     const loadPromises: Promise<any>[] = [];
-    const {dom} = appDialogsManager.addDialogAndSetLastMessage({
+    const {dom} = hotReloadGuard.appDialogsManager.addDialogAndSetLastMessage({
       peerId: fromSavedDialog ? rootScope.myId : (fromPeerId || peerId),
       container: false,
       avatarSize: 'abitbigger',
@@ -85,7 +96,7 @@ const renderHistoryResult = ({middleware, peerId, fromSavedDialog, messages, que
       query,
       // noIcons: this.noIcons,
       wrapOptions: {
-        middleware
+        middleware: rowsMiddleware
       },
       loadPromises,
       threadId: fromSavedDialog ? ((message as Message.message).saved_peer_id ? getPeerId((message as Message.message).saved_peer_id) : rootScope.myId) : undefined,
@@ -99,9 +110,31 @@ const renderHistoryResult = ({middleware, peerId, fromSavedDialog, messages, que
   return Promise.all(promises);
 };
 
-const createSearchLoader = (options: LoadOptions) => {
+export const createSearchLoader = (options: LoadOptions) => {
   const {middleware, peerId, threadId, query, fromPeerId, reaction, searchType, monoforumThreadId} = options;
   const fromSavedDialog = !!(peerId === rootScope.myId && threadId);
+  const searchOptions: RequestHistoryOptions = {
+    peerId: searchType === 'this' || !searchType ? peerId : NULL_PEER_ID,
+    threadId: searchType === 'this' || !searchType ? threadId : undefined,
+    monoforumThreadId,
+    query,
+    inputFilter: {_: 'inputMessagesFilterEmpty'},
+    limit: 30,
+    fromPeerId,
+    savedReaction: reaction ? [reaction as Reaction.reactionEmoji] : undefined,
+    isPublicHashtag: searchType === 'public',
+    isCacheableSearch: !!searchType,
+    hashtagType: searchType
+  };
+
+  // * once for the search, held by it: a page loaded on a scroll has no owner to give a release to, and kept the
+  // * found list in the worker for good, so the same search later came back from it with nothing found since
+  const key = getHistoryStorageKey({type: getHistoryStorageType(searchOptions), ...searchOptions});
+  rootScope.managers.appMessagesManager.toggleHistoryKeySubscription(key, true);
+  onCleanup(() => {
+    rootScope.managers.appMessagesManager.toggleHistoryKeySubscription(key, false);
+  });
+
   let lastMessage: Message.message | Message.messageService, loading = false, nextRate: number;
   const loadMore = async() => {
     if(loading) {
@@ -109,30 +142,12 @@ const createSearchLoader = (options: LoadOptions) => {
     }
     loading = true;
 
-    const offsetId = lastMessage?.mid || 0;
-    const offsetPeerId = lastMessage?.peerId || NULL_PEER_ID;
     const requestHistoryOptions: RequestHistoryOptions = {
-      peerId: searchType === 'this' || !searchType ? peerId : NULL_PEER_ID,
-      threadId: searchType === 'this' || !searchType ? threadId : undefined,
-      monoforumThreadId,
-      query,
-      inputFilter: {_: 'inputMessagesFilterEmpty'},
-      offsetId,
-      offsetPeerId,
-      limit: 30,
-      fromPeerId,
-      savedReaction: reaction ? [reaction as Reaction.reactionEmoji] : undefined,
-      nextRate,
-      isPublicHashtag: searchType === 'public',
-      isCacheableSearch: !!searchType,
-      hashtagType: searchType
+      ...searchOptions,
+      offsetId: lastMessage?.mid || 0,
+      offsetPeerId: lastMessage?.peerId || NULL_PEER_ID,
+      nextRate
     };
-
-    const key = getHistoryStorageKey({type: getHistoryStorageType(requestHistoryOptions), ...requestHistoryOptions});
-    rootScope.managers.appMessagesManager.toggleHistoryKeySubscription(key, true);
-    onCleanup(() => {
-      rootScope.managers.appMessagesManager.toggleHistoryKeySubscription(key, false);
-    });
 
     const result = await rootScope.managers.appMessagesManager.getHistory(requestHistoryOptions);
     if(!middleware()) {
@@ -174,7 +189,7 @@ const createSearchLoader = (options: LoadOptions) => {
 };
 
 const createParticipantsLoader = (options: LoadOptions) => {
-  const {middleware, peerId, query} = options;
+  const {middleware, rowsMiddleware, peerId, query} = options;
   let loading = false, offset = 0;
   const loadMore = async() => {
     if(loading) {
@@ -199,7 +214,7 @@ const createParticipantsLoader = (options: LoadOptions) => {
       const peer = apiManagerProxy.getPeer(peerId);
       const username = getPeerActiveUsernames(peer)[0];
       const size = 40;
-      const avatar = avatarNew({peerId, size, middleware});
+      const avatar = avatarNew({peerId, size, middleware: rowsMiddleware});
       const row = wrapSolidComponent(() => (
         <RowTsx clickable class="topbar-search-left-sender">
           <RowTsx.Title>
@@ -209,7 +224,7 @@ const createParticipantsLoader = (options: LoadOptions) => {
           </RowTsx.Title>
           <RowTsx.Media size="40">{avatar.node}</RowTsx.Media>
         </RowTsx>
-      ), middleware);
+      ), rowsMiddleware);
       await avatar.readyThumbPromise;
 
       return row;
@@ -370,6 +385,14 @@ export default function TopbarSearch(props: {
   const [count, setCount] = createSignal<number>();
   const [totalCount, setTotalCount] = createSignal<number>();
   const [list, setList] = createSignal<{element: HTMLElement, type: 'messages' | 'senders'}>();
+  // * the rows of a list live as long as it is on screen: a new search leaves it there until its own
+  // * results are in, and then it fades out - rows torn down before that lose their layout in view
+  const listsRows = new Map<Element, MiddlewareHelper>();
+  const releaseListRows = (element: Element) => {
+    listsRows.get(element)?.destroy();
+    listsRows.delete(element);
+  };
+  onCleanup(() => listsRows.forEach((helper) => helper.destroy()));
   const [messages, setMessages] = createSignal<(Message.message | Message.messageService)[]>();
   const [sendersPeerIds, setSendersPeerIds] = createSignal<PeerId[]>();
   const [loadMore, setLoadMore] = createSignal<() => Promise<void>>();
@@ -381,10 +404,11 @@ export default function TopbarSearch(props: {
   const [reactionsElement, setReactionsElement] = createSignal<ReactionsElement>();
   const [reaction, setReaction] = createSignal<Reaction>(undefined, {equals: false});
   const [searchType, setSearchType] = createSignal<SearchType>(DEFAULT_SEARCH_TYPE);
+  const [publicStories, setPublicStories] = createSignal<{hashtag: string, count: number, peerIds: PeerId[]}>();
   const [showingSmallResults, setShowingSmallResults] = createSignal(false);
   const choosingSender = createMemo(() => filteringSender() && !filterPeerId());
   const shouldShowResults = createMemo(() => isSmallScreen() ? showingSmallResults() : isInputFocused());
-  const shouldHaveListNavigation = createMemo(() => (shouldShowResults() && count() && list()) || undefined);
+  const shouldHaveListNavigation = createMemo(() => (shouldShowResults() && (count() || publicStories()) && list()) || undefined);
   const lookingHashtag = createMemo(() => {
     if(filteringSender() || reaction()) return;
     const _value = value();
@@ -435,10 +459,13 @@ export default function TopbarSearch(props: {
       return;
     }
 
-    const list = element.firstElementChild as HTMLElement;
+    const list = element.querySelector<HTMLElement>('.topbar-search-left-results-list');
     const activeClassName = 'menu-open';
     const el = list.querySelector(`.${activeClassName}`);
     el && el.classList.remove(activeClassName);
+    // * Enter still goes to the first message found, lit as before: the row of stories over it is a key up away
+    const firstMessage = !untrack(target) && list.querySelector(`:scope > :not(.${STORIES_ROW_CLASS})`);
+    firstMessage && firstMessage.classList.add(activeClassName);
     const {detach} = attachListNavigation({
       list,
       type: 'y',
@@ -451,7 +478,7 @@ export default function TopbarSearch(props: {
       },
       activeClassName,
       cancelMouseDown: true,
-      target: untrack(target)
+      target: untrack(target) || firstMessage || undefined
     });
 
     onCleanup(() => {
@@ -748,7 +775,7 @@ export default function TopbarSearch(props: {
   b.after(inputSearchTools);
 
   const updateChatSearchContext = (searchType: SearchType, query: string) => {
-    appImManager.chat.setMessageId({
+    hotReloadGuard.appImManager.chat.setMessageId({
       query: searchType && query || undefined,
       isPublicHashtag: searchType === 'public' || undefined,
       isCacheableSearch: !!searchType || undefined,
@@ -784,9 +811,30 @@ export default function TopbarSearch(props: {
     setMessages();
     setSendersPeerIds();
     setTarget();
+    setPublicStories();
+
+    // * a hashtag looked for in public posts finds the public stories with it too, as a row over the posts
+    if(_isHashtag && _searchType === 'public' && !isEmptyQuery) {
+      rootScope.managers.appStoriesManager.searchStories({hashtag: query, offset: '', limit: 3}).then((found) => {
+        const count = found.nextOffset ? Math.max(found.count, found.stories.length) : found.stories.length;
+        if(middleware() && count) {
+          setPublicStories({hashtag: query, count, peerIds: [...new Set(found.stories.map(({peerId}) => peerId))]});
+        }
+      }, noop);
+    }
+
+    // * a list that never made it to the screen goes with its search, a shown one by `releaseListRows`
+    const rowsMiddlewareHelper = getMiddleware();
+    let shown = false;
+    onCleanup(() => {
+      if(!shown) {
+        rowsMiddlewareHelper.destroy();
+      }
+    });
 
     const loader = (isSender ? createParticipantsLoader : createSearchLoader)({
       middleware,
+      rowsMiddleware: rowsMiddlewareHelper.get(),
       peerId,
       threadId,
       monoforumThreadId: props.chat.monoforumThreadId,
@@ -804,6 +852,19 @@ export default function TopbarSearch(props: {
         ref={ref}
         class={classNames(!untrack(isSmallScreen) && 'topbar-search-left-chatlist', 'chatlist', isEmpty() && 'is-empty')}
       >
+        {/* * the row of the public stories leads the results as one of them: the same pointer and keys reach it */}
+        <div class="topbar-search-left-results-list">
+          <Show when={publicStories()}>{(found) => (
+            <RowTsx clickable class={STORIES_ROW_CLASS}>
+              <RowTsx.Media size="abitbigger">
+                <StackedAvatarsTsx peerIds={found().peerIds} avatarSize={STORIES_AVATAR_SIZE} />
+              </RowTsx.Media>
+              <RowTsx.Title>{i18n('HashtagStoriesFound', [found().count])}</RowTsx.Title>
+              <RowTsx.Subtitle>{i18n('HashtagStoriesFoundSubtitle', [found().hashtag])}</RowTsx.Subtitle>
+            </RowTsx>
+          )}</Show>
+          {!isEmpty() && loader().rendered}
+        </div>
         {isEmpty() ? (
           <div class="topbar-search-left-results-empty">
             {_isHashtag && (count() === undefined ?
@@ -818,12 +879,7 @@ export default function TopbarSearch(props: {
             )}
           </div>
         ) : (
-          <>
-            <div>
-              {loader().rendered}
-            </div>
-            {loader().rendered && <div class="topbar-search-left-results-padding" />}
-          </>
+          loader().rendered && <div class="topbar-search-left-results-padding" />
         )}
       </div>
     );
@@ -832,6 +888,8 @@ export default function TopbarSearch(props: {
     const onLoad = (firstElement?: HTMLElement) => {
       if(first) {
         inputSearch.toggleLoading(false);
+        shown = true;
+        listsRows.set(ref, rowsMiddlewareHelper);
         setList({element: ref, type: isSender ? 'senders' : 'messages'});
         scrollableDiv.scrollTop = 0;
         first = false;
@@ -887,6 +945,11 @@ export default function TopbarSearch(props: {
           return;
         }
 
+        if(target.classList.contains(STORIES_ROW_CLASS)) {
+          openStoriesSearch({hashtag: publicStories().hashtag});
+          return;
+        }
+
         if(choosingSender()) {
           const peerId = sendersPeerIds()[idx];
           batch(() => {
@@ -905,10 +968,10 @@ export default function TopbarSearch(props: {
 
         setShowingSmallResults(false);
 
-        const message = messages()[idx];
+        const message = messages()[whichMessage(target)];
         const query = value().trim();
         deferSideEffect(() => {
-          appImManager.chat.setMessageId({
+          hotReloadGuard.appImManager.chat.setMessageId({
             lastMsgId: message.mid,
             lastMsgPeerId: message.peerId,
             highlight: query ? {type: 'search', query} : undefined
@@ -985,7 +1048,7 @@ export default function TopbarSearch(props: {
     element.classList.toggle('is-locked', !premium);
     if(!premium) {
       const icon: Icon = 'premium_lock';
-      const reaction = new ReactionElement();
+      const reaction = ReactionElement.create();
       reaction.init(ReactionLayoutType.Tag, createMiddleware().get());
       reaction.reactionCount = {
         _: 'reactionCount',
@@ -1021,7 +1084,7 @@ export default function TopbarSearch(props: {
         middlewareHelper.destroy();
       }, 400);
     });
-    const reactionsElement = new ReactionsElement();
+    const reactionsElement = ReactionsElement.create();
     reactionsElement.init({
       context: {peerId: props.peerId, mid: 0, reactions: tagsToMessageReactions([])},
       type: ReactionLayoutType.Block,
@@ -1039,7 +1102,7 @@ export default function TopbarSearch(props: {
       }
 
       if(!isPremium()) {
-        showPremiumPopup({feature: 'saved_tags'});
+        hotReloadGuard.showPremiumPopup({feature: 'saved_tags'});
         return;
       }
 
@@ -1090,7 +1153,7 @@ export default function TopbarSearch(props: {
       }
 
       deferSideEffect(() => {
-        appImManager.chat.setMessageId({
+        hotReloadGuard.appImManager.chat.setMessageId({
           savedReaction: reaction ? [reaction as Reaction.reactionCustomEmoji | Reaction.reactionEmoji] : undefined
         });
       });
@@ -1104,7 +1167,7 @@ export default function TopbarSearch(props: {
     }
 
     deferSideEffect(() => {
-      appImManager.chat.setMessageId({
+      hotReloadGuard.appImManager.chat.setMessageId({
         lastMsgId: undefined,
         lastMsgPeerId: undefined,
         mediaTimestamp: undefined,
@@ -1115,7 +1178,7 @@ export default function TopbarSearch(props: {
 
   // * reset search on close
   onCleanup(() => {
-    if(appImManager.chat.type !== ChatType.Search) {
+    if(hotReloadGuard.appImManager.chat.type !== ChatType.Search) {
       return;
     }
 
@@ -1129,7 +1192,7 @@ export default function TopbarSearch(props: {
       return;
     }
 
-    const index = () => whichChild(target());
+    const index = () => whichMessage(target());
 
     const footerElement = SearchFooter({
       index,
@@ -1220,6 +1283,10 @@ export default function TopbarSearch(props: {
       height = 1 + paddingVertical + length * 56;
     }
 
+    if(publicStories()) {
+      height += 56;
+    }
+
     return Math.min(MAX_HEIGHT, height);
   });
 
@@ -1280,7 +1347,7 @@ export default function TopbarSearch(props: {
       }}
     >
       {!isSmallScreen() && <div class="topbar-search-left-delimiter"></div>}
-      <Animated type="cross-fade">
+      <Animated type="cross-fade" onAfterExit={releaseListRows}>
         {list()?.element}
       </Animated>
     </Scrollable>

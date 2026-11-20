@@ -22,6 +22,7 @@ function inspectAutolinkRichText(
     case 'textAutoEmail':
     case 'textAutoPhone':
     case 'textBankCard':
+    case 'textTonAddress':
       state.auto = true;
       inspectAutolinkRichText(text.text, state, true);
       return;
@@ -94,6 +95,7 @@ function inspectAutolinkBlock(block: PageBlock, state: {auto: boolean, candidate
     case 'pageBlockPhoto':
     case 'pageBlockVideo':
     case 'pageBlockAudio':
+    case 'pageBlockDocument':
     case 'pageBlockMap':
     case 'inputPageBlockMap':
       inspectCaption(block.caption);

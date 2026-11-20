@@ -1,42 +1,24 @@
 import {createMemo, createSignal, For, onCleanup, onMount, Show} from 'solid-js';
 import ButtonMenuToggle from '@components/buttonMenuToggle';
-import {AppPrivacyAndSecurityTab} from '@components/solidJsTabs/tabs';
-import {AppChatFoldersTab} from '@components/solidJsTabs/tabs';
-import {
-  AppEditProfileTab,
-  AppGeneralSettingsTab,
-  AppKeyboardShortcutsTab,
-  AppLanguageTab,
-  AppAgentMetricsTab,
-  AppQuickRepliesTab,
-  AppProjectTasksTab,
-  AppNotificationsTab,
-  AppSpeakersAndCameraTab,
-  getEditProfileInitArgs
-} from '@components/solidJsTabs';
 import lottieLoader from '@lib/lottie/lottieLoader';
-import {AppDataAndStorageTab} from '@components/solidJsTabs/tabs';
 import ButtonIcon from '@components/buttonIcon';
 import rootScope from '@lib/rootScope';
 import Row from '@components/rowTsx';
-import {AppActiveSessionsTab} from '@components/solidJsTabs/tabs';
 import {i18n, LangPackKey} from '@lib/langPack';
 import {SliderSuperTabConstructable, SliderSuperTabEventable} from '@components/sliderTab';
 import {AccountAuthorizations, Authorization, ConnectedBot} from '@layer';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
 import Section from '@components/section';
-import {AppStickersAndEmojiTab} from '@components/solidJsTabs/tabs';
-import showPremiumPopup from '@components/popups/premium';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import useStars, {hasTonTransactions} from '@stores/stars';
 import useIsCrmSuperAdmin from '@stores/crmRole';
-import showStarsPopup from '@components/popups/stars';
 import {renderPeerProfile} from '@components/peerProfile';
-import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
+import SolidJSHotReloadGuardProvider, {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
 import showMyQrCodePopup from '@components/popups/myQrCode';
 import showSendGiftPicker from '@components/popups/sendGiftPicker';
 import {formatNanoton} from '@helpers/paymentsWrapCurrencyAmount';
 import showLogOutPopup from '@components/popups/logOut';
+import askQuestion, {openTelegramFaq} from '@components/askQuestion';
 import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
 import {usePromiseCollector} from '@components/solidJsTabs/promiseCollector';
 import {subscribeOn} from '@helpers/solid/subscribeOn';
@@ -51,6 +33,20 @@ import {SettingsSearchItem} from '@lib/settingsSearch';
 import {openSettingsSearchItem} from '@lib/settingsSearch/navigate';
 import {ROOT_SECTION_ID} from '@lib/settingsSearch/registry';
 import {bumpRecentSettingsSearch} from '@lib/settingsSearch/recent';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
+import A11yButton from '@components/a11yButton';
+import {getAppVersionText} from '@config/app';
+import {getKeptFlags} from '@config/modes';
+import styles from '@components/sidebarLeft/tabs/settings.module.scss';
+import type {WalletStatus} from '@appManagers/appWalletManager';
+import bigInt from 'big-integer';
+import {splitGrams} from '@components/wallet/format';
+import {isWalletAvailable, isWalletReleased} from '@lib/wallet/release';
+
+/** 0.01 GRAM: below it the Money row shows no balance, as on iOS */
+const WALLET_BALANCE_SHOWN_FROM = 10_000_000;
+/** the Money row's "New" goes four weeks after the wallet came out, 2026-09-29 (Android TextCell.applyNewSpanTimed) */
+const WALLET_NEW_UNTIL = 1790679020 + 4 * 7 * 86400;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — wraps a sub-tab declaration. If the tab has a static `getInitArgs`,
@@ -111,7 +107,7 @@ const Settings = () => {
       icon: 'edit',
       text: 'EditAccount.Title',
       // fresh args on every open, so a failed connected-bot request isn't retained
-      onClick: () => tab.slider.createTab(AppEditProfileTab).open(getEditProfileInitArgs(true)),
+      onClick: () => tab.slider.createTab(hotReloadGuard.tabs.AppEditProfileTab).open(hotReloadGuard.tabs.getEditProfileInitArgs(true)),
       // Editing the (shared) profile is CRM-superadmin-only.
       verify: () => isCrmSuperAdmin()
     }, {
@@ -261,16 +257,16 @@ const Settings = () => {
   //    Privacy and Security is CRM-superadmin-only — regular agents must not
   //    touch the shared support account's privacy policy.
   const subTabConfigs = createMemo<SubTabConfig[]>(() => [
-    makeSubTabConfig('bell_filled', 'AccountSettings.Notifications', AppNotificationsTab, tab),
-    makeSubTabConfig('data_filled', 'DataSettings', AppDataAndStorageTab, tab),
-    isCrmSuperAdmin() && makeSubTabConfig('key_filled', 'AccountSettings.PrivacyAndSecurity', AppPrivacyAndSecurityTab, tab),
-    makeSubTabConfig('general_filled', 'Telegram.GeneralSettingsViewController', AppGeneralSettingsTab, tab),
-    makeSubTabConfig('limit_folders_filled', 'AccountSettings.Filters', AppChatFoldersTab, tab),
-    makeSubTabConfig('reactions_filled', 'StickersName', AppStickersAndEmojiTab, tab),
-    makeSubTabConfig('statistics_filled', 'AgentMetrics.Title', AppAgentMetricsTab, tab),
-    makeSubTabConfig('list', 'QuickReplies.Title', AppQuickRepliesTab, tab),
-    makeSubTabConfig('check', 'Tasks.Title', AppProjectTasksTab, tab),
-    makeSubTabConfig('speaker_filled', 'AccountSettings.SpeakersAndCamera', AppSpeakersAndCameraTab, tab)
+    makeSubTabConfig('bell_filled', 'AccountSettings.Notifications', hotReloadGuard.tabs.AppNotificationsTab, tab),
+    makeSubTabConfig('data_filled', 'DataSettings', hotReloadGuard.tabs.AppDataAndStorageTab, tab),
+    isCrmSuperAdmin() && makeSubTabConfig('key_filled', 'AccountSettings.PrivacyAndSecurity', hotReloadGuard.tabs.AppPrivacyAndSecurityTab, tab),
+    makeSubTabConfig('general_filled', 'Telegram.GeneralSettingsViewController', hotReloadGuard.tabs.AppGeneralSettingsTab, tab),
+    makeSubTabConfig('limit_folders_filled', 'AccountSettings.Filters', hotReloadGuard.tabs.AppChatFoldersTab, tab),
+    makeSubTabConfig('reactions_filled', 'StickersName', hotReloadGuard.tabs.AppStickersAndEmojiTab, tab),
+    makeSubTabConfig('statistics_filled', 'AgentMetrics.Title', hotReloadGuard.tabs.AppAgentMetricsTab, tab),
+    makeSubTabConfig('list', 'QuickReplies.Title', hotReloadGuard.tabs.AppQuickRepliesTab, tab),
+    makeSubTabConfig('check', 'Tasks.Title', hotReloadGuard.tabs.AppProjectTasksTab, tab),
+    makeSubTabConfig('speaker_filled', 'AccountSettings.SpeakersAndCamera', hotReloadGuard.tabs.AppSpeakersAndCameraTab, tab)
   ].filter(Boolean) as SubTabConfig[]);
 
   const onSubTabClick = (item: SubTabConfig) => async() => {
@@ -340,19 +336,20 @@ const Settings = () => {
   }
 
   const onDevicesClick = async() => {
+    const managers = bindManagersToSession(rootScope.managers);
     if(!authorizations) {
       await updateActiveSessions();
     }
 
     try {
-      connectedBot = await rootScope.managers.appBusinessManager.getConnectedBot(true);
+      connectedBot = await managers.appBusinessManager.getConnectedBot(true);
       updateAuthCount();
     } catch{
       // Keep the latest event-backed snapshot. Active Sessions still exposes
       // device authorizations, and the next open retries the bot request.
     }
 
-    const subTab = tab.slider.createTab(AppActiveSessionsTab);
+    const subTab = tab.slider.createTab(hotReloadGuard.tabs.AppActiveSessionsTab);
     subTab.eventListener.addEventListener('destroy', () => {
       authorizations = undefined;
       authorizationTTLDays = undefined;
@@ -376,6 +373,33 @@ const Settings = () => {
   const stars = useStars();
   const starsTon = useStars(true);
 
+  // ── Money, the way the iOS app lists it under the profile: the wallet's
+  //    balance on the right once it holds more than a cent's worth. The row
+  //    waits for the app config like the premium section does; the balance is
+  //    the manager's cached answer, refreshed after the tab opens.
+  const [walletAvailable, setWalletAvailable] = createSignal(false);
+  promiseCollector.collect(
+    Promise.resolve(apiManagerProxy.getAppConfig()).then((appConfig) => {
+      setWalletAvailable(isWalletAvailable(appConfig));
+    })
+  );
+  // * "New" until four weeks after the wallet came out, by the server's clock (Android SettingsActivity)
+  const [walletNew, setWalletNew] = createSignal(false);
+  promiseCollector.collect(
+    Promise.resolve(rootScope.managers.timeManager.getServerTime()).then((now) => {
+      setWalletNew(now < WALLET_NEW_UNTIL);
+    }, () => {})
+  );
+  // * two decimals, cut rather than rounded up, the second part smaller — the way iOS writes the row's balance
+  const [walletBalance, setWalletBalance] = createSignal<ReturnType<typeof splitGrams>>();
+  const onWalletStatus = (status: WalletStatus) => {
+    const balance = status.state?.balance;
+    setWalletBalance(balance !== undefined && bigInt(String(balance)).greater(WALLET_BALANCE_SHOWN_FROM) ? splitGrams(balance) : undefined);
+  };
+  subscribeOn(rootScope)('wallet_status', onWalletStatus);
+  // * no wallet asked of the server before its release: there is no row to show its balance in
+  if(isWalletReleased()) rootScope.managers.appWalletManager.getStatus().then(onWalletStatus, () => {});
+
   // ── Self profile (avatar + name + collapse-on-scroll). The avatar inside
   //    `PeerProfileAvatars` is filled async via `setPeer()` (peer photo IPC →
   //    appearance render → thumb load) — without waiting, the gradient header
@@ -391,6 +415,17 @@ const Settings = () => {
 
   // Lottie workers preload — fire and forget.
   lottieLoader.loadLottieWorkers();
+
+  // ── The version at the bottom opens Settings → Experimental, and says so while
+  //    something there stays on for the whole site.
+  const [experimentalOn, setExperimentalOn] = createSignal(getKeptFlags().size > 0);
+  const openExperimental = () => {
+    const experimentalTab = tab.slider.createTab(hotReloadGuard.tabs.AppExperimentalTab);
+    experimentalTab.eventListener.addEventListener('close', () => {
+      setExperimentalOn(getKeptFlags().size > 0);
+    }, {once: true});
+    experimentalTab.open(hotReloadGuard.tabs.getExperimentalInitArgs());
+  };
 
   return (
     <>
@@ -408,6 +443,23 @@ const Settings = () => {
         </div>
       </InlinePortal>
       {peerProfileElement}
+      <Show when={walletAvailable()}>
+        <Section>
+          <Row clickable={() => import('@components/wallet').then(({default: showWalletPopup}) => showWalletPopup())}>
+            <Row.Icon icon="gram_filled" />
+            <Row.Title
+              titleRight={walletBalance() && <>
+                {walletBalance().whole}
+                <span style={{'font-size': 'calc(13em / 17)'}}>{walletBalance().fraction}</span>
+              </>}
+              titleRightSecondary
+            >
+              {i18n('WalletAttachMoney')}
+              <Show when={walletNew()}><span class="row-title-badge">{i18n('New')}</span></Show>
+            </Row.Title>
+          </Row>
+        </Section>
+      </Show>
       <Section>
         <div class="profile-buttons">
           <For each={subTabConfigs()}>
@@ -426,13 +478,13 @@ const Settings = () => {
               </Row.Title>
             </Row>
           </Show>
-          <Row clickable={() => tab.slider.createTab(AppLanguageTab).open()}>
+          <Row clickable={() => tab.slider.createTab(hotReloadGuard.tabs.AppLanguageTab).open()}>
             <Row.Icon icon="web_filled" />
             <Row.Title titleRight={i18n('LanguageName')} titleRightSecondary>
               {i18n('AccountSettings.Language')}
             </Row.Title>
           </Row>
-          <Row clickable={() => tab.slider.createTab(AppKeyboardShortcutsTab).open()}>
+          <Row clickable={() => tab.slider.createTab(hotReloadGuard.tabs.AppKeyboardShortcutsTab).open()}>
             <Row.Icon icon="keyboard_filled" />
             <Row.Title>{i18n('KeyboardShortcuts.Title')}</Row.Title>
           </Row>
@@ -440,12 +492,16 @@ const Settings = () => {
       </Section>
       <Show when={!premiumBlocked()}>
         <Section>
-          <Row clickable={() => showPremiumPopup()}>
+          <Row clickable={() => hotReloadGuard.showPremiumPopup()}>
             <Row.Icon icon="premium_badge" />
             <Row.Title>{i18n('Premium.Boarding.Title')}</Row.Title>
           </Row>
+          <Row clickable={() => hotReloadGuard.showBusinessPopup()}>
+            <Row.Icon icon="business_filled" />
+            <Row.Title>{i18n('TelegramBusiness')}</Row.Title>
+          </Row>
           <Show when={!!stars()}>
-            <Row clickable={() => showStarsPopup()}>
+            <Row clickable={() => hotReloadGuard.showStarsPopup()}>
               <Row.Icon icon="star_circle_filled" />
               <Row.Title titleRight={'' + stars()} titleRightSecondary>
                 {i18n('MenuTelegramStars')}
@@ -453,7 +509,7 @@ const Settings = () => {
             </Row>
           </Show>
           <Show when={hasTonTransactions() || String(starsTon()) !== '0'}>
-            <Row clickable={() => showStarsPopup({ton: true})}>
+            <Row clickable={() => hotReloadGuard.showStarsPopup({ton: true})}>
               <Row.Icon icon="gram_filled" />
               <Row.Title titleRight={formatNanoton(starsTon())} titleRightSecondary>
                 {i18n('MenuTelegramStarsTon')}
@@ -466,6 +522,23 @@ const Settings = () => {
           </Row>
         </Section>
       </Show>
+      {/* help, the way tdesktop ends its main settings */}
+      <Section>
+        <Row clickable={openTelegramFaq}>
+          <Row.Icon icon="faq_filled" />
+          <Row.Title>{i18n('TelegramFaq')}</Row.Title>
+        </Row>
+        <Row clickable={() => askQuestion(bindManagersToSession(rootScope.managers))}>
+          <Row.Icon icon="message_filled" />
+          <Row.Title>{i18n('AskAQuestion')}</Row.Title>
+        </Row>
+      </Section>
+      <A11yButton class={styles.version} onClick={openExperimental}>
+        <span dir="ltr">{getAppVersionText()}</span>
+        <Show when={experimentalOn()}>
+          <span class={styles.versionOn}>{i18n('Experimental.OnNotice')}</span>
+        </Show>
+      </A11yButton>
     </>
   );
 };

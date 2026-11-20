@@ -1,6 +1,7 @@
 import {describe, expect, it} from 'vitest';
-import {readdirSync, readFileSync, statSync} from 'fs';
+import {readdirSync, readFileSync} from 'fs';
 import {join} from 'path';
+import walkSources from '@/tests/helpers/walkSources';
 
 /*
  * The popup sandbox is only worth as much as its coverage, and a popup added without a story is
@@ -24,6 +25,8 @@ const REACHED_INDIRECTLY: {[file: string]: string} = {
   'aiEditorPopup/aiEditorPopup.tsx': 'the `aiEditor` story imports the folder index, which re-exports it',
   'aiEditorPopup/context.ts': 'the AI editor and Create with AI stories use this shared context factory; it does not open a popup',
   'starsPay.tsx': 'the `payment/starsPay` story goes through `PopupPayment.create`, which picks it for a Stars form',
+  'myQrCode/layout.ts': 'the QR screen\'s geometry; `openLayout` is where the card goes while a panel is open, not a popup',
+  'myQrCode/premiumToast.ts': 'a toast the QR screen shows for a Premium-only choice, not a popup',
   'indexTsx.tsx': 'the popup base component, not a popup'
 };
 
@@ -43,21 +46,13 @@ const FORK_WITHOUT_STORY = new Set([
   'storyComposer.tsx'
 ]);
 
-function walk(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const path = join(dir, name);
-    if(statSync(path).isDirectory()) return walk(path);
-    return /\.tsx?$/.test(name) ? [path] : [];
-  });
-}
-
 describe('popup sandbox coverage', () => {
   const storySource = readdirSync(STORIES_DIR)
   .filter((name) => name.endsWith('.ts'))
   .map((name) => readFileSync(join(STORIES_DIR, name), 'utf8'))
   .join('\n');
 
-  const modulesWithEntries = walk(POPUPS_DIR).filter((path) => {
+  const modulesWithEntries = walkSources(POPUPS_DIR).filter((path) => {
     ENTRY.lastIndex = 0;
     return ENTRY.test(readFileSync(path, 'utf8'));
   });

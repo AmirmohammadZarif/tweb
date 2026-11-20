@@ -15,6 +15,7 @@ import GroupCallTitleElement from '@components/groupCall/title';
 import requestGroupCallLeave from '@components/groupCall/requestLeave';
 import {addFullScreenListener, cancelFullScreen, isFullScreen, requestFullScreen} from '@helpers/dom/fullScreen';
 import ControlsHover from '@helpers/dom/controlsHover';
+import disableTransition from '@helpers/dom/disableTransition';
 import {MovableState} from '@components/movableElement';
 import animationIntersector from '@components/animationIntersector';
 import {IS_APPLE_MOBILE} from '@environment/userAgent';
@@ -28,12 +29,13 @@ import classNames from '@helpers/string/classNames';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import themeController from '@helpers/themeController';
 import groupCallsController from '@lib/calls/groupCallsController';
-import {createSignal, onCleanup, onMount, untrack, useContext} from 'solid-js';
+import {createEffect, createSignal, on, onCleanup, onMount, untrack, useContext} from 'solid-js';
 import FingerprintBadge from '@components/conferenceCall/fingerprintBadge';
 import {wrapSolidComponent} from '@helpers/solid/wrapSolidComponent';
 import showCallSettingsPopup from '@components/call/settingsPopup';
 import {toastNew} from '@components/toast';
-import {i18n, LangPackKey} from '@lib/langPack';
+import {showCallAccount} from '@lib/calls/callAccount';
+import I18n, {i18n, LangPackKey} from '@lib/langPack';
 import {
   GROUP_CALL_MICROPHONE_BUTTON_STATE,
   getGroupCallMicrophoneButtonState,
@@ -47,9 +49,12 @@ import {copyTextToClipboard} from '@helpers/clipboard';
 import shareGroupCallInviteLink from '@components/call/shareInviteLink';
 import createInviteViaLinkRow from '@components/groupCall/inviteViaLinkRow';
 import {
+  GroupCallInviteKind,
   inviteConferenceParticipants,
+  inviteVideoChatParticipants,
   showConferenceInviteResultToast
 } from '@components/groupCall/inviteParticipants';
+import {GroupCallParticipantsActions} from '@components/groupCall/participantsSection';
 import {GROUP_CALL_STAGE_GAP} from '@components/groupCall/videoLayout';
 
 export enum GROUP_CALL_PARTICIPANT_MUTED_STATE {
@@ -101,11 +106,7 @@ export function getColorByMutedState(state: GROUP_CALL_PARTICIPANT_MUTED_STATE) 
   const states = GROUP_CALL_PARTICIPANT_MUTED_STATE;
   let colorStr: 'blue' | 'green' | 'secondary' | 'red';
   switch(state) {
-    // An open microphone is blue until its owner speaks, then green — as in
-    // the native apps; green for every unmuted row said "speaking" to people
-    // who were silent.
     case states.HAND:
-    case states.UNMUTED:
       colorStr = 'blue';
       break;
     // An open microphone stays grey until its owner speaks, then turns green;
@@ -172,16 +173,21 @@ export default function showGroupCallPopup() {
   let updateBlobsVisibility: () => void;
   let groupCallMicrophoneIcon: GroupCallMicrophoneIcon;
   let bodyEl!: HTMLDivElement;
+  let fingerprintBadge: HTMLElement;
 
   // How much of the stage the participants column covers, plus a gap before it. Read off layout
-  // offsets rather than boxes, so a column still sliding in reads where it is going.
+  // offsets rather than boxes, so a column still sliding in reads where it is going. The column is
+  // at the inline end: on the left in RTL.
   const getColumnCover = () => {
     if(!untrack(isBigLayout) || !untrack(isRightColumnShown) || !bodyEl) {
       return 0;
     }
 
     const {stage} = videoGrid;
-    return stage.offsetLeft + stage.offsetWidth - bodyEl.offsetLeft + GROUP_CALL_STAGE_GAP;
+    const cover = I18n.getIsRTL() ?
+      bodyEl.offsetLeft + bodyEl.offsetWidth - stage.offsetLeft :
+      stage.offsetLeft + stage.offsetWidth - bodyEl.offsetLeft;
+    return cover + GROUP_CALL_STAGE_GAP;
   };
 
   const updateGridMode = (animate: boolean) => {
@@ -204,6 +210,13 @@ export default function showGroupCallPopup() {
     } */
 
     const wasBig = untrack(isBigLayout);
+    if(isBig !== wasBig && fingerprintBadge) {
+      // A restored wide panel places the pill at once; only toggling its column slides it.
+      disableTransition(Array.from(fingerprintBadge.querySelectorAll<HTMLElement>(
+        '.conference-encryption-track, .conference-encryption-card'
+      )));
+    }
+
     let buttons: HTMLElement[];
     if(isBig && !wasBig) { // fix buttons transition to 0 opacity
       buttons = Array.from(buttonsContainer.querySelectorAll<HTMLElement>('.' + className + '-button'));
@@ -319,6 +332,10 @@ export default function showGroupCallPopup() {
       }
     });
 
+    // A language switched on the fly moves the column to the other side and the tiles follow it
+    // (the stage it leaves is as wide either way, so only the layout changes).
+    createEffect(on(I18n.isRTL, () => videoGrid.relayout(), {defer: true}));
+
     groupCallTitle = new GroupCallTitleElement(title);
     groupCallDescription = new GroupCallDescriptionElement(subtitle);
     groupCallBodyHeaderDescription = new GroupCallDescriptionElement(newHeaderTitle);
@@ -327,7 +344,6 @@ export default function showGroupCallPopup() {
     // call's key, under the header, lets users visually verify the call is
     // encrypted to the same key on every participant's device. No key for a
     // legacy voice chat.
-    let fingerprintBadge: HTMLElement;
     if(instance?.e2e) {
       const [hash, setHash] = createSignal<Uint8Array | undefined>(
         instance.e2eStatus?.verification?.emojiHash
@@ -416,33 +432,41 @@ export default function showGroupCallPopup() {
       });
     };
 
-    const isConferenceInviteContextCurrent = (inviteInstance: GroupCallInstance): boolean => {
+    const isInviteContextCurrent = (inviteInstance: GroupCallInstance): boolean => {
       return !context.destroyed &&
         instance === inviteInstance &&
         groupCallsController.groupCall === inviteInstance &&
-        !!inviteInstance.e2e &&
         !inviteInstance.isClosing;
     };
 
-    const runConferenceInvites = async(inviteInstance: GroupCallInstance, peerIds: PeerId[]) => {
-      const isAlive = () => isConferenceInviteContextCurrent(inviteInstance);
-      const result = await inviteConferenceParticipants(peerIds, {isAlive});
+    const runInvites = async(inviteInstance: GroupCallInstance, kind: GroupCallInviteKind, peerIds: PeerId[]) => {
+      const isAlive = () => isInviteContextCurrent(inviteInstance);
+      const result = kind === 'conference' ?
+        await inviteConferenceParticipants(peerIds, {isAlive}) :
+        await inviteVideoChatParticipants(inviteInstance, peerIds, {isAlive});
       if(!isAlive()) return;
 
-      await showConferenceInviteResultToast(result);
+      await showConferenceInviteResultToast(result, kind);
     };
 
     // A conference has no admins, so nobody mints a speaker link.
     const onConferenceShareLinkClick = () => shareGroupCallInviteLink(instance, {
       canManage: false,
-      isAlive: () => isConferenceInviteContextCurrent(instance)
+      isAlive: () => isInviteContextCurrent(instance)
     });
 
     // one picker at a time: the row that opens it stays clickable while the list loads
     let isPickingInvitees = false;
-    function onConferenceInviteClick() {
+    /**
+     * Who to call in: a conference picks from the account's chats and contacts and offers its link
+     * besides (tdesktop's ConfInviteController, calls_group_invite_controller.cpp:806), a video chat
+     * picks from its chat's members (InviteController). Both select several, send once the box is
+     * confirmed and report the whole batch in one toast.
+     */
+    function onInviteClick(kind: GroupCallInviteKind) {
       if(isPickingInvitees) return;
       isPickingInvitees = true;
+      const isConference = kind === 'conference';
       return runControlAction(
         undefined,
         async() => {
@@ -451,17 +475,19 @@ export default function showGroupCallPopup() {
           // gesture, and a round trip in between loses that activation.
           const [participants, link] = await Promise.all([
             instance.participants,
-            managers.appGroupCallsManager.exportGroupCallInvite(instance.id).catch((err): string => {
+            isConference ? managers.appGroupCallsManager.exportGroupCallInvite(instance.id).catch((err): string => {
               console.error('export group call invite failed', err);
               return undefined;
-            })
+            }) : undefined,
+            // * the people to pick are the call's account's contacts and members
+            showCallAccount(instance.accountNumber)
           ]);
-          if(!isConferenceInviteContextCurrent(instance)) return;
+          if(!isInviteContextCurrent(instance)) return;
 
           await new Promise<void>((resolve) => {
             // Confirming with nothing picked used to be a dead button. It is the
             // moment you want the link itself, so that is what it offers.
-            const copyFooter = createCopyLinkFooter({
+            const copyFooter = isConference && createCopyLinkFooter({
               confirmLangKey: 'ConferenceCall.Invite.Button',
               copy: () => {
                 if(!link) {
@@ -475,33 +501,37 @@ export default function showGroupCallPopup() {
               confirm: () => popup.finalize()
             });
 
-            // tdesktop's conference invite box (calls_group_invite_controller.cpp:806):
-            // a multi-select list with an "Invite via Link" row above it, one
-            // request per person, and a single toast that reports every verdict.
             const popup = showPickUserPopup({
-              titleLangKey: 'ConferenceCall.Invite.Title',
-              peerType: ['dialogs', 'contacts'],
+              ...(isConference ? {
+                titleLangKey: 'ConferenceCall.Invite.Title',
+                peerType: ['dialogs', 'contacts'],
+                ...copyFooter
+              } : {
+                titleLangKey: 'VoipGroupInviteMember',
+                peerType: ['channelParticipants'],
+                peerId: instance.chatId.toPeerId(true),
+                footerButtonProps: {langKey: 'VoiceChat.Invite.Button'}
+              }),
               placeholder: 'Search',
               exceptSelf: true,
               multiSelect: true,
-              ...copyFooter,
               excludePeerIds: new Set([
                 ...participants.keys(),
                 ...instance.memberWithAccessPeerIds
               ]),
-              filterPeerTypeBy: (peer) => peer._ === 'user' && !peer.pFlags.bot,
+              filterPeerTypeBy: (peer) => peer._ === 'user' && !peer.pFlags.bot && !peer.pFlags.deleted,
               onSelect: (chosen) => {
                 const peerIds = chosen.map(({peerId}) => peerId);
-                if(!peerIds.length || !isConferenceInviteContextCurrent(instance)) return;
+                if(!peerIds.length || !isInviteContextCurrent(instance)) return;
 
                 // Don't hold the picker open for the round trips — tdesktop
                 // closes its box on confirm and toasts once the batch answers.
-                void runConferenceInvites(instance, peerIds);
+                void runInvites(instance, kind, peerIds);
               },
               onClose: resolve
             });
 
-            popup.selector.section.content.prepend(createInviteViaLinkRow({
+            if(isConference) popup.selector.section.content.prepend(createInviteViaLinkRow({
               middleware: popup.middleware,
               onClick: () => {
                 popup.hide();
@@ -515,6 +545,46 @@ export default function showGroupCallPopup() {
         isPickingInvitees = false;
       });
     }
+
+    // tdesktop Members::setupAddMember: a video chat's members are invited by whoever may write
+    // there and is in the call as themselves (a channel invites nobody); a live stream has no
+    // members to invite.
+    const [canInviteMembers, setCanInviteMembers] = createSignal(false);
+    const [joinedAsSelf, setJoinedAsSelf] = createSignal(!instance.joinAsPeerId);
+    // * asked again on every change of the chat - rights given or taken away while the panel is open -
+    // * of the call's own account; the latest question's answer is the one kept
+    let inviteRightsGeneration = 0;
+    const updateCanInviteMembers = () => {
+      const generation = ++inviteRightsGeneration;
+      const {appChatsManager} = instance.managers;
+      Promise.all([
+        appChatsManager.isBroadcast(instance.chatId),
+        appChatsManager.hasRights(instance.chatId, 'send_plain')
+      ]).then(([isBroadcast, canSend]) => {
+        if(generation === inviteRightsGeneration) setCanInviteMembers(!isBroadcast && canSend);
+      }).catch((err) => {
+        console.error('group call invite rights failed', err);
+      });
+    };
+    if(!instance.e2e) {
+      updateCanInviteMembers();
+      listenerSetter.add(rootScope)('chat_update', (chatId) => {
+        if(chatId === instance.chatId) updateCanInviteMembers();
+      });
+    }
+
+    const participantsActions = (): GroupCallParticipantsActions => {
+      if(instance.e2e) return {
+        addPeople: () => void onInviteClick('conference'),
+        addPeopleLabel: 'ConferenceCall.Invite.Title',
+        shareLink: () => void onConferenceShareLinkClick()
+      };
+
+      if(canInviteMembers() && joinedAsSelf()) return {
+        addPeople: () => void onInviteClick('videoChat'),
+        addPeopleLabel: 'VoipGroupInviteMember'
+      };
+    };
 
     const onMoreClick = async() => {
       try {
@@ -624,6 +694,7 @@ export default function showGroupCallPopup() {
       groupCallTitle.update(instance);
       groupCallDescription.update(instance);
       groupCallBodyHeaderDescription.update(instance);
+      setJoinedAsSelf(!instance.joinAsPeerId);
 
       setSharingVideo(instance.isSharingVideo);
       setSharingScreen(instance.isSharingScreen);
@@ -676,11 +747,8 @@ export default function showGroupCallPopup() {
         managers,
         videoList: videoGrid.list,
         videoGrid,
-        // under the last participant, as tdesktop has them (a voice chat's are in its settings)
-        actions: instance.e2e ? {
-          addPeople: () => void onConferenceInviteClick(),
-          shareLink: () => void onConferenceShareLinkClick()
-        } : undefined
+        // under the last participant, as tdesktop has them (a voice chat's link is in its settings)
+        actions: participantsActions
       });
 
       // On the stage the controls step aside while the pointer rests, the way a player's do.
@@ -776,6 +844,8 @@ export default function showGroupCallPopup() {
     <PopupElement
       class={classNames('popup-group-call', IS_MOVABLE_PANEL && 'movable-element')}
       kind={GROUP_CALL_POPUP_KIND}
+      managers={instance.managers}
+      keepOnAccountSwitch
       withoutOverlay
       closable
       show={show()}

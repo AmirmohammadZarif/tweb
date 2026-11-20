@@ -30,7 +30,7 @@ export interface AnimationItem {
   staleTimer?: ReturnType<typeof setTimeout>
 };
 
-export type AnimationItemType = 'lottie' | 'dots' | 'video' | 'emoji';
+export type AnimationItemType = 'lottie' | 'dots' | 'video' | 'emoji' | 'widget' | 'star';
 
 export interface AnimationItemWrapper {
   remove: () => void;
@@ -45,6 +45,42 @@ export interface AnimationItemWrapper {
   // onVisibilityChange?: (visible: boolean) => boolean;
 };
 
+/** An animation that runs itself, told by the intersector when to play and when to stand */
+export class AnimationItemNested implements AnimationItemWrapper {
+  public autoplay = true;
+  public loop = true;
+  public paused = true;
+
+  constructor(private options: {
+    onPlay: () => void,
+    onPause: () => void,
+    onDestroy?: () => void
+  }) {}
+
+  public remove() {
+    this.pause();
+    this.options.onDestroy?.();
+  }
+
+  public play() {
+    if(!this.paused) {
+      return;
+    }
+
+    this.paused = false;
+    this.options.onPlay();
+  }
+
+  public pause() {
+    if(this.paused) {
+      return;
+    }
+
+    this.paused = true;
+    this.options.onPause();
+  }
+}
+
 // How long an animation whose element has never been inserted is kept before the out-of-DOM reclaim
 // takes it anyway - bounds the leak for a subtree that is built and then dropped without ever showing.
 const NEVER_SHOWN_RECLAIM_TIMEOUT = 60000;
@@ -56,6 +92,9 @@ export class AnimationIntersector {
 
   private overrideIdleGroups: Set<string>;
   private byGroups: {[group in AnimationItemGroup]?: AnimationItem[]};
+  // * subtrees out of sight while still in the viewport (see holdUnder)
+  /** The roots nothing under plays (holdUnder), with how many holds each has. */
+  private heldUnder: Map<Node, number>;
   private byPlayer: Map<AnimationItem['animation'], AnimationItem>;
   // Element → its AnimationItems, kept in lockstep with byGroups/byPlayer (see add/removeAnimation).
   // The IntersectionObserver callback (onObserve) and getAnimations() resolve target → item via this
@@ -132,6 +171,7 @@ export class AnimationIntersector {
 
     this.intersectionLockedGroups = {};
     this.videosLocked = false;
+    this.heldUnder = new Map();
 
     // An IntersectionObserver's implicit root is the viewport of the realm that constructed it. When
     // the client pops into a Document PiP window the whole app DOM (incl. every observed sticker / gif
@@ -180,12 +220,18 @@ export class AnimationIntersector {
   // ancestor transform), so off-screen detection alone never stops avatar videos
   // animating inside the closed panel. Driven by 'right_sidebar_toggle'.
   public toggleVideosUnder(element: HTMLElement, paused: boolean) {
+    this.toggleAnimationsUnder(element, paused, 'video');
+  }
+
+  // The same for every animation (or every one of a type) inside `element`: what is sent flies its message's
+  // own sticker, GIF or emoji held still on the frame it starts at, and lets it go on once it is in its place.
+  public toggleAnimationsUnder(element: HTMLElement, paused: boolean, type?: AnimationItemType) {
     if(!element) {
       return;
     }
 
     this.byPlayer.forEach((item) => {
-      if(item.type !== 'video' || !element.contains(item.el)) {
+      if((type && item.type !== type) || !element.contains(item.el)) {
         return;
       }
 
@@ -311,7 +357,8 @@ export class AnimationIntersector {
     group?: AnimationItemGroup,
     destroy?: boolean,
     imitateIntersection?: boolean,
-    exceptGroup?: AnimationItemGroup
+    exceptGroup?: AnimationItemGroup,
+    exceptUnder?: Node
   ) {
     // if(rootScope.idle.isIDLE) return;
 
@@ -334,13 +381,19 @@ export class AnimationIntersector {
       const animations = this.byGroups[group];
 
       forEachReverse(animations, (animation) => {
+        if(exceptUnder?.contains(animation.el)) {
+          return;
+        }
+
         this.checkAnimation(animation, blurred, destroy);
       });
     }
   }
 
-  public checkAnimations2(blurred?: boolean, exceptGroup?: AnimationItemGroup) {
-    this.checkAnimations(blurred, undefined, undefined, true, exceptGroup);
+  // * `exceptUnder`: what stands in it is left as it is - the content of a popup that pauses what is
+  // * under it
+  public checkAnimations2(blurred?: boolean, exceptGroup?: AnimationItemGroup, exceptUnder?: Node) {
+    this.checkAnimations(blurred, undefined, undefined, true, exceptGroup, exceptUnder);
   }
 
   public checkAnimation(player: AnimationItem, blurred?: boolean, destroy?: boolean) {
@@ -395,7 +448,8 @@ export class AnimationIntersector {
     if(
       blurred ||
       (this.onlyOnePlayableGroup && this.onlyOnePlayableGroup !== group) ||
-      (player.type === 'video' && this.videosLocked)
+      (player.type === 'video' && this.videosLocked) ||
+      this.isHeld(el)
     ) {
       if(!animation.paused) {
         // console.warn('pause animation:', animation);
@@ -415,6 +469,51 @@ export class AnimationIntersector {
 
   public getOnlyOnePlayableGroup() {
     return this.onlyOnePlayableGroup;
+  }
+
+  private isHeld(el: HTMLElement) {
+    if(!this.heldUnder.size) return false;
+    for(const root of this.heldUnder.keys()) {
+      if(root.contains(el)) return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Nothing under `root` plays until the returned release, whatever asks it to - the window coming back
+   * into focus, a popup closing: `root` stays in the viewport but out of sight (the app under an account's
+   * sign-in). What is elsewhere plays as before. Each hold is its own: a root held twice (a sandbox opened
+   * over the sign-in) plays again only once both are released, and a release counts once however often it
+   * is called.
+   */
+  public holdUnder(root: Node) {
+    const holds = this.heldUnder.get(root) ?? 0;
+    this.heldUnder.set(root, holds + 1);
+    if(!holds) this.checkAnimationsUnder(root);
+    let released = false;
+    return () => {
+      if(released) return;
+      released = true;
+      const left = this.heldUnder.get(root) - 1;
+      if(left) {
+        this.heldUnder.set(root, left);
+        return;
+      }
+
+      this.heldUnder.delete(root);
+      this.checkAnimationsUnder(root);
+    };
+  }
+
+  private checkAnimationsUnder(root: Node) {
+    for(const group in this.byGroups) {
+      forEachReverse(this.byGroups[group as AnimationItemGroup], (player) => {
+        if(root.contains(player.el)) {
+          this.checkAnimation(player);
+        }
+      });
+    }
   }
 
   public setOnlyOnePlayableGroup(group: AnimationItemGroup = '') {
@@ -454,6 +553,15 @@ export class AnimationIntersector {
   public unlockIntersectionGroup(group: AnimationItemGroup) {
     delete this.intersectionLockedGroups[group];
     this.refreshGroup(group);
+  }
+
+  /**
+   * Whether what plays from the start in `group` (a widget) is to be paused as it is added: the window is idle, or the
+   * group is held as it is (its chat kept behind another) — the observer says nothing of either then, and pauses only
+   * what plays as they come about
+   */
+  public isGroupHeld(group: AnimationItemGroup) {
+    return !!this.intersectionLockedGroups[group] || (idleController.isIdle && !this.overrideIdleGroups.has(group));
   }
 
   public toggleIntersectionGroup(group: AnimationItemGroup, lock: boolean) {
@@ -508,5 +616,6 @@ export class AnimationIntersector {
 }
 
 const animationIntersector = new AnimationIntersector();
+if(import.meta.hot) import.meta.hot.accept();
 MOUNT_CLASS_TO && (MOUNT_CLASS_TO.animationIntersector = animationIntersector);
 export default animationIntersector;

@@ -143,9 +143,13 @@ const Row = (props: {children: JSX.Element} & Partial<{
       )).filter((element) => element !== primaryTarget);
       setHasNestedControl(!!nested.length);
       // A row with a separate trailing action needs a separate primary target,
-      // rather than an interactive ancestor or a mouse-only title.
+      // rather than an interactive ancestor or a mouse-only title. A field takes the
+      // row's click itself — unless it sits in the right column, where it is that
+      // trailing action (a weekday's switch on a row that opens the day).
       const needsPrimaryTarget = !props.as && !props.role && !isCheckbox() && nested.length &&
-        title && !nested.some((element) => title.contains(element) || element.matches('input, select, textarea, [contenteditable="true"]'));
+        title && !nested.some((element) => title.contains(element) || (
+          element.matches('input, select, textarea, [contenteditable="true"]') && !element.closest('.row-right')
+        ));
       if(!needsPrimaryTarget || primaryTarget !== title) clearPrimaryTarget();
       if(needsPrimaryTarget) {
         primaryTarget = title;
@@ -312,7 +316,10 @@ Row.Row = (props: {
   leftRef?: Ref<HTMLDivElement>,
   rightRef?: Ref<HTMLDivElement>
 }) => {
-  const part = (
+  // * the left part is made in whichever branch shows it: one node put into both, alone and beside a right part,
+  // * was moved into the new branch before the old one was taken out, and Solid lost it — a title vanished as soon
+  // * as its right part arrived
+  const part = () => (
     <Row.RowPart
       elementRef={props.leftRef}
       class={classNames(props.class, props.additionalClass)}
@@ -321,9 +328,9 @@ Row.Row = (props: {
   );
   const resolved = children(() => props.right);
   return (
-    <Show when={!!props.rightRef || !!resolved()} fallback={part}>
+    <Show when={!!props.rightRef || !!resolved()} fallback={part()}>
       <div class={classNames('row-row', `row-${props.class}-row`, props.rowClass)}>
-        {part}
+        {part()}
         <Row.RowPart
           elementRef={props.rightRef}
           class={classNames(
@@ -414,6 +421,7 @@ Row.Subtitle = (props: {
 
 Row.Icon = (props: {
   icon: Icon,
+  text?: string,
   class?: string,
   noBackground?: boolean
 }) => {
@@ -429,7 +437,9 @@ Row.Icon = (props: {
         'background-image': getRowIconBackgroundImage(props.icon)
       }}
     >
-      <IconTsx icon={props.icon} class="row-icon-icon" />
+      {props.text ?
+        <span aria-hidden="true" class="row-icon-text">{props.text}</span> :
+        <IconTsx icon={props.icon} class="row-icon-icon" />}
     </span>
   ));
 };

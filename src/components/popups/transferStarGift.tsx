@@ -25,13 +25,14 @@ import {I18nTsx} from '@helpers/solid/i18n';
 import MediaHeader from '@components/mediaHeader';
 import {PeerTitleTsx} from '@components/peerTitleTsx';
 import Table, {TableRow} from '@components/table';
-import {AttributeValue} from '@components/popups/starGiftInfo';
+import {GiftAttributeValue} from '@components/stargifts/giftAttributeValue';
 import paymentsWrapCurrencyAmount, {formatNanoton} from '@helpers/paymentsWrapCurrencyAmount';
 import {FloatingStarsBalance} from '@components/popups/floatingStarsBalance';
 import {doubleRaf} from '@helpers/schedulers';
 import {useAppConfig} from '@stores/appState';
 import bigInt from 'big-integer';
 import {STARS_CURRENCY, TON_CURRENCY} from '@appManagers/constants';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 export function transferStarGiftConfirmationPopup(options: {
   gift: MyStarGift,
@@ -51,19 +52,19 @@ export function transferStarGiftConfirmationPopup(options: {
 
     const rows: TableRow[] = [
       ['StarGiftModel', (
-        <AttributeValue
+        <GiftAttributeValue
           name={collectibleAttributes.model.name}
           rarity={collectibleAttributes.model.rarity}
         />
       )],
       ['StarGiftBackdrop', (
-        <AttributeValue
+        <GiftAttributeValue
           name={collectibleAttributes.backdrop.name}
           rarity={collectibleAttributes.backdrop.rarity}
         />
       )],
       ['StarGiftPattern', (
-        <AttributeValue
+        <GiftAttributeValue
           name={collectibleAttributes.pattern.name}
           rarity={collectibleAttributes.pattern.rarity}
         />
@@ -237,10 +238,7 @@ export default function transferStarGift(gift: MyStarGift, toPeerId?: PeerId): P
           button: {
             langKey: 'Confirm'
           },
-          callback: (password) => rootScope.managers.apiManager.invokeApi('payments.getStarGiftWithdrawalUrl', {
-            stargift: input,
-            password: password
-          })
+          callback: (password) => rootScope.managers.appGiftsManager.getGiftWithdrawalUrl(input, password)
         })
 
         safeWindowOpen(url.url);
@@ -256,10 +254,11 @@ export default function transferStarGift(gift: MyStarGift, toPeerId?: PeerId): P
       gift,
       recipient: peerId,
       handleSubmit: async() => {
-        const inputPeer = await rootScope.managers.appPeersManager.getInputPeerById(peerId);
+        const managers = bindManagersToSession(rootScope.managers);
+        const inputPeer = await managers.appPeersManager.getInputPeerById(peerId);
 
         if(Number(saved?.transfer_stars ?? '0') === 0) {
-          await rootScope.managers.appGiftsManager.transferStarGift(gift.input, peerId, gift.ownerId);
+          await managers.appGiftsManager.transferStarGift(gift.input, peerId, gift.ownerId);
           deferred.resolve(true)
         } else {
           const popup = await createPaymentPopup({

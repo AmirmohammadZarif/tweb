@@ -3,10 +3,11 @@ import {DEBUG, MOUNT_CLASS_TO} from '@config/debug';
 import {IS_CHROMIUM} from '@environment/userAgent';
 import EventListenerBase from '@helpers/eventListenerBase';
 import noop from '@helpers/noop';
+import deferredPromise from '@helpers/cancellablePromise';
 import pause from '@helpers/schedulers/pause';
 import {GroupCallParticipant, GroupCallParticipantVideo, GroupCallParticipantVideoSourceGroup} from '@layer';
 import {GroupCallId, GroupCallConnectionType} from '@appManagers/appGroupCallsManager';
-import {AppManagers} from '@lib/managers';
+import {AppManagers, TabManagers} from '@lib/managers';
 import {logger} from '@lib/logger';
 import rootScope from '@lib/rootScope';
 import GroupCallInstance from '@lib/calls/groupCallInstance';
@@ -29,6 +30,7 @@ import type {GroupParticipant} from '@lib/calls/e2e/tlTypes';
 import type {InputGroupCall, Updates} from '@layer';
 import {NULL_PEER_ID} from '@appManagers/constants';
 import {toastNew} from '@components/toast';
+import {CallAccount, captureCallAccount, getCallAccountOf} from '@lib/calls/callAccount';
 
 const IS_MUTED = true;
 
@@ -83,12 +85,15 @@ type ConferenceJoinOptions = {
   transitionGeneration?: number;
   /** Prevents an automatic media-blackhole recovery from rejoining in a loop. */
   outboundMediaRecoveryUsed?: boolean;
+  /** The account the call is joined on: the tab's when left out, the previous call's for a rejoin. */
+  account?: CallAccount;
 };
 type ConferenceStartOptions = {
   chatId?: ChatId;
   selfUserId: bigint;
   muted?: boolean;
   joinVideo?: boolean;
+  account?: CallAccount;
 };
 
 class ConferenceTransitionCancelledError extends Error {}
@@ -131,7 +136,7 @@ export class GroupCallsController extends EventListenerBase<{
   private audioAsset: ReturnType<typeof getGroupCallAudioAsset>;
   private log: ReturnType<typeof logger>;
   private currentGroupCall: GroupCallInstance;
-  private managers: AppManagers;
+  private managers: TabManagers;
   private pendingConferenceJoin: {
     key: string,
     promise: Promise<GroupCallInstance>
@@ -147,9 +152,11 @@ export class GroupCallsController extends EventListenerBase<{
   private pendingConferenceRecovery?: {instance: GroupCallInstance, reason: string};
   private outboundMediaRecoveryUsed = new WeakSet<GroupCallInstance>();
   private groupCallRejoins = new WeakMap<GroupCallInstance, Promise<void>>();
+  // * a first join holding that place: the recovery asked for meanwhile (its reason), run once it settles
+  private groupCallFirstJoins = new WeakMap<GroupCallInstance, {recoveryReason?: string}>();
   private groupCallRejoinAttempts = new WeakMap<GroupCallInstance, number>();
 
-  public construct(managers: AppManagers) {
+  public construct(managers: TabManagers) {
     this.managers = managers;
     this.audioAsset = getGroupCallAudioAsset();
     this.log = logger('GCC');
@@ -190,7 +197,7 @@ export class GroupCallsController extends EventListenerBase<{
     if(!instance) return;
     const target = this.resolveLeaveTarget(instance, instance.connections.main);
     if(!target) return;
-    void this.managers.appGroupCallsManager.leaveGroupCall(target.input, target.source).catch(noop);
+    void instance.managers.appGroupCallsManager.leaveGroupCall(target.input, target.source).catch(noop);
   }
 
   // The server-side identity + audio source a leave for `instance` is addressed
@@ -208,6 +215,11 @@ export class GroupCallsController extends EventListenerBase<{
 
   get groupCall() {
     return this.currentGroupCall;
+  }
+
+  /** Whether `instance` is still the call in progress: what an action started for it checks after each wait. */
+  public isCurrentGroupCall(instance: GroupCallInstance) {
+    return this.currentGroupCall === instance && !instance.isClosing;
   }
 
   public setCurrentGroupCall(groupCall: GroupCallInstance, isRecovery = false) {
@@ -274,7 +286,19 @@ export class GroupCallsController extends EventListenerBase<{
     });
   }
 
-  public async joinGroupCall(chatId: ChatId, groupCallId: GroupCallId, muted = IS_MUTED, rejoin?: boolean, joinVideo?: boolean) {
+  public async joinGroupCall(
+    chatId: ChatId,
+    groupCallId: GroupCallId,
+    muted = IS_MUTED,
+    rejoin?: boolean,
+    joinVideo?: boolean,
+    // * the account the call is joined on: the caller's when it asked
+    account = captureCallAccount(this.managers),
+    // a channel to be shown as instead of the account (getGroupCallJoinAs)
+    joinAs?: PeerId,
+    // the speaker invite of the link it is joined by (t.me/<chat>?voicechat=<hash>)
+    inviteHash?: string
+  ) {
     this.audioAsset.createAudio();
 
     this.log(`joinGroupCall chatId=${chatId} id=${groupCallId} muted=${muted} rejoin=${rejoin}`);
@@ -292,7 +316,7 @@ export class GroupCallsController extends EventListenerBase<{
     }
 
     const streamManager = await createMainStreamManager(muted, joinVideo);
-    return this.joinGroupCallInternal(chatId, groupCallId, streamManager, muted, joinVideo)
+    return this.joinGroupCallInternal(chatId, groupCallId, streamManager, muted, joinVideo, account, joinAs, inviteHash)
     .then(() => {
       // have to refresh participants because of the new connection
       const {currentGroupCall} = this;
@@ -322,15 +346,39 @@ export class GroupCallsController extends EventListenerBase<{
     });
   }
 
-  private async joinGroupCallInternal(chatId: ChatId, groupCallId: GroupCallId, streamManager: StreamManager, muted: boolean, joinVideo?: boolean) {
+  private async joinGroupCallInternal(
+    chatId: ChatId,
+    groupCallId: GroupCallId,
+    streamManager: StreamManager,
+    muted: boolean,
+    joinVideo: boolean,
+    account: CallAccount,
+    joinAs?: PeerId,
+    inviteHash?: string
+  ) {
     const log = this.log.bindPrefix('joinGroupCallInternal');
     log('start', groupCallId);
 
     const currentGroupCall = new GroupCallInstance({
       chatId,
       id: groupCallId,
-      managers: this.managers
+      ...account
     });
+    if(joinAs && joinAs !== account.myId) {
+      currentGroupCall.joinAsPeerId = joinAs;
+    }
+
+    currentGroupCall.inviteHash = inviteHash || undefined;
+
+    // The first join holds the place of a rejoin until it settles: one started meanwhile ("Display me
+    // as..." picked while phone.joinGroupCall is out) would replace the connection this join negotiates,
+    // and this join's rollback would then close the replacement and end the call.
+    // A recovery asked for meanwhile (a transport already failed when the negotiation ends) is held
+    // and run after it, instead of being folded into this join and lost.
+    const joined = deferredPromise<void>();
+    const firstJoin: {recoveryReason?: string} = {};
+    this.groupCallRejoins.set(currentGroupCall, joined);
+    this.groupCallFirstJoins.set(currentGroupCall, firstJoin);
 
     try {
       currentGroupCall.fixSafariAudio();
@@ -347,7 +395,7 @@ export class GroupCallsController extends EventListenerBase<{
         }
       });
 
-      currentGroupCall.groupCall = await this.managers.appGroupCallsManager.getGroupCallFull(groupCallId);
+      currentGroupCall.groupCall = await currentGroupCall.managers.appGroupCallsManager.getGroupCallFull(groupCallId);
 
       await this.connectMainConnection(currentGroupCall, streamManager, {
         muted,
@@ -368,6 +416,19 @@ export class GroupCallsController extends EventListenerBase<{
         streamManager
       });
       throw err;
+    } finally {
+      if(this.groupCallRejoins.get(currentGroupCall) === joined) {
+        this.groupCallRejoins.delete(currentGroupCall);
+      }
+
+      this.groupCallFirstJoins.delete(currentGroupCall);
+      // * before the waiters wake: an identity change waits for this rejoin too, and goes after it
+      // * (a failed join left no call to recover: the rejoin sees it and does nothing)
+      if(firstJoin.recoveryReason !== undefined) {
+        void this.recoverGroupCall(currentGroupCall, firstJoin.recoveryReason);
+      }
+
+      joined.resolve();
     }
   }
 
@@ -394,7 +455,9 @@ export class GroupCallsController extends EventListenerBase<{
         type,
         isMuted: options.muted,
         joinVideo: options.joinVideo,
-        rejoin: options.rejoin
+        rejoin: options.rejoin,
+        joinAs: instance.joinAsPeerId,
+        inviteHash: instance.inviteHash
       }
     });
 
@@ -436,7 +499,7 @@ export class GroupCallsController extends EventListenerBase<{
       isCurrent: isCurrentConnection,
       onFirstConnected: () => {
         this.audioAsset.play({name: 'start'});
-        void this.managers.appGroupCallsManager.getGroupCallParticipants(instance.id).catch((err) => {
+        void instance.managers.appGroupCallsManager.getGroupCallParticipants(instance.id).catch((err) => {
           log.warn('initial group call participant fetch failed', err);
         });
       }
@@ -545,6 +608,9 @@ export class GroupCallsController extends EventListenerBase<{
 
     const pending = this.groupCallRejoins.get(instance);
     if(pending) {
+      // * a first join is not a rejoin: what it was asked for runs after it (joinGroupCallInternal)
+      const firstJoin = this.groupCallFirstJoins.get(instance);
+      if(firstJoin) firstJoin.recoveryReason ??= reason;
       return pending;
     }
 
@@ -575,7 +641,7 @@ export class GroupCallsController extends EventListenerBase<{
         if(!isAlive()) return;
         rejoined = true;
         this.replayCachedParticipants(instance, 'group call participant replay after rejoin failed');
-        void this.managers.appGroupCallsManager.getGroupCallParticipants(instance.id).catch((err) => {
+        void instance.managers.appGroupCallsManager.getGroupCallParticipants(instance.id).catch((err) => {
           this.log.warn('group call participant refresh after rejoin failed', err);
         });
         return;
@@ -597,9 +663,64 @@ export class GroupCallsController extends EventListenerBase<{
     return promise;
   }
 
+  /**
+   * Show us as someone else in a live video chat: join again as them (tdesktop GroupCall::rejoinAs),
+   * keeping the microphone and the camera, the way a transport rejoin does. A rejoin already under
+   * way finishes first; if it went out as the previous identity, this one follows it.
+   */
+  public async changeGroupCallJoinAs(instance: GroupCallInstance, joinAs: PeerId): Promise<void> {
+    if(instance.isConference) {
+      throw new Error('A conference is joined as the account only');
+    }
+
+    instance.joinAsPeerId = joinAs !== instance.myId ? joinAs : undefined;
+    await this.rejoinUnlessJoined(instance, (options) => options.joinAs === instance.joinAsPeerId, 'join-as');
+  }
+
+  /**
+   * A link's speaker invite for the video chat we are in: while an admin keeps us muted, join again with it, so that
+   * we may speak (tdesktop Instance::activateCurrentCall → GroupCall::rejoinWithHash) - even if we joined with it
+   * before, and were muted since. Nothing otherwise.
+   */
+  public async rejoinWithInviteHash(instance: GroupCallInstance, inviteHash: string): Promise<void> {
+    const {participant} = instance;
+    if(!inviteHash || instance.isConference || !participant || participant.pFlags.can_self_unmute) {
+      return;
+    }
+
+    instance.inviteHash = inviteHash;
+    // * only a rejoin under way now that goes out with it does instead
+    const isRejoining = this.groupCallRejoins.has(instance);
+    await this.rejoinUnlessJoined(instance, (options) => isRejoining && options.inviteHash === inviteHash, 'invite-hash');
+  }
+
+  /**
+   * Join again with what the instance holds now: a rejoin already under way finishes first, and if the connection
+   * it leaves went out with that already (`isJoined`), nothing more is done.
+   */
+  private async rejoinUnlessJoined(
+    instance: GroupCallInstance,
+    isJoined: (options: Extract<GroupCallConnectionInstance['options'], {type: 'main'}>) => boolean,
+    reason: string
+  ): Promise<void> {
+    for(;;) {
+      const pending = this.groupCallRejoins.get(instance);
+      if(!pending) break;
+      await pending;
+    }
+
+    const main = instance.connections.main;
+    if(this.currentGroupCall !== instance || instance.isClosing ||
+      (main?.options?.type === 'main' && isJoined(main.options))) {
+      return;
+    }
+
+    await this.rejoinGroupCall(instance, reason);
+  }
+
   // phone.checkGroupCall: which of `sources` the server still has for us.
-  private checkGroupCallSources(call: InputGroupCall, sources: number[]): Promise<number[]> {
-    return this.managers.appGroupCallsManager.checkGroupCall(call, sources);
+  private checkGroupCallSources(instance: GroupCallInstance, call: InputGroupCall, sources: number[]): Promise<number[]> {
+    return instance.managers.appGroupCallsManager.checkGroupCall(call, sources);
   }
 
   // Undo everything a failed join built — close media, release the
@@ -641,9 +762,9 @@ export class GroupCallsController extends EventListenerBase<{
     if(!target) return;
     try {
       if(opts.discard) {
-        await this.managers.appGroupCallsManager.discardGroupCall(target.input);
+        await instance.managers.appGroupCallsManager.discardGroupCall(target.input);
       } else {
-        await this.managers.appGroupCallsManager.leaveGroupCall(target.input, target.source);
+        await instance.managers.appGroupCallsManager.leaveGroupCall(target.input, target.source);
       }
     } catch(leaveError) {
       this.log.warn('conference post-accept rollback failed', leaveError);
@@ -680,6 +801,7 @@ export class GroupCallsController extends EventListenerBase<{
   }
 
   public startConference(opts: ConferenceStartOptions): Promise<GroupCallInstance> {
+    opts = {...opts, account: opts.account ?? captureCallAccount(this.managers)};
     return this.runConferenceAttemptWithRetry(() => this.startConferenceAttempt(opts));
   }
 
@@ -697,7 +819,8 @@ export class GroupCallsController extends EventListenerBase<{
         lastBlockServer: zeroBlock,
         chatId: opts.chatId,
         muted: opts.muted,
-        joinVideo: opts.joinVideo
+        joinVideo: opts.joinVideo,
+        account: opts.account
       });
     } catch(err) {
       await worker.terminate().catch((): undefined => undefined);
@@ -710,7 +833,7 @@ export class GroupCallsController extends EventListenerBase<{
     if(!call || !this.currentGroupCall.e2e) {
       return Promise.reject(new Error('No active conference call'));
     }
-    return this.managers.appCallsManager.inviteConferenceCallParticipant(call, userId, video);
+    return this.currentGroupCall.managers.appCallsManager.inviteConferenceCallParticipant(call, userId, video);
   }
 
   public declineConferenceInvite(messageId: number): Promise<Updates> {
@@ -721,6 +844,7 @@ export class GroupCallsController extends EventListenerBase<{
   // Fetches the latest block from the server, builds our self-add block,
   // then joins the SFU.
   public joinConference(opts: ConferenceJoinOptions): Promise<GroupCallInstance> {
+    opts = {...opts, account: opts.account ?? captureCallAccount(this.managers)};
     const key = this.conferenceInputKey(opts.input);
     const pending = this.pendingConferenceJoin;
     if(pending) {
@@ -792,7 +916,7 @@ export class GroupCallsController extends EventListenerBase<{
     // Build the initial join block by polling the chain head and either making
     // a self-add block on top of it or a zero block if the chain is empty.
     const buildJoinBlock = async(): Promise<Uint8Array> => {
-      const head = await this.fetchLastConferenceBlock(opts.input, opts.expectedCanonicalInput);
+      const head = await this.fetchLastConferenceBlock(opts.account.managers, opts.input, opts.expectedCanonicalInput);
       initialOffsets[0] = head.nextOffset;
       return head.block ?
         worker.createSelfAddBlock({
@@ -807,7 +931,7 @@ export class GroupCallsController extends EventListenerBase<{
     // On a chain race the worker is already initialised, so it signs the
     // replacement with its retained key.
     const rebuildJoinBlock = async(): Promise<Uint8Array> => {
-      const head = await this.fetchLastConferenceBlock(opts.input, opts.expectedCanonicalInput);
+      const head = await this.fetchLastConferenceBlock(opts.account.managers, opts.input, opts.expectedCanonicalInput);
       initialOffsets[0] = head.nextOffset;
       if(!head.block) {
         throw new Error('Conference chain stayed empty after CONF_WRITE_CHAIN_INVALID');
@@ -840,7 +964,8 @@ export class GroupCallsController extends EventListenerBase<{
         muted: opts.muted,
         joinVideo: opts.joinVideo,
         transitionGeneration: opts.transitionGeneration,
-        outboundMediaRecoveryUsed: opts.outboundMediaRecoveryUsed
+        outboundMediaRecoveryUsed: opts.outboundMediaRecoveryUsed,
+        account: opts.account
       });
     } catch(e) {
       await worker.terminate().catch((): undefined => undefined);
@@ -877,6 +1002,7 @@ export class GroupCallsController extends EventListenerBase<{
     // accepted it. This preserves packet sequence/replay state and never
     // re-exposes the private seed to the main thread.
     commitRebuiltBlock?: () => Promise<void>;
+    account: CallAccount;
   }): Promise<GroupCallInstance> {
     this.audioAsset.createAudio();
     const streamManager = await createMainStreamManager(opts.muted ?? true, opts.joinVideo);
@@ -909,7 +1035,7 @@ export class GroupCallsController extends EventListenerBase<{
       const createdInstance = new GroupCallInstance({
         chatId: opts.chatId ?? NULL_PEER_ID,
         id: placeholderId,
-        managers: this.managers
+        ...opts.account
       });
       instance = createdInstance;
       if(opts.outboundMediaRecoveryUsed) {
@@ -981,7 +1107,7 @@ export class GroupCallsController extends EventListenerBase<{
       // the access_hash is still unknown — we hydrate after joinGroupCall echoes
       // back the real updateGroupCall with id+access_hash.
       if(opts.input && opts.input._ === 'inputGroupCall') {
-        instance.groupCall = await this.managers.appGroupCallsManager
+        instance.groupCall = await instance.managers.appGroupCallsManager
         .getGroupCallFull(opts.input.id)
         .catch((): GroupCallInstance['groupCall'] => undefined);
       }
@@ -1199,7 +1325,7 @@ export class GroupCallsController extends EventListenerBase<{
       let known: boolean | undefined;
       if(source !== undefined && input) {
         try {
-          const sources = await this.checkGroupCallSources(input, [source]);
+          const sources = await this.checkGroupCallSources(instance, input, [source]);
           known = sources.some((value) => toTelegramSource(value) === toTelegramSource(source));
         } catch(err) {
           this.log.warn('checking our group call source failed', err);
@@ -1502,7 +1628,8 @@ export class GroupCallsController extends EventListenerBase<{
           muted,
           joinVideo,
           transitionGeneration: generation,
-          ...(outboundMediaRecoveryUsed ? {outboundMediaRecoveryUsed: true} : {})
+          ...(outboundMediaRecoveryUsed ? {outboundMediaRecoveryUsed: true} : {}),
+          account: getCallAccountOf(instance)
         });
       } catch(err) {
         if(err instanceof ConferenceTransitionCancelledError) {
@@ -1550,6 +1677,7 @@ export class GroupCallsController extends EventListenerBase<{
   // zero block. Mirrors tdlib's GetGroupCallLastBlockQuery flow.
   // Accepts either `inputGroupCall` or `inputGroupCallSlug`.
   private async fetchLastConferenceBlock(
+    managers: AppManagers,
     input: InputGroupCall,
     expectedCanonicalInput?: InputGroupCall.inputGroupCall
   ): Promise<{
@@ -1558,10 +1686,10 @@ export class GroupCallsController extends EventListenerBase<{
   }> {
     // sub_chain_id 0 is the block chain. offset=-1, limit=1 fetches the tip
     // (see schema: phone.getGroupCallChainBlocks → Updates).
-    const updates = await this.managers.appCallsManager.getGroupCallChainBlocks(input, 0, -1, 1);
+    const updates = await managers.appCallsManager.getGroupCallChainBlocks(input, 0, -1, 1);
     // Surface the embedded updates through the normal pipeline so any side
     // effects (e.g. updateGroupCall) are applied to local state.
-    await this.managers.apiUpdatesManager.processUpdateMessage(updates);
+    await managers.apiUpdatesManager.processUpdateMessage(updates);
     const chainUpdate = findGroupCallChainUpdate(updates, 0, input, expectedCanonicalInput);
     if(!chainUpdate) {
       throw new Error('Conference chain response did not contain a matching block update');
@@ -1580,6 +1708,9 @@ export class GroupCallsController extends EventListenerBase<{
   }
 }
 
+// made once: a hot update keeps it and moves it onto the edited class (see @helpers/hotRegistry)
 const groupCallsController = new GroupCallsController();
 DEBUG && (MOUNT_CLASS_TO.groupCallController = groupCallsController);
 export default groupCallsController;
+
+if(import.meta.hot) import.meta.hot.accept();

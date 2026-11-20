@@ -1,5 +1,5 @@
 import type {JSONContent} from '@tiptap/core';
-import type {Document, PageBlock, Photo, RichMessage, RichText} from '@layer';
+import type {Document, PageBlock, PageCaption, Photo, RichMessage, RichText} from '@layer';
 import {
   richMessageToTiptap,
   tiptapToRichMessage
@@ -91,6 +91,73 @@ describe('Tiptap rich-message conversion', () => {
         date: 1784635200,
         pFlags: {long_date: true, day_of_week: true}
       }
+    });
+  });
+
+  test('wraps a mark that runs over several inline nodes once', () => {
+    // the server merges neighbouring equal wrappers, and an emoji alone in the first of them was
+    // lost: an edited [textBold(emoji), textBold(" A new look")] came back as textBold(" A new look")
+    const emoji = {type: 'customEmoji', attrs: {documentId: '5431456208487716895', emoji: '🎨'}};
+    const link = (href: string) => ({type: 'link', attrs: {href}});
+    const document: JSONContent = {
+      type: 'doc',
+      content: [{
+        type: 'heading',
+        attrs: {level: 2},
+        content: [
+          {...emoji, marks: [{type: 'bold'}]},
+          {type: 'text', text: ' A new look', marks: [{type: 'bold'}]}
+        ]
+      }, {
+        type: 'paragraph',
+        content: [
+          {...emoji, marks: [{type: 'bold'}, {type: 'spoiler'}]},
+          {type: 'text', text: ' hidden', marks: [{type: 'spoiler'}]},
+          {type: 'text', text: ' plain'}
+        ]
+      }, {
+        type: 'paragraph',
+        content: [
+          {...emoji, marks: [link('https://a.example')]},
+          {type: 'text', text: ' a', marks: [link('https://a.example')]},
+          {type: 'text', text: ' b', marks: [link('https://b.example')]}
+        ]
+      }]
+    };
+
+    const {blocks} = tiptapToRichMessage(document).input;
+    const customEmoji = {_: 'textCustomEmoji', document_id: '5431456208487716895', alt: '🎨'};
+    expect(findBlock(blocks, 'pageBlockHeading2')?.text).toEqual({
+      _: 'textBold',
+      text: {_: 'textConcat', texts: [customEmoji, {_: 'textPlain', text: ' A new look'}]}
+    });
+
+    const [spoiler, links] = blocks.filter((block) => block._ === 'pageBlockParagraph');
+    // the mark that runs the farthest goes outermost
+    expect((spoiler as PageBlock.pageBlockParagraph).text).toEqual({
+      _: 'textConcat',
+      texts: [{
+        _: 'textSpoiler',
+        text: {
+          _: 'textConcat',
+          texts: [{_: 'textBold', text: customEmoji}, {_: 'textPlain', text: ' hidden'}]
+        }
+      }, {_: 'textPlain', text: ' plain'}]
+    });
+    // marks of the same type with other attributes stay apart
+    expect((links as PageBlock.pageBlockParagraph).text).toEqual({
+      _: 'textConcat',
+      texts: [{
+        _: 'textUrl',
+        text: {_: 'textConcat', texts: [customEmoji, {_: 'textPlain', text: ' a'}]},
+        url: 'https://a.example',
+        webpage_id: 0
+      }, {
+        _: 'textUrl',
+        text: {_: 'textPlain', text: ' b'},
+        url: 'https://b.example',
+        webpage_id: 0
+      }]
     });
   });
 
@@ -226,8 +293,13 @@ describe('Tiptap rich-message conversion', () => {
     expect(slideshow.content?.[0].attrs?.block.items).toHaveLength(items.length);
   });
 
-  test('round-trips audio as editable rich media with its document and formatted caption', () => {
-    const audio = {
+  const listenCaption: PageCaption = {
+    _: 'pageCaption',
+    text: {_: 'textBold', text: {_: 'textPlain', text: 'Listen'}},
+    credit: {_: 'textItalic', text: {_: 'textPlain', text: 'Artist'}}
+  };
+  test.each<[string, Document.document, PageBlock]>([
+    ['an audio', {
       _: 'document',
       id: '151',
       access_hash: '251',
@@ -240,22 +312,22 @@ describe('Tiptap rich-message conversion', () => {
         title: 'Track',
         performer: 'Artist'
       }]
-    } as Document.document;
-    const block: PageBlock.pageBlockAudio = {
-      _: 'pageBlockAudio',
-      audio_id: audio.id,
-      caption: {
-        _: 'pageCaption',
-        text: {_: 'textBold', text: {_: 'textPlain', text: 'Listen'}},
-        credit: {_: 'textItalic', text: {_: 'textPlain', text: 'Artist'}}
-      }
-    };
+    } as Document.document, {_: 'pageBlockAudio', audio_id: '151', caption: listenCaption}],
+    ['a file', {
+      _: 'document',
+      id: '152',
+      access_hash: '252',
+      file_reference: new Uint8Array([4, 5, 6]),
+      mime_type: 'application/pdf',
+      attributes: [{_: 'documentAttributeFilename', file_name: 'report.pdf'}]
+    } as Document.document, {_: 'pageBlockDocument', document_id: '152', caption: listenCaption}]
+  ])('round-trips %s as editable rich media with its document and formatted caption', (_, file, block) => {
     const message: RichMessage.richMessage = {
       _: 'richMessage',
       pFlags: {},
       blocks: [block],
       photos: [],
-      documents: [audio]
+      documents: [file]
     };
 
     const document = richMessageToTiptap(message);
@@ -263,8 +335,8 @@ describe('Tiptap rich-message conversion', () => {
       type: 'richMedia',
       attrs: {
         block,
-        captionCredit: block.caption.credit,
-        documents: [audio],
+        captionCredit: listenCaption.credit,
+        documents: [file],
         photos: []
       },
       content: [{
@@ -278,12 +350,12 @@ describe('Tiptap rich-message conversion', () => {
     expect(converted.input.blocks).toEqual([block]);
     expect(converted.input.documents).toEqual([{
       _: 'inputDocument',
-      id: audio.id,
-      access_hash: audio.access_hash,
-      file_reference: audio.file_reference
+      id: file.id,
+      access_hash: file.access_hash,
+      file_reference: file.file_reference
     }]);
     expect(converted.output.blocks).toEqual([block]);
-    expect(converted.output.documents).toEqual([audio]);
+    expect(converted.output.documents).toEqual([file]);
   });
 
   test.each([

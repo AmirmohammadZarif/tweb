@@ -1,5 +1,6 @@
 import type {Editor, JSONContent} from '@tiptap/core';
 import {TextSelection, type Transaction} from '@tiptap/pm/state';
+import type {Schema} from '@tiptap/pm/model';
 import type {MessageEntity} from '@layer';
 import combineSameEntities from '@lib/richTextProcessor/combineSameEntities';
 import sortEntities from '@lib/richTextProcessor/sortEntities';
@@ -9,6 +10,7 @@ import {
 } from '@components/chat/inputEditor/tableSchema';
 import {listItemMarkers} from '@components/chat/inputEditor/orderedList';
 import {getEffectiveCodeBlockLanguage} from '@components/chat/inputEditor/codeLanguage';
+import {PLAIN_MESSAGE_MARK_NAMES, PLAIN_MESSAGE_NODE_NAMES} from '@components/chat/inputEditor/plainSchema';
 
 type ProseMirrorNode = Editor['state']['doc'];
 type ProseMirrorMark = ProseMirrorNode['marks'][number];
@@ -301,7 +303,8 @@ function parsePreformattedLine(
     }
 
     const end = entityEnd(pre);
-    while(index + 1 < lines.length && lines[index + 1].start <= end) ++index;
+    // a code block's own last line break ends its line: the line after it, an empty one too, is not its
+    while(index + 1 < lines.length && lines[index + 1].start < end) ++index;
     const endLine = lines[index];
     content.push({
       type: 'codeBlock',
@@ -340,10 +343,9 @@ function trimHorizontalWhitespace(
   direction: 'end' | 'start'
 ): JSONContent[] {
   const result = content.map((child) => ({...child}));
-  const indexes = direction === 'start' ?
-    result.map((_child, index) => index) :
-    result.map((_child, index) => index).reverse();
-  for(const index of indexes) {
+  // a node trimmed away moves the next one into its place: always look at the edge
+  while(result.length) {
+    const index = direction === 'start' ? 0 : result.length - 1;
     const child = result[index];
     if(child.type !== 'text') break;
     const text = child.text || '';
@@ -400,6 +402,55 @@ function splitInlineQuotes(node: JSONContent): JSONContent[] {
       content: [paragraph]
     };
   }).filter((child) => child.type === 'blockquote' || !!child.content?.length);
+}
+
+/**
+ * The entities of a value that a field's narrower schema can hold. The rest go and
+ * the text stays exactly as it came: a value with an entity the field does not
+ * carry (a quote in a poll option, bold in a folder name) used to make the whole
+ * document invalid, and the field showed nothing at all.
+ */
+export function entitiesFittingSchema(entities: MessageEntity[], schema: Schema) {
+  return entitiesFitting(entities, (name) => !!schema.nodes[name], (name) => !!schema.marks[name]);
+}
+
+// what a plain message detects in its text by itself; every other entity with no mark is a rich one's
+const PLAIN_MESSAGE_UNMARKED_ENTITIES = new Set<MessageEntity['_']>([
+  'messageEntityBankCard',
+  'messageEntityBotCommand',
+  'messageEntityCashtag',
+  'messageEntityEmail',
+  'messageEntityHashtag',
+  'messageEntityMention',
+  'messageEntityPhone',
+  'messageEntityUrl'
+]);
+
+/** The entities of a value that a plain message can carry — a rich message's text sent as one. */
+export function entitiesFittingPlainMessage(entities: MessageEntity[]) {
+  return entitiesFitting(
+    entities,
+    (name) => PLAIN_MESSAGE_NODE_NAMES.has(name),
+    (name) => PLAIN_MESSAGE_MARK_NAMES.has(name),
+    (entity) => PLAIN_MESSAGE_UNMARKED_ENTITIES.has(entity._)
+  );
+}
+
+function entitiesFitting(
+  entities: MessageEntity[],
+  hasNode: (name: string) => boolean,
+  hasMark: (name: string) => boolean,
+  keepUnmarked: (entity: MessageEntity) => boolean = () => true
+) {
+  return entities.filter((entity) => {
+    switch(entity._) {
+      case 'messageEntityBlockquote': return hasNode('blockquote');
+      case 'messageEntityPre': return hasNode('codeBlock');
+      case 'messageEntityCustomEmoji': return hasNode('customEmoji');
+    }
+    const mark = entityToMark(entity);
+    return mark ? hasMark(mark.type) : keepUnmarked(entity);
+  });
 }
 
 export function normalizeBlockOnlyQuotes(document: JSONContent): JSONContent {
@@ -534,7 +585,8 @@ export type SerializedChatInputDocument = {
   entities: MessageEntity[],
   positionAtTextOffset: (offset: number, affinity?: 'backward' | 'forward') => number,
   text: string,
-  textOffsetAtPosition: (position: number, affinity?: 'backward' | 'forward') => number
+  textOffsetAtPosition: (position: number, affinity?: 'backward' | 'forward') => number,
+  textEndBefore: (position: number) => number
 };
 
 export function tiptapToTelegram(
@@ -822,5 +874,12 @@ export function tiptapToTelegram(
     return nearest?.text ?? 0;
   };
 
-  return {text, entities, positionAtTextOffset, textOffsetAtPosition};
+  // where the text of what comes before a position between two blocks ends: after the block before
+  // it, not after the line break that follows that block
+  const textEndBefore = (position: number) => segments.reduce(
+    (end, segment) => segment.pmEnd <= position ? Math.max(end, segment.textEnd) : end,
+    0
+  );
+
+  return {text, entities, positionAtTextOffset, textOffsetAtPosition, textEndBefore};
 }

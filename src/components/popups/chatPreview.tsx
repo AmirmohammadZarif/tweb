@@ -1,24 +1,22 @@
 import {createEffect, createMemo, createSignal, JSX, onCleanup, onMount, untrack, useContext} from 'solid-js';
-import {unwrap} from 'solid-js/store';
-import {ChatFull, ChatTheme, UserFull, WallPaper} from '@layer';
+import {getChatBackgroundFromFullPeer} from '@components/chat/chatTheme';
 import PopupElement, {createPopup, PopupContext} from '@components/popups/indexTsx';
 import Chat from '@components/chat/chat';
-import {ChatBackground, ChatBackgroundTheme} from '@components/chat/bubbles/chatBackground';
+import {ChatBackground} from '@components/chat/bubbles/chatBackground';
 import {ChatType} from '@components/chat/chatType';
 import {NULL_PEER_ID} from '@appManagers/constants';
 import themeController from '@helpers/themeController';
 import mediaSizes from '@helpers/mediaSizes';
 import {bindActiveWindowListener, getAppWindow, onAppWindowChange} from '@helpers/appWindow';
-import appImManager from '@lib/appImManager';
 import rootScope from '@lib/rootScope';
 import I18n, {i18n, LangPackKey} from '@lib/langPack';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
 import replaceContent from '@helpers/dom/replaceContent';
 import {useFullPeer} from '@stores/fullPeers';
-import {appState} from '@stores/appState';
 import useIsNightTheme from '@hooks/useIsNightTheme';
 import {subscribeOn} from '@helpers/solid/subscribeOn';
 import ListenerSetter from '@helpers/listenerSetter';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
 
 export type ChatPreviewAnchor = HTMLElement | {x: number, y: number} | {
   x: number, y: number, left: number, right: number, top: number, bottom: number
@@ -33,20 +31,24 @@ export type ChatPreviewOptions = {
 };
 
 /**
- * Build a preview anchor from a dialog row. Anchors to the LEFT COLUMN's right edge
- * (instead of the row's own right edge) so the 8px gap from the sidebar is constant
+ * Build a preview anchor from a dialog row. Anchors to the LEFT COLUMN's inline-end edge
+ * (instead of the row's own edge) so the 8px gap from the sidebar is constant
  * regardless of the row's internal padding. Shared by Shift+Click and the context-menu
- * "Preview" entry — both want the popup pinned the same way.
+ * "Preview" entry — both want the popup pinned the same way. In RTL the column stands on
+ * the right of the screen, so that edge is its left one.
  */
 export function chatPreviewAnchorFromDialogRow(li: HTMLElement): ChatPreviewAnchor {
   const rect = li.getBoundingClientRect();
   const columnEl = li.closest<HTMLElement>('#column-left, .sidebar-left');
-  const columnRight = columnEl?.getBoundingClientRect().right ?? rect.right;
+  const columnRect = columnEl?.getBoundingClientRect();
+  const isRTL = I18n.getIsRTL();
+  const left = isRTL ? columnRect?.left ?? rect.left : rect.left;
+  const right = isRTL ? rect.right : columnRect?.right ?? rect.right;
   return {
-    x: columnRight,
+    x: isRTL ? left : right,
     y: rect.top + rect.height / 2,
-    left: rect.left,
-    right: columnRight,
+    left,
+    right,
     top: rect.top,
     bottom: rect.bottom
   };
@@ -81,7 +83,7 @@ export default function showChatPreviewPopup(options: ChatPreviewOptions): void 
 
     let disposeResize: () => void, disposeWindowChange: () => void;
 
-    const chat = new Chat(appImManager, managers, false, {sharedMedia: true});
+    const chat = new Chat(hotReloadGuard.appImManager, managers, false, {sharedMedia: true});
     chat.isPreview = true;
     chat.isStandalone = true;
     chat.onPreviewClose = () => handle.hide();
@@ -100,25 +102,8 @@ export default function showChatPreviewPopup(options: ChatPreviewOptions): void 
     // re-fires the createMemo when the full peer lands, so the popup picks up the proper
     // wallpaper as soon as it's loaded.
     const fullPeer = useFullPeer(options.peerId);
-    const resolvedBg = createMemo(() => {
-      const _fullPeer = fullPeer();
-      let wallPaper: WallPaper | undefined;
-      let theme: ChatBackgroundTheme | undefined;
-
-      if(_fullPeer) {
-        wallPaper = unwrap((_fullPeer as ChatFull.channelFull).wallpaper);
-        const emoticon = (_fullPeer as ChatFull.channelFull).theme_emoticon ||
-          ((_fullPeer as UserFull.userFull).theme as ChatTheme.chatTheme)?.emoticon ||
-          (wallPaper && wallPaper.settings?.emoticon);
-        const found = emoticon && appState.accountThemes?.themes?.find((t) => t.emoticon === emoticon);
-        theme = found ? unwrap(found) : undefined;
-        // A theme picked by emoticon brings its own wallpaper; the per-peer override
-        // shouldn't compete with it.
-        if(emoticon && theme) wallPaper = undefined;
-      }
-
-      return {theme, wallPaper};
-    });
+    const isNight = useIsNightTheme();
+    const resolvedBg = createMemo(() => getChatBackgroundFromFullPeer(fullPeer(), isNight()));
 
     // A preview Chat has `isPreview`, so `Chat.handleBackgrounds()` short-circuits and never runs
     // `applyContainerTheme` — the per-chat theme's outgoing-bubble vars (`--message-out-*`) are thus
@@ -126,7 +111,6 @@ export default function showChatPreviewPopup(options: ChatPreviewOptions): void 
     // main chat: stash the resolved theme on the chat and apply it to its container. `isNight()` keeps
     // the effect re-firing on a day/night toggle while the preview is open so the theme re-resolves to
     // the right variant — the same role `useIsNightTheme` plays in `Chat._handleBackgrounds`.
-    const isNight = useIsNightTheme();
     createEffect(() => {
       isNight();
       chat.currentTheme = resolvedBg().theme;
@@ -171,20 +155,19 @@ export default function showChatPreviewPopup(options: ChatPreviewOptions): void 
 
     function positionFromAnchor(anchor: ChatPreviewAnchor) {
       if(!anchor) return;
-      let ax: number, ay: number, rectLeft: number;
+      let ay: number, rectLeft: number, rectRight: number;
       if(anchor instanceof HTMLElement) {
         const r = anchor.getBoundingClientRect();
-        ax = r.right;
         ay = r.top + r.height / 2;
         rectLeft = r.left;
+        rectRight = r.right;
       } else if('left' in anchor) {
-        ax = anchor.right;
         ay = anchor.y;
         rectLeft = anchor.left;
+        rectRight = anchor.right;
       } else {
-        ax = anchor.x;
         ay = anchor.y;
-        rectLeft = anchor.x;
+        rectLeft = rectRight = anchor.x;
       }
 
       // Read the viewport from the active app window — while popped into a Document PiP
@@ -215,7 +198,12 @@ export default function showChatPreviewPopup(options: ChatPreviewOptions): void 
         left = Math.max(MARGIN, (vw - width) / 2);
         top = Math.max(MARGIN, (vh - height) / 2);
       } else {
-        left = ax + MARGIN;
+        // The popup opens past the anchor's inline end (right of it, left of it in RTL)
+        // and flips to the other side when it does not fit there.
+        const isRTL = I18n.getIsRTL();
+        const afterRight = rectRight + MARGIN;
+        const beforeLeft = rectLeft - width - MARGIN;
+        left = isRTL ? beforeLeft : afterRight;
         top = ay - height / 2;
 
         // Keep the popup fully on-screen, clamping against the *fitted* size. Headless/
@@ -223,9 +211,8 @@ export default function showChatPreviewPopup(options: ChatPreviewOptions): void 
         // collapsing to a negative coordinate.
         const maxLeft = vw > MARGIN * 2 ? vw - width - MARGIN : Infinity;
         const maxTop = vh > MARGIN * 2 ? vh - height - MARGIN : Infinity;
-        if(left > maxLeft) {
-          const fromLeft = rectLeft - width - MARGIN;
-          left = Math.max(MARGIN, fromLeft);
+        if(isRTL ? left < MARGIN && vw > MARGIN * 2 : left > maxLeft) {
+          left = isRTL ? Math.min(maxLeft, afterRight) : Math.max(MARGIN, beforeLeft);
         }
         if(top < MARGIN) top = MARGIN;
         if(top > maxTop) top = maxTop;

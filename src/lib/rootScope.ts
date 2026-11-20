@@ -6,7 +6,7 @@ import type {UserTyping} from '@appManagers/appProfileManager';
 import type {MyDraftMessage} from '@appManagers/appDraftsManager';
 import type {ConnectionStatusChange} from '@lib/mtproto/connectionStatus';
 import type {GroupCallId} from '@appManagers/appGroupCallsManager';
-import type {AppManagers} from '@lib/managers';
+import type {TabManagers} from '@lib/managers';
 import type {GlobalNotifySettingsKey, StateSettings} from '@config/state';
 import type {Progress} from '@lib/appDownloadManager';
 import type {CallId} from '@appManagers/appCallsManager';
@@ -22,7 +22,10 @@ import type {MyPromoData} from '@appManagers/appPromoManager';
 import type {UnconfirmedAuthorization} from '@appManagers/appAccountManager';
 import type {ActiveAccountNumber} from '@lib/accounts/types';
 import type {BotConnectionReview} from '@appManagers/appBusinessManager';
+import type {NotifyException} from '@appManagers/appNotificationsManager';
 import type {StreamedMessageDraft, StreamedMessageDraftRemovalReason} from '@appManagers/utils/messages/streamedMessageDrafts';
+import type {WalletSentTransfer, WalletStatus, WalletTonConnectRequestAction} from '@appManagers/appWalletManager';
+import type {TonConnectSession} from '@layer';
 import {NULL_PEER_ID, UserAuth} from '@appManagers/constants';
 import EventListenerBase, {EventListenerListeners} from '@helpers/eventListenerBase';
 import {MOUNT_CLASS_TO} from '@config/debug';
@@ -33,6 +36,7 @@ export type BroadcastEvents = {
   'chat_update': ChatId,
   'chat_toggle_forum': {chatId: ChatId, enabled: boolean},
   'chat_participant': Update.updateChannelParticipant,
+  'chat_participant_rank': {chatId: ChatId, userId: UserId, rank: string},
   'chat_participation': {chatId: ChatId, left: boolean},
   'chat_requests': {requestsPending: number, recentRequesters: UserId[], chatId: ChatId}
 
@@ -53,6 +57,8 @@ export type BroadcastEvents = {
   'peer_block': {peerId: PeerId, blocked?: boolean, blockedMyStoriesFrom?: boolean},
   'peer_title_edit': {peerId: PeerId, threadId?: number},
   'peer_deleted': PeerId, // left chat, deleted user dialog, left channel
+  'widget_storage_delete': {accountNumber: ActiveAccountNumber, peerId?: PeerId, maxId?: number, mids?: number[]}, // widgets' storage of the account is gone: of messages (of a chat, or by private chats' and basic groups' ids), a chat's with its history (up to a server id), or all of it ("Clear cache")
+  'widget_storage_remap': {accountNumber: ActiveAccountNumber, peerId: PeerId, tempId: number, mid: number}, // a widget message of the account was sent: what its widget kept goes under the server's id
   'peer_full_update': PeerId,
   'peer_settings': {peerId: PeerId, settings: PeerSettings},
   'chat_automation_update': ConnectedBot.connectedBot | undefined,
@@ -124,6 +130,7 @@ export type BroadcastEvents = {
   'story_album_created': {peerId: PeerId, albumId: number, albums: StoryAlbum[]},
   'story_album_updated': {peerId: PeerId, albumId: number, addStories?: StoryItem.storyItem[], deleteStories?: number[], albums: StoryAlbum[]},
   'story_album_deleted': {peerId: PeerId, albumId: number, albums: StoryAlbum[]},
+  'story_albums_updated': {peerId: PeerId, albums: StoryAlbum[]},
 
   'replies_updated': Message.message,
   'replies_short_update': Message.message,
@@ -137,12 +144,14 @@ export type BroadcastEvents = {
 
   'stickers_installed': StickerSet.stickerSet,
   'stickers_deleted': StickerSet.stickerSet,
-  'stickers_updated': {type: 'recent' | 'faved', stickers: MyDocument[]},
+  // * `reverted`: a change of the user's own that the server did not take, put back
+  'stickers_updated': {type: 'recent' | 'faved', stickers: MyDocument[], reverted?: boolean},
   'stickers_top': Long,
   'stickers_order': {type: 'masks' | 'emojis' | 'stickers', order: Long[]},
   'sticker_updated': {type: 'recent' | 'faved', document: MyDocument, faved: boolean, limitReached?: boolean},
 
-  'gifs_updated': MyDocument[],
+  // * `reverted`: a change of the user's own that the server did not take, put back
+  'gifs_updated': {gifs: MyDocument[], reverted?: boolean},
   'gif_updated': {document: MyDocument, saved: boolean, limitReached?: boolean},
 
   'state_cleared': void,
@@ -168,6 +177,8 @@ export type BroadcastEvents = {
 
   'notify_settings': Update.updateNotifySettings,
   'notify_peer_type_settings': {key: GlobalNotifySettingsKey, settings: PeerNotifySettings},
+  'notify_exceptions': {key: GlobalNotifySettingsKey, exceptions: NotifyException[]},
+  'notify_settings_reset': void,
 
   'notification_reset': string,
   'notification_cancel': `msg_${ActiveAccountNumber}_${PeerId}_${number}` |
@@ -221,11 +232,21 @@ export type BroadcastEvents = {
 
   'premium_toggle': boolean,
   'premium_toggle_private': {isNew: boolean, isPremium: boolean},
+  // * a Premium account's Do Not Hide Ads, once the server took it
+  'sponsored_messages_toggle': boolean,
 
   'saved_tags': {savedPeerId: PeerId, tags: SavedReactionTag[]},
   'saved_tags_clear': void,
 
   'stars_balance': {balance: Long, fulfilledReservedStars?: number, ton: boolean},
+
+  'wallet_status': WalletStatus,
+  'wallet_transfer_sent': WalletSentTransfer,
+  'wallet_tonconnect_session': TonConnectSession,
+  /** sessions the server wants the wallet to close: the dApp went away */
+  'wallet_tonconnect_pending_disconnect': string[],
+  /** a dApp's request in the service chat, new or answered */
+  'wallet_tonconnect_request': WalletTonConnectRequestAction,
 
   'file_speed_limited': {increaseTimes: number, isUpload: boolean},
 
@@ -269,6 +290,8 @@ export type BroadcastEvents = {
   'crm_notes_summary_update': {peerIds: PeerId[]},
 
   'account_logged_in': {accountNumber: ActiveAccountNumber, userId: UserId},
+  // * tab-local: this tab now shows another signed-in account, its mirrors and state already in place
+  'account_switched': {from: ActiveAccountNumber, to: ActiveAccountNumber},
 
   'resizing_left_sidebar': void,
   'right_sidebar_toggle': boolean,
@@ -300,6 +323,7 @@ export type BroadcastEvents = {
   'monoforum_draft_update': {dialog: MonoforumDialog},
 
   'botforum_pending_topic_created': {peerId: PeerId, tempId: number, newId?: number},
+  'botforum_pending_topic_failed': {peerId: PeerId, tempId: number},
   'promo_data_update': MyPromoData,
   'unconfirmed_authorizations_update': UnconfirmedAuthorization[],
 
@@ -313,7 +337,7 @@ export type BroadcastEventsListeners = {
 export class RootScope extends EventListenerBase<BroadcastEventsListeners> {
   public myId: PeerId;
   private connectionStatus: {[name: string]: ConnectionStatusChange};
-  public managers: AppManagers;
+  public managers: TabManagers;
   public premium: boolean;
 
   constructor() {
@@ -368,6 +392,19 @@ export class RootScope extends EventListenerBase<BroadcastEventsListeners> {
     ...args: ArgumentTypes<L[T]>
   ) {
     super.dispatchEvent(name, ...args);
+  }
+
+  /**
+   * About what belongs to an account the tab may no longer show (a call's): this tab hears it at once, the
+   * other tabs as that account's - `dispatchEvent` would name the account the tab shows.
+   */
+  public dispatchEventOfAccount<T extends keyof BroadcastEventsListeners>(
+    accountNumber: ActiveAccountNumber,
+    name: T,
+    ...args: ArgumentTypes<BroadcastEventsListeners[T]>
+  ) {
+    super.dispatchEvent(name, ...args);
+    MTProtoMessagePort.getInstance().invokeVoid('event', {name, args, accountNumber});
   }
 }
 

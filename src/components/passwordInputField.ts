@@ -1,5 +1,7 @@
 import cancelEvent from '@helpers/dom/cancelEvent';
 import Icon from '@components/icon';
+import Button from '@components/button';
+import Modes from '@config/modes';
 import InputField, {InputFieldOptions} from '@components/inputField';
 
 export type PasswordInputFieldOptions = InputFieldOptions & {
@@ -69,8 +71,8 @@ export class PasswordInputHelpers {
     if(options.hideToggle) {
       container.classList.add('input-field-password-no-toggle');
     } else {
-      const toggleVisible = this.toggleVisible = document.createElement('span');
-      toggleVisible.classList.add('toggle-visible');
+      const toggleVisible = this.toggleVisible = Button('toggle-visible', {noRipple: true, ariaLabel: 'AccDescr.ShowPassword', asDiv: !Modes.a11y});
+      toggleVisible.setAttribute('aria-pressed', 'false');
       toggleVisible.append(Icon('eye1_filled'));
 
       container.append(toggleVisible);
@@ -85,6 +87,7 @@ export class PasswordInputHelpers {
     this.passwordVisible = !this.passwordVisible;
 
     this.toggleVisible.replaceChildren(Icon(this.passwordVisible ? 'eye2_filled' : 'eye1_filled'));
+    this.toggleVisible.setAttribute('aria-pressed', String(this.passwordVisible));
     if(this.maskWithCss) {
       this.input.classList.toggle('password-masked', !this.passwordVisible);
     } else {

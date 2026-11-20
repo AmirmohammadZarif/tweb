@@ -12,6 +12,7 @@ import {LogTypes, logger} from '@lib/logger';
 import {AccountSessionData, ActiveAccountNumber} from '@lib/accounts/types';
 import StateStorage from '@lib/stateStorage';
 import AccountController from '@lib/accounts/accountController';
+import getAuthKeyFingerprint from '@lib/accounts/authKeyFingerprint';
 import commonStateStorage from '@lib/commonStateStorage';
 import {TrueDcId} from '@types';
 import {getOldDatabaseState} from '@config/databases/state';
@@ -50,9 +51,10 @@ const REFRESH_KEYS: Array<keyof State> = [
   'filtersArr'
 ];
 
+// * the version is not among them: it is kept as seen once its message is in the "Telegram" chat
+// * (apiUpdatesManager.deliverChangelog), so a start that stops on the way leaves the message for the next one
 const RESET_WITH_BUILD: Array<keyof State> = [
   'appConfig',
-  'version',
   'build'
 ];
 
@@ -212,23 +214,28 @@ const STATE_STEPS = {
       writer.push('settings', writer.state.settings);
     }
   },
+  RESET_DIALOG_LIST: (writer: ReturnType<typeof StateWriter>) => {
+    writer.resetStorages.set('dialogs', []);
+    writer.push('allDialogsLoaded', copy(STATE_INIT.allDialogsLoaded));
+    writer.push('dialogsPaginationOffsets', copy(STATE_INIT.dialogsPaginationOffsets));
+    writer.push('pinnedOrders', copy(STATE_INIT.pinnedOrders));
+  },
   VERSION: (writer: ReturnType<typeof StateWriter>) => {
     let newVersion: string, oldVersion: string;
-    if(writer.state.version !== STATE_VERSION || writer.state.build !== BUILD/*  || true */) {
+    // * the migrations go with the build, which is written at once; the version stays as it was until its
+    // * message has come, and every start until then finds it new
+    if(writer.state.build !== BUILD/*  || true */) {
       if(writer.state.build < 526) { // * drop all previous migrations
         writer.reset();
       } else if(writer.state.build < 562) { // * drop filtersArr
         writer.push('filtersArr', copy(STATE_INIT.filtersArr));
       } else if(writer.state.build < 677) {
-        writer.resetStorages.set('dialogs', []);
-        writer.push('allDialogsLoaded', copy(STATE_INIT.allDialogsLoaded));
-        writer.push('pinnedOrders', copy(STATE_INIT.pinnedOrders));
+        STATE_STEPS.RESET_DIALOG_LIST(writer);
         writer.push('botCommands', copy(STATE_INIT.botCommands));
-      }
-
-      if(compareVersion(writer.state.version, STATE_VERSION) !== 0) {
-        newVersion = STATE_VERSION;
-        oldVersion = writer.state.version;
+      } else if(writer.state.build < 687) {
+        // * the dialogs the old pagination skipped (a dialog out of date order made the next page jump over
+        // * everything between) were marked as loaded: load the list again
+        STATE_STEPS.RESET_DIALOG_LIST(writer);
       }
 
       RESET_WITH_BUILD.forEach((key) => {
@@ -236,7 +243,28 @@ const STATE_STEPS = {
       });
     }
 
+    if(compareVersion(writer.state.version, STATE_VERSION) !== 0) {
+      newVersion = STATE_VERSION;
+      oldVersion = writer.state.version;
+    }
+
     return {newVersion, oldVersion};
+  },
+  /**
+   * Web A signs accounts in and out of the same slots, and knows nothing of what is kept of them here: what
+   * was kept for another user, or for one signed out of the slot since, is dropped
+   */
+  CHANGED_USER: (writer: ReturnType<typeof StateWriter>, userId: UserId) => {
+    const {state} = writer;
+    const wasSignedIn = state.authState._ === 'authStateSignedIn';
+    // * a state from before it was kept whose user it is can only be told by being signed in
+    if(state.userId === undefined ? !userId && wasSignedIn : state.userId !== userId) {
+      writer.log.warn('the account has changed', state.userId, userId);
+      writer.reset();
+      if(!userId) {
+        writer.push('authState', copy(STATE_INIT.authState));
+      }
+    }
   },
   CHANGED_AUTH: async(writer: ReturnType<typeof StateWriter>) => {
     const [authKeyFingerprint, baseDcAuthKey] = await Promise.all([
@@ -248,7 +276,7 @@ const STATE_STEPS = {
       return;
     }
 
-    const _authKeyFingerprint = baseDcAuthKey.slice(0, 8);
+    const _authKeyFingerprint = getAuthKeyFingerprint(baseDcAuthKey);
     if(!authKeyFingerprint) { // * migration, preserve settings
       writer.reset(/* {preserveCommonKeys: ['settings']} */);
     } else if(authKeyFingerprint !== _authKeyFingerprint) {
@@ -291,7 +319,19 @@ async function loadStateForAccount(accountNumber: ActiveAccountNumber): Promise<
   const writer = StateWriter(log);
   writer.readFromArray(arr);
 
-  if(accountData.userId) {
+  // * Web A's account of the test servers is not one this client can open
+  const userId = AccountController.isSignedIn(accountData) ? accountData.userId : undefined;
+  STATE_STEPS.CHANGED_USER(writer, userId);
+
+  // * a slot with a DC is a signed-in account to Web A: what an older version kept of a sign-in, finished or
+  // * not, goes where a sign-in keeps it now (see ApiManager.setBaseDcId). Web A's own slots are left alone
+  if(!accountData.userId && accountData.dcId && !AccountController.isForeign(accountData)) {
+    await AccountController.update(accountNumber, (data) => {
+      return !data.userId && data.dcId ? {dcId: undefined, sign_in_dc_id: data.sign_in_dc_id || data.dcId} : undefined;
+    });
+  }
+
+  if(userId) {
     writer.state.authState = {_: 'authStateSignedIn'};
   }
 
@@ -301,7 +341,21 @@ async function loadStateForAccount(accountNumber: ActiveAccountNumber): Promise<
   STATE_STEPS.VALIDATE(writer, STATE_INIT);
   STATE_STEPS.VALIDATE(commonWriter, COMMON_STATE_INIT);
   STATE_STEPS.MIGRATE_THEMES(commonWriter);
-  const {newVersion, oldVersion} = STATE_STEPS.VERSION(writer);
+  // * a state that could not be read (its database did not open: an older version's tab held it at its own
+  // * version) is not a new one: the defaults it was filled with are not written over what is kept, and its
+  // * version is not taken for one the app was updated from
+  const unreadable = !stateStorage.isAvailable();
+  const {newVersion, oldVersion} = unreadable ? {newVersion: undefined, oldVersion: undefined} : STATE_STEPS.VERSION(writer);
+
+  if(writer.state.userId !== userId) {
+    writer.push('userId', userId);
+  }
+
+  if(unreadable) {
+    log.error('the state could not be read: nothing of it is written');
+    writer.pushedKeys.clear();
+    writer.resetStorages.clear();
+  }
 
   return {
     state: writer.state,
@@ -310,7 +364,7 @@ async function loadStateForAccount(accountNumber: ActiveAccountNumber): Promise<
     oldVersion,
     resetStorages: writer.resetStorages,
     common: commonWriter.state,
-    userId: accountData.userId
+    userId
   };
 }
 
@@ -356,6 +410,9 @@ async function loadOldState(): Promise<LoadStateResult> {
   if(auth) {
     // ! Warning ! DON'T delete this
     writer.state.authState = {_: 'authStateSignedIn'};
+  } else {
+    // * signed out, maybe by Web A, which knows nothing of what is kept of the first account: none of it
+    writer.reset();
   }
 
   // await STATE_STEPS.STATE_ID(writer);
@@ -427,9 +484,10 @@ async function moveAccessKeysToMultiAccountFormat() {
     };
   })();
 
-  const [userAuth, fingerprint, resetKeys] = await Promise.all([
+  const [userAuth, fingerprint, dc, resetKeys] = await Promise.all([
     sessionStorage.get(`user_auth`),
     sessionStorage.get(`auth_key_fingerprint`),
+    sessionStorage.get('dc'),
     resetKeysPromise
   ]);
 
@@ -443,6 +501,11 @@ async function moveAccessKeysToMultiAccountFormat() {
 
   data['auth_key_fingerprint'] = fingerprint;
   data['userId'] = typeof(userAuth) === 'string' || typeof(userAuth) === 'number' ? +userAuth : (userAuth?.id ? +userAuth.id : undefined);
+  // * without it the base DC would be asked, where an account of another one is not signed in
+  const dcId = +(isObject<UserAuth>(userAuth) && userAuth.dcID) || +dc;
+  if(dcId) {
+    data['dcId'] = dcId as TrueDcId;
+  }
 
   await AccountController.update(1, data, true);
 }
@@ -470,8 +533,14 @@ async function moveStoragesToMultiAccountFormat() {
   ]);
 }
 
+/**
+ * Whether the first account is kept in its slot already, and not only the old way (`user_auth`,
+ * `dc2_auth_key`), which Web A writes beside the slot too. Its slot may lack a key of the base DC: an
+ * account it signs in to by a link from another app starts at its own DC
+ */
 async function checkIfHasMultiAccount() {
-  return !!(await AccountController.get(1))[`dc${App.baseDcId}_auth_key`];
+  const accountData = await AccountController.get(1);
+  return !!accountData.userId || AccountController.hasAuthKey(accountData);
 }
 
 function deleteOldDatabase() {
@@ -523,6 +592,8 @@ async function loadStateForAllAccounts() {
       deleteOldDatabase(); // * don't wait for the result
     }
   } else {
+    // * before its auth key is compared with the copy kept for Web A, which may be left behind a passcode turned on
+    await AccountController.removeLegacyCopyBehindPasscode();
     stateForFirstAccount = await loadStateForAccount(1);
   }
 

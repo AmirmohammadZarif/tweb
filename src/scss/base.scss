@@ -1,6 +1,25 @@
 @use "sass:string";
 @use "shared" as *;
 
+// * what the stylesheets mirror with: `--reflect` multiplies a movement along the line, the origins
+// * name the inline sides of a transform
+@mixin direction-vars($dir) {
+  $start: left;
+  $end: right;
+  $reflect: 1;
+  @if $dir == rtl {
+    $start: right;
+    $end: left;
+    $reflect: -1;
+  }
+
+  --reflect: #{$reflect};
+  --transform-origin-inline-start: #{$start};
+  --transform-origin-inline-end: #{$end};
+  --transform-origin-left-center: #{$start} center;
+  --transform-origin-right-center: #{$end} center;
+}
+
 @font-face {
   font-family: 'Numbers Rounded';
   src: url('#{$fonts-path}/Numbers-Rounded.woff2') format('woff2');
@@ -25,6 +44,9 @@
   // site, so the right per-scope value is picked up automatically (root
   // scope on the side sidebars, chat scope inside #column-center).
   --100vh-inset: calc(var(--100vh) - 2 * var(--page-chats-padding));
+  // * the most a panel under the message field (the emoji one, a bot's keyboard) may take, so that the field it lifts
+  // * stays clear of the topbar on a short screen
+  --under-input-max-height: calc(var(--100vh-inset) - 135px);
   --main-column-border-radius: #{$border-radius-big};
 
   @include respond-to(handhelds) {
@@ -43,19 +65,13 @@
   --transition-standard-easing: cubic-bezier(.4, .0, .2, 1);
   --transition-standard-in-time: .3s;
   --transition-standard-out-time: .25s;
-  --transition-standard-in: var(--transition-standard-in-time) var(--transition-standard-easing);
-  --transition-standard-out: var(--transition-standard-out-time) var(--transition-standard-easing);
   --transform-origin-inline-start: left;
   --transform-origin-inline-end: right;
   --transform-origin-left-center: left center;
   --transform-origin-right-center: right center;
 
   &.is-rtl {
-    --reflect: -1;
-    --transform-origin-inline-start: right;
-    --transform-origin-inline-end: left;
-    --transform-origin-left-center: right center;
-    --transform-origin-right-center: left center;
+    @include direction-vars(rtl);
   }
 
   --pm-transition: .2s ease-in-out;
@@ -90,8 +106,6 @@
   // --messages-service-text-size: calc(var(--messages-text-size) - 2px);
   --messages-service-text-size: calc(var(--messages-text-size) - 1px);
   --messages-custom-emoji-size: calc(var(--messages-text-size) + 4px);
-  --bubble-transition-in: transform var(--transition-standard-in), opacity var(--transition-standard-in);
-  --bubble-transition-out: transform var(--transition-standard-out), opacity var(--transition-standard-out);
   --line-height-24: 30px;
   --line-height-20: 26px;
   --line-height-18: 24px;
@@ -124,11 +138,15 @@
   --section-box-shadow-big: 0px 1px 8px 0px var(--section-box-shadow-big-color);
   --column-box-shadow: 0px 0px 4px 0px var(--column-box-shadow-color);
   --font-regular: "Open Sans", "Roboto", -apple-system, apple color emoji, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
-  --font-serif: "Roboto Serif", Georgia, "Times New Roman", serif;
-  --font-heading: "Merriweather", "Roboto Serif", Georgia, "Times New Roman", serif;
-  --font-monospace: 'Roboto Mono', monospace;
-  --font-rounded: -ui-rounded, "Numbers Rounded", "Roboto", "Helvetica Neue", sans-serif;
-  --font-weight-bold: 600; // Open Sans SemiBold, per the Andropay brand book
+  @if $serif-fonts {
+    --font-serif: "Roboto Serif", Georgia, "Times New Roman", serif;
+    --font-heading: "Merriweather", "Roboto Serif", Georgia, "Times New Roman", serif;
+  } @else {
+    // without the serif web fonts italic and headings are the app's own font, as before them -
+    // a system serif (Georgia) in their place still reads as the fonts that were turned off
+    --font-serif: var(--font-regular);
+    --font-heading: var(--font-regular);
+  }
   --font-monospace: 'Roboto Mono', monospace;
   --font-rounded: -ui-rounded, "Numbers Rounded", "Roboto", "Helvetica Neue", sans-serif;
   --font-weight-bold: 600; // Open Sans SemiBold, per the Andropay brand book
@@ -254,7 +272,6 @@
   --skeleton-color: rgba(0, 0, 0, .12);
   --poll-circle-color: var(--border-color);
   --spoiler-background-color: #e3e5e8;
-  --spoiler-draft-background-color: #d9d9d9;
   --monospace-text-color: var(--danger-color);
   --backdrop-opacity: .85;
   --menu-background-color: rgba(var(--surface-color-rgb), var(--backdrop-opacity));
@@ -334,7 +351,6 @@
   --skeleton-color: rgba(255, 255, 255, .12);
   --poll-circle-color: #fff;
   --spoiler-background-color: #373e4e;
-  --spoiler-draft-background-color: #484848;
   --monospace-text-color: var(--primary-text-color);
   --menu-background-color: rgba(var(--surface-color-rgb), .75);
   --lottie-vector-fill: var(--light-secondary-text-color);
@@ -363,7 +379,6 @@
   --message-empty-primary-color-rgb: 255,255,255;
   --message-reaction-tag-dot-color: rgba(255, 255, 255, .4);
 
-  --message-out-link-color: var(--link-color);
   --message-out-status-color: var(--message-out-primary-color);
   --message-out-time-color: var(--message-out-status-color);
   --message-out-icon-text-color: #fff;
@@ -380,7 +395,6 @@
   --message-error-color: #fff;
   --message-icon-text-color: #fff;
 
-  --message-out-link-color: #fff;
   --message-out-status-color: #fff;
   --message-out-time-color: rgba(255, 255, 255, .6);
   --message-out-icon-text-color: var(--message-out-background-color);
@@ -432,6 +446,16 @@ html.no-backdrop {
   --blur-off: none;
 }
 
+// * an element that declares its own direction - a playback control, a phone number, an article -
+// * lays its insides out by it, so the variables the stylesheets mirror with follow it there
+[dir="ltr"] {
+  @include direction-vars(ltr);
+}
+
+[dir="rtl"] {
+  @include direction-vars(rtl);
+}
+
 @supports(padding: string.unquote('max(0px)')) {
   html {
     padding: 0 string.unquote('min(16px, env(safe-area-inset-right))') 0 string.unquote('min(16px, env(safe-area-inset-left))');
@@ -475,6 +499,25 @@ body {
   user-select: none;
 
   transition: background-color 0.2s;
+}
+
+// * reduced animations: what moved now only fades or grows in place, and neither carries the eye
+// * anywhere - the time a movement took would only be waited out. So the shared timings get the
+// * length of a fade (going quicker than coming), and the press highlight goes sooner
+body.animation-level-1:not(.animation-level-2) {
+  --transition-standard-in-time: .2s;
+  --transition-standard-out-time: .15s;
+  --ripple-duration: .4s;
+}
+
+// * the tokens built of the timings: a token resolves where it is declared, so they are
+// * declared again where the timings change
+:root,
+body.animation-level-1:not(.animation-level-2) {
+  --transition-standard-in: var(--transition-standard-in-time) var(--transition-standard-easing);
+  --transition-standard-out: var(--transition-standard-out-time) var(--transition-standard-easing);
+  --bubble-transition-in: transform var(--transition-standard-in), opacity var(--transition-standard-in);
+  --bubble-transition-out: transform var(--transition-standard-out), opacity var(--transition-standard-out);
 }
 
 
@@ -802,7 +845,7 @@ input:-webkit-autofill:active {
     opacity: 1;
   }
 
-  @include animation-level(2) {
+  @include animation-level(1) {
     transition: opacity var(--transition-standard-in);
   }
 
@@ -843,6 +886,14 @@ b {
 
   &.is-forum {
     border-radius: var(--avatar-border-radius-forum);
+  }
+
+  // * the photo on a tab's edit screen, in a sidebar or in a popup's slider
+  .sidebar-slider & {
+    width: 120px;
+    height: 120px;
+    margin: 1rem auto 2rem;
+    flex: 0 0 auto;
   }
 
   // the placeholder avatar is positioned over the whole circle and hides the global ring, which is
@@ -926,6 +977,15 @@ b {
   &.active {
     transform: scale(1);
     opacity: 1;
+  }
+
+  // reduced: it fades in where it stands
+  @include animation-level-below(2) {
+    transform: none;
+  }
+
+  @include animation-level(0) {
+    transition: none;
   }
 
   ul {
@@ -1070,7 +1130,7 @@ not screen and (                min-resolution: 2dppx) {
   > img {
     object-fit: contain;
 
-    @include animation-level(2) {
+    @include animation-level(1) {
       animation: fade-in-opacity .2s ease forwards;
     }
   } */
@@ -1079,7 +1139,7 @@ not screen and (                min-resolution: 2dppx) {
 .fade-in-transition {
   opacity: 1;
 
-  @include animation-level(2) {
+  @include animation-level(1) {
     transition: opacity .2s ease-in-out;
   }
 }
@@ -1188,15 +1248,6 @@ not screen and (                min-resolution: 2dppx) {
       object-fit: cover;
     }
 
-    &-pin {
-      position: absolute;
-      top: 0;
-      right: 0;
-      color: #fff;
-      font-size: 1.75rem;
-      text-shadow: 0px 0 3px rgba(0, 0, 0, 0.45);
-    }
-
     &-archived {
       position: absolute;
       left: 50%;
@@ -1286,7 +1337,7 @@ middle-ellipsis-element {
   }
 
   &.fade-in {
-    @include animation-level(2) {
+    @include animation-level(1) {
       animation: fade-in-opacity .2s ease-in-out forwards;
     }
   }
@@ -1319,13 +1370,13 @@ middle-ellipsis-element {
 }
 
 .fade-in {
-  @include animation-level(2) {
+  @include animation-level(1) {
     animation: fade-in-opacity .2s ease-in-out forwards;
   }
 }
 
 .fade-out {
-  @include animation-level(2) {
+  @include animation-level(1) {
     animation: fade-out-opacity .2s ease-in-out forwards;
   }
 }
@@ -1514,9 +1565,8 @@ hr {
     background-color: var(--light-secondary-text-color);
     pointer-events: none;
 
-    @include animation-level(2) {
+    @include animation-level(1) {
       opacity: 0;
-      transition: opacity .2s ease-in-out;
     }
   }
 
@@ -1526,8 +1576,17 @@ hr {
     vertical-align: unset;
     margin: 0;
 
-    @include animation-level(2) {
+    @include animation-level(1) {
       opacity: 1;
+    }
+  }
+
+  // * only while an emoji fades in over its placeholder (emoticonsDropdown/tabs/emoji.ts): declared on
+  // * every tile, the transitions had hiding the panel work out each of its two thousand elements -
+  // * 150-200 ms of style every time it closed
+  .emoji-placeholder.is-fading,
+  .emoji.is-fading {
+    @include animation-level(1) {
       transition: opacity .2s ease-in-out;
     }
   }
@@ -1655,6 +1714,13 @@ hr {
 
   &-inner {
     @include text-overflow();
+
+    // * the title's baseline is its name's, whatever icon stands first (a bot-verification one has
+    // * no text, and a flex box takes its first item's baseline): a row aligned by baseline
+    // * (the chat list's title and time) stays where it is with and without icons
+    .with-icons > & {
+      align-self: baseline;
+    }
   }
 
   &-bot-verification {
@@ -1693,13 +1759,18 @@ hr {
       font-size: var(--font-size-16) !important;
       line-height: 1.375rem;
 
+      // * the time (or a member's tag) stands on the title's line: its text on the title's baseline
+      // * (`.row-title-row` below), in a box as tall as its own line, the sending status centred on it
       &-right-secondary {
         display: flex;
-        align-items: center;
-        height: 1.25rem;
-        margin-top: -.4375rem;
+        align-items: baseline;
+        height: var(--line-height-12);
         font-size: var(--font-size-12) !important;
         line-height: var(--line-height-12) !important;
+
+        .message-status {
+          align-self: center;
+        }
       }
 
       // .peer-title {
@@ -1709,6 +1780,16 @@ hr {
 
     &-row {
       height: 1.375rem;
+    }
+
+    &-title-row {
+      align-items: baseline;
+
+      // * what is taller than the time's line (the sending status, search's "Ad" chip) stands out
+      // * of it rather than being cut
+      > .row-title-right-secondary {
+        overflow: visible;
+      }
     }
   }
 
@@ -1746,6 +1827,11 @@ hr {
     font-weight: var(--font-weight-normal) !important;
     color: var(--danger-color) !important;
   }
+}
+
+// * media whose spoiler is still being made: out of sight until the spoiler covers it
+.is-spoiler-pending {
+  visibility: hidden;
 }
 
 .media-spoiler {
@@ -1845,7 +1931,7 @@ hr {
     display: inline-block;
     line-height: 0;
 
-    @include animation-level(2) {
+    @include animation-level(1) {
       transition: transform var(--transition-standard-in);
     }
   }
@@ -2031,6 +2117,37 @@ hr {
   transform: scaleX(-1);
 }
 
+// * a glyph that points along the line (arrows, send, reply, `iconsReverse.ts`) turns with it;
+// * a class rather than a decision made when the icon is created, so a language switched on the
+// * fly flips the icons already on screen. It follows the nearest `dir`: `<html>`'s, or an island's
+// * that declares its own (media playback is `dir="ltr"`, an RTL article in an LTR layout is
+// * `dir="rtl"`). Flipped with `scale`, which composes with whatever `transform` animates the icon
+// * (and undoes an `.icon-reflect` that was flipped on purpose); `transform` where it is missing.
+:where([dir="rtl"], [dir="ltr"] [dir="rtl"]) .icon-mirror {
+  display: inline-block;
+  scale: -1 1;
+
+  @supports not (scale: 1) {
+    transform: scaleX(-1);
+
+    &.icon-reflect {
+      transform: none;
+    }
+  }
+}
+
+:where([dir="rtl"] [dir="ltr"]) .icon-mirror {
+  scale: none;
+
+  @supports not (scale: 1) {
+    transform: none;
+
+    &.icon-reflect {
+      transform: scaleX(-1);
+    }
+  }
+}
+
 .code {
   --code-content-padding: .25rem .625rem;
   --font-size: var(--messages-secondary-text-size);
@@ -2110,7 +2227,8 @@ hr {
   }
 
   &--zoom {
-    inset: -8px 1rem auto auto !important;
+    inset-block: -8px auto !important;
+    inset-inline: auto 1rem !important;
   }
 }
 
@@ -2169,7 +2287,7 @@ hr {
     width: calc(100% - 4.5rem - .5rem);
   }
 
-  @include animation-level(2) {
+  @include animation-level(1) {
     transition: opacity var(--transition-standard-in);
   }
 
@@ -2272,8 +2390,13 @@ hr {
   background-size: var(--background-gradient-size);
   box-decoration-break: clone;
   border-radius: 0.25rem;
-  animation: text-loading 1.5s linear infinite;
 
+  // * it says the text is being worked on: it goes on with reduced animations, as a spinner does
+  @include animation-level(1) {
+    animation: text-loading 1.5s linear infinite;
+  }
+
+  // * sweeps along the line, from the inline start
   @keyframes text-loading {
     0% {
       background-position-x: 0;
@@ -2285,7 +2408,7 @@ hr {
     }
 
     100% {
-      background-position-x: var(--background-gradient-size);
+      background-position-x: calc(var(--background-gradient-size) * var(--reflect));
       opacity: 1;
     }
   }
@@ -2303,30 +2426,6 @@ hr {
 }
 
 .stars {
-  &-balance {
-    text-align: end;
-
-    &-title {
-      font-size: var(--font-size-14);
-      line-height: 14px;
-    }
-
-    &-subtitle {
-      font-size: var(--font-size-16);
-      font-weight: var(--font-weight-bold);
-      display: flex;
-      align-items: center;
-      justify-content: flex-end;
-      gap: .125rem;
-    }
-
-    .currency-star-icon {
-      width: 20px;
-      height: 20px;
-      margin-top: -1px;
-    }
-  }
-
   &-stacked {
     --size: 26px;
     --background-offset: calc(var(--size) - 10px);

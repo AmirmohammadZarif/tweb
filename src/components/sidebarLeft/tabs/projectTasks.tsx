@@ -1,4 +1,5 @@
 import styles from './projectTasks.module.scss';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 import Section from '@components/section';
 import Row from '@components/rowTsx';
 import Button from '@components/buttonTsx';
@@ -9,7 +10,7 @@ import InputField from '@components/inputField';
 import {toast, toastNew} from '@components/toast';
 import {CrmTask, CrmTaskStatus} from '@lib/crm/types';
 import classNames from '@helpers/string/classNames';
-import appImManager from '@lib/appImManager';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
 import showCrmCreateTaskPopup from '@components/popups/crmCreateTask';
 import I18n from '@lib/langPack';
 
@@ -41,7 +42,7 @@ const formatDue = (iso?: string) => {
 const QUICK_MINUTES = [15, 30, 60];
 
 export default function ProjectTasks() {
-  const managers = rootScope.managers;
+  const managers = bindManagersToSession(rootScope.managers);
 
   const [includeDone, setIncludeDone] = createSignal(false);
   // A task handed to a colleague leaves "assigned to me" entirely, so without
@@ -152,7 +153,7 @@ export default function ProjectTasks() {
     // before this was tracked simply open the chat at the bottom.
     const capturedHere = task.source?.same_session === true;
 
-    appImManager.setInnerPeer({
+    hotReloadGuard.appImManager.setInnerPeer({
       peerId: chatId.toPeerId(false),
       // For user peers the client mid IS the server id (generateMessageId only
       // offsets channels), so the stored id can be jumped to as-is.

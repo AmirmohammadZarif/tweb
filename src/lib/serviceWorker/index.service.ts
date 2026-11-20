@@ -5,8 +5,9 @@ import {closeAllNotifications, fillPushObject, onPing, onShownNotification, rese
 import CacheStorageController from '@lib/files/cacheStorage';
 import {IS_SAFARI} from '@environment/userAgent';
 import ServiceMessagePort, {type ServiceErrorPayload} from '@lib/serviceWorker/serviceMessagePort';
-import {getLogEntries, setLogBufferEnabled} from '@lib/debug/logsBuffer';
+import {clearLogBuffer, getLogEntries, setLogBufferEnabled} from '@lib/debug/logsBuffer';
 import listenMessagePort from '@helpers/listenMessagePort';
+import {deleteClientAccount, setClientAccount} from '@lib/serviceWorker/clientAccounts';
 import {getWindowClients} from '@helpers/context';
 import {MessageSendPort} from '@lib/superMessagePort';
 import handleDownload from '@lib/serviceWorker/download';
@@ -121,6 +122,8 @@ serviceMessagePort.addMultipleEventsListeners({
 
   setLogBufferEnabled: (enabled) => setLogBufferEnabled(enabled),
 
+  clearLogs: () => clearLogBuffer(),
+
   notificationsClear: closeAllNotifications,
 
   toggleStorages: ({enabled, clearWrite}) => {
@@ -139,6 +142,10 @@ serviceMessagePort.addMultipleEventsListeners({
   leaveRtmpCall: onRtmpLeftCall,
 
   toggleStreamInUse,
+
+  tabAccount: (accountNumber, source) => {
+    setClientAccount((source as any as WindowClient).id, accountNumber);
+  },
 
   toggleCacheStorage: (enabled) => {
     CacheStorageController.temporarilyToggle(enabled);
@@ -181,40 +188,44 @@ const {
   onClosedWindows: onDownloadClosedWindows
 } = handleDownload(serviceMessagePort);
 
+const helloAwaiting: Set<string> = new Set();
+let checkingWindows: Promise<void>;
+
 // * service worker can be killed, so won't get 'hello' event
-async function startupCheck() {
+// * a window is connected once it answers: only the app's tabs do, never a window with no app in it (the
+// * Document PiP window the app moves into), which would take the MTProto port with nobody to read it
+async function helloWindows(from: string) {
   const windowClients = await getWindowClients();
   const length = windowClients.length;
-  log(`got ${length} windows from the start`);
+  log(`got ${length} windows from`, from);
   windowClients.forEach((windowClient) => {
     if(windowClient.frameType === 'none') {
       log.warn('skipping bugged Safari starting window', windowClient.id);
       return;
     }
 
-    log('checking window', windowClient.id);
-    try {
-      const promise = serviceMessagePort.invoke(
-        'hello',
-        undefined,
-        undefined,
-        windowClient
-      );
-
-      let timedOut = false;
-      const timeout = setTimeout(() => timedOut = true, 5000);
-      promise.finally(() => {
-        if(!timedOut) {
-          clearTimeout(timeout);
-          onWindowConnected(windowClient, 'startup check');
-        }
-      });
-    } catch(err) {
-      log.error('failed to send hello to window', windowClient.id, err);
+    if(helloAwaiting.has(windowClient.id)) {
+      return;
     }
+
+    log('checking window', windowClient.id);
+    helloAwaiting.add(windowClient.id);
+    // * a busy or frozen tab answers long after it is asked, and is no less alive for it:
+    // * dropping a late answer left the worker with no MTProto port
+    serviceMessagePort.invoke('hello', undefined, undefined, windowClient).then(() => {
+      onWindowConnected(windowClient, from);
+    }, (err) => {
+      log.error('failed to send hello to window', windowClient.id, err);
+    }).finally(() => {
+      helloAwaiting.delete(windowClient.id);
+    });
   });
 }
-startupCheck();
+
+const checkWindows = (from: string) => checkingWindows ??= helloWindows(from).finally(() => {
+  checkingWindows = undefined;
+});
+checkWindows('startup check');
 
 const connectedWindows: Map<string, WindowClient> = new Map();
 (self as any).connectedWindows = connectedWindows;
@@ -227,6 +238,7 @@ listenMessagePort(serviceMessagePort, undefined, (source) => {
   }
 
   connectedWindows.delete(source.id);
+  deleteClientAccount(source.id);
   log('window disconnected, left', connectedWindows.size);
   if(!connectedWindows.size) {
     log.warn('no windows left');
@@ -272,13 +284,20 @@ const onFetch = (event: FetchEvent): void => {
     import.meta.env.PROD &&
     !IS_SAFARI &&
     event.request.url.indexOf(location.origin + '/') === 0 &&
-    event.request.url.match(/\.(js|css|jpe?g|json|wasm|png|mp3|svg|tgs|ico|woff2?|ttf)(?:\?.*)?$/)
+    event.request.url.match(/\.(js|css|jpe?g|json|wasm|png|mp3|svg|tgs|ico|woff2?|ttf|mesh)(?:\?.*)?$/)
   ) {
     return event.respondWith(requestCache(event));
   }
 
   if(import.meta.env.DEV && event.request.url.match(/\.([jt]sx?|s?css)?($|\?)/)) {
     return;
+  }
+
+  // * a tab the worker does not count as connected - its startup answer was lost, or it was taken for gone -
+  // * still asks for files, and with no MTProto port they hang until the worker restarts. The request may come
+  // * from the PiP window rather than the tab its app runs in, so every window is asked again
+  if(!_mtprotoMessagePort) {
+    checkWindows('fetch');
   }
 
   try {

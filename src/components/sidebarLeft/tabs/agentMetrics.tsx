@@ -17,12 +17,13 @@ import getPeerTitle from '@components/wrappers/getPeerTitle';
 import showPickUserPopup from '@components/popups/pickUser';
 import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
 import classNames from '@helpers/string/classNames';
-import appImManager from '@lib/appImManager';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
 import InputField from '@components/inputField';
 import agentIdentity from '@lib/agentIdentity';
 import agentReadMode from '@lib/agentReadMode';
 import CheckboxFieldTsx from '@components/checkboxFieldTsx';
 import {toast, toastNew} from '@components/toast';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 
 // Prefer the CRM server's own error text (e.g. "Only admin accounts can use the
@@ -51,6 +52,7 @@ const CrmSection = () => {
   });
 
   const sendCode = async() => {
+    const managers = bindManagersToSession(rootScope.managers);
     const baseUrl = baseUrlField.value.trim();
     const mobile = mobileField.value.trim();
     if(!baseUrl || !mobile) {
@@ -59,8 +61,8 @@ const CrmSection = () => {
     }
     setBusy(true);
     try {
-      await rootScope.managers.appCrmManager.setConfig({baseUrl});
-      await rootScope.managers.appCrmManager.sendOtp(mobile);
+      await managers.appCrmManager.setConfig({baseUrl});
+      await managers.appCrmManager.sendOtp(mobile);
       setOtpSent(true);
     } catch(err) {
       showCrmError(err, 'Crm.SendFailed');
@@ -329,7 +331,7 @@ export default function AgentMetrics() {
 
   const openOldestChat = () => {
     const peerId = queue()?.oldestUnansweredPeerId;
-    if(peerId) appImManager.setPeer({peerId});
+    if(peerId) hotReloadGuard.appImManager.setPeer({peerId});
   };
 
   return (

@@ -1,7 +1,9 @@
 import {createSignal, onMount, onCleanup, createEffect, JSX} from 'solid-js';
 import attachGrabListeners, {GrabEvent} from '@helpers/dom/attachGrabListeners';
+import keepLeftToRight from '@helpers/dom/keepLeftToRight';
+import onRangeInlineArrowKey from '@helpers/dom/onRangeInlineArrowKey';
+import {isElementRTL} from '@helpers/dom/isDocumentRTL';
 import clamp from '@helpers/number/clamp';
-import I18n from '@lib/langPack';
 import classNames from '@helpers/string/classNames';
 
 export interface RangeSelectorProps {
@@ -13,7 +15,11 @@ export interface RangeSelectorProps {
   vertical?: boolean;
   useProperty?: boolean;
   offsetAxisValue?: number;
+  /** A media playback bar: runs left to right in any language, as it follows the tape */
+  keepLTR?: boolean;
   value?: number;
+  /** Takes no input, pointer or keys, while set */
+  disabled?: boolean;
   onMouseDown?: (event: GrabEvent) => void;
   onMouseUp?: (event: GrabEvent) => void;
   onScrub?: (value: number) => void;
@@ -39,6 +45,7 @@ export default function RangeSelector(props: RangeSelectorProps) {
   const useProperty = props.useProperty || false;
   const vertical = props.vertical || false;
   const offsetAxisValue = props.offsetAxisValue || 0;
+  const keepLTR = props.keepLTR || false;
 
   const stepStr = '' + step;
   const index = stepStr.indexOf('.');
@@ -72,11 +79,17 @@ export default function RangeSelector(props: RangeSelectorProps) {
   };
 
   const onMouseMove = (event: GrabEvent) => {
+    // * a grab held while the slider was disabled moves nothing more
+    if(!mousedown() || props.disabled) return;
     scrub(event);
   };
 
+  // * whether the grab in progress runs right to left: the slider's own direction, an island's included
+  let rtl = false;
   const onMouseDown = (event: GrabEvent) => {
+    if(props.disabled) return;
     setRect(containerRef.getBoundingClientRect());
+    rtl = !vertical && isElementRTL(containerRef);
     setMousedown(true);
     scrub(event);
     containerRef.classList.add('is-focused');
@@ -84,6 +97,7 @@ export default function RangeSelector(props: RangeSelectorProps) {
   };
 
   const onMouseUp = (event: GrabEvent) => {
+    if(!mousedown()) return;
     setMousedown(false);
     containerRef.classList.remove('is-focused');
     props.onMouseUp?.(event);
@@ -107,7 +121,7 @@ export default function RangeSelector(props: RangeSelectorProps) {
       rectMax
     );
 
-    if(!vertical && I18n.getIsRTL()) {
+    if(rtl) {
       offsetAxisValue_ = rectMax - offsetAxisValue_;
     }
 
@@ -149,7 +163,10 @@ export default function RangeSelector(props: RangeSelectorProps) {
 
   return (
     <div
-      ref={containerRef!}
+      ref={(el) => {
+        containerRef = el;
+        if(keepLTR) keepLeftToRight(el);
+      }}
       class={classNames(
         'progress-line',
         useTransform && 'use-transform',
@@ -168,7 +185,9 @@ export default function RangeSelector(props: RangeSelectorProps) {
         min={min}
         max={max}
         value={value()}
+        disabled={props.disabled}
         onInput={onInput}
+        onKeyDown={vertical ? undefined : onRangeInlineArrowKey}
       />
       {props.children}
     </div>

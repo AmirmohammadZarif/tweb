@@ -1,4 +1,5 @@
 import {createResource, createSignal, For, JSX, Show} from 'solid-js';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 import PopupElement, {createPopup} from '@components/popups/indexTsx';
 import {I18nTsx} from '@helpers/solid/i18n';
 import {i18n, LangPackKey} from '@lib/langPack';
@@ -98,7 +99,7 @@ export default function showCrmProfileFormPopup(props: {
   /** Puts the message into the chat's composer at the caret. */
   insert: (text: string) => void
 }) {
-  const managers = rootScope.managers;
+  const managers = bindManagersToSession(rootScope.managers);
   const chatId = '' + props.peerId.toUserId();
 
   createPopup(() => {

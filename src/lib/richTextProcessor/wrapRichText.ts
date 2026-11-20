@@ -1,7 +1,4 @@
-import type {EMOJI_VERSION} from '@environment/emojiVersionsSupport';
 import {SITE_HASHTAGS} from '.';
-import {EmojiVersions} from '@config/emoji';
-import IS_EMOJI_SUPPORTED from '@environment/emojiSupport';
 import buildURLHash from '@helpers/buildURLHash';
 import copy from '@helpers/object/copy';
 import encodeEntities from '@helpers/string/encodeEntities';
@@ -11,7 +8,7 @@ import parseEntities from '@lib/richTextProcessor/parseEntities';
 import setBlankToAnchor from '@lib/richTextProcessor/setBlankToAnchor';
 import setExternalToAnchor, {getElectronHelpers} from '@helpers/electronHelpers';
 import wrapUrl from '@lib/richTextProcessor/wrapUrl';
-import EMOJI_VERSIONS_SUPPORTED from '@environment/emojiVersionsSupport';
+import {getEmojiImageUrl, isEmojiNative} from '@lib/richTextProcessor/emojiImage';
 import {CLICK_EVENT_NAME} from '@helpers/dom/clickEvent';
 import IS_CUSTOM_EMOJI_SUPPORTED from '@environment/customEmojiSupport';
 import BOM from '@helpers/string/bom';
@@ -29,13 +26,16 @@ import {observeResize} from '@components/resizeObserver';
 import DotRenderer from '@components/dotRenderer';
 import Icon from '@components/icon';
 import isSuspiciousUrl from '@helpers/string/isSuspiciousUrl';
+import isWhitelistedUrl, {isMaskedUrlTrusted} from '@lib/richTextProcessor/isWhitelistedUrl';
 import {createRoot, createSignal, createEffect, onCleanup} from 'solid-js';
 import formatFormattedDate from '@helpers/date/formatFormattedDate';
 import formatRelativeTime from '@helpers/date/formatRelativeTime';
 import tsNow from '@helpers/tsNow';
 import filterDisabledEntities, {markMessageLinkEntity} from '@lib/richTextProcessor/filterDisabledEntities';
 import {RICH_TEXT_BUTTON_SELECTOR, setRichTextButton} from '@lib/richTextProcessor/richTextButtons';
+import {TEXT_LINK_ATTRIBUTE} from '@helpers/dom/linkPress';
 import type {Middleware} from '@helpers/middleware';
+import replaceNonNumber from '@helpers/string/replaceNonNumber';
 
 export type WrapRichTextOptions = Partial<{
   entities: MessageEntity[],
@@ -90,6 +90,36 @@ export type WrapRichTextOptions = Partial<{
 }> & CustomEmojiRendererElementOptions;
 
 export const ENTITY_ELEMENT_MAP: WeakMap<HTMLElement, MessageEntity> = new WeakMap();
+
+// * Text that always runs left to right — a link, an address, a number, a command, a @username — is
+// * isolated as such, so a right-to-left line around it does not carry its punctuation off to the
+// * wrong end ("@name" read as "name@"); a hashtag runs by its own letters.
+const ENTITY_DIRECTIONS: {[type in MessageEntity['_']]?: 'ltr' | 'auto'} = {
+  messageEntityUrl: 'ltr',
+  messageEntityEmail: 'ltr',
+  messageEntityPhone: 'ltr',
+  messageEntityBankCard: 'ltr',
+  messageEntityBotCommand: 'ltr',
+  messageEntityMention: 'ltr',
+  messageEntityCashtag: 'ltr',
+  messageEntityHashtag: 'auto'
+};
+
+// a custom emoji (and a rich text's picture) is drawn as an image, its text only standing for it; a
+// spoiler's text is drawn hidden
+const UNDRAWN_TEXT_ENTITY_TYPES: ReadonlySet<MessageEntity['_']> = new Set(['messageEntityCustomEmoji', 'messageEntitySpoiler']);
+
+/**
+ * Whether some of the text of the entity at `index` (ending at `end`) is not drawn as itself: a link made
+ * of that text goes somewhere else than it reads. What is inside an entity follows it in the sorted list.
+ */
+function hasUndrawnText(entities: MessageEntity[], index: number, end: number) {
+  for(let i = index + 1; i < entities.length && entities[i].offset < end; ++i) {
+    if(UNDRAWN_TEXT_ENTITY_TYPES.has(entities[i]._)) return true;
+  }
+
+  return false;
+}
 
 function createMarkupFormatting(formatting: string, element = document.createElement('span')) {
   const str = 'markup-' + formatting;
@@ -162,6 +192,13 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
     i: 0,
     usedLength: 0,
     text
+  };
+
+  // * a link that is not to what it reads shows where it goes before it goes there (not in a draft, nor where told not to)
+  const askBeforeOpening = (element: HTMLElement, masked: boolean) => {
+    if(masked && !options.passMaskedLinks && !options.wrappingDraft) {
+      element.setAttribute('onclick', 'showMaskedAlert(this)');
+    }
   };
 
   const wrapSomething = (wrapElement: HTMLElement, noFiller?: boolean) => {
@@ -325,6 +362,8 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           const container = document.createElement('pre');
           const content = document.createElement('div');
           content.classList.add('code-content');
+          // * code reads left to right in any language; the header and the stripe follow the UI
+          content.dir = 'ltr';
           element = document.createElement('code');
           element.classList.add('code-code');
           fragment.append(container);
@@ -452,13 +491,49 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           element = document.createElement('a');
           element.classList.add('phone-url');
           (element as HTMLAnchorElement).href = encodeEntities('tel:' + target);
+          // a rich text's phone has a number of its own: one that is not the number it reads asks first,
+          // showing the one it calls, as a link that is not its text does
+          askBeforeOpening(element, replaceNonNumber(target) !== replaceNonNumber(fullEntityText) || hasUndrawnText(entities, nasty.i, endOffset));
         }
+        break;
+      }
+
+      // a click opens the card's menu: its number to copy, and what the server knows of it
+      // (`onBankCardClick`, tdesktop's BankCardClickHandler)
+      case 'messageEntityBankCard': {
+        if(!(options.noLinks && !passEntities[entity._]) && !options.wrappingDraft) {
+          element = document.createElement('a');
+          element.classList.add('bank-card');
+          (element as HTMLAnchorElement).href = '#';
+          element.dataset.bankCard = fullEntityText;
+          element.setAttribute('aria-haspopup', 'menu');
+          element.setAttribute('aria-expanded', 'false');
+          element.setAttribute('onclick', 'onBankCardClick(this, event)');
+        }
+        break;
+      }
+
+      // * a TON wallet address the server marked: a click opens what can be done with it (wallet/addressMenu);
+      // * the link itself starts a transfer to it, for wherever the menu is not. Plain text while nothing handles it:
+      // * the menu's handler is there only once the wallet is released (lib/wallet/release)
+      case 'messageEntityTonAddress': {
+        if(!options.noLinks && (window as any).openTonAddress) {
+          element = document.createElement('a');
+          element.classList.add('ton-address');
+          (element as HTMLAnchorElement).href = encodeEntities('tg://sendgrams?to=' + encodeURIComponent(fullEntityText));
+          if(!contextExternal) {
+            element.setAttribute('onclick', 'openTonAddress(this)');
+            element.setAttribute('aria-haspopup', 'menu');
+          }
+        }
+
         break;
       }
 
       case 'messageEntityBotCommand': {
         // if(!(options.noLinks || options.noCommands || contextExternal)/*  && !entity.unsafe */) {
-        if(!options.noLinks && passEntities[entity._]) {
+        // * a press sends the command in the user's name: never one that is not the text it shows
+        if(!options.noLinks && passEntities[entity._] && !hasUndrawnText(entities, nasty.i, endOffset)) {
           let command = fullEntityText.slice(1);
           let bot: string | boolean;
           let atPos: number;
@@ -540,18 +615,7 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
       }
 
       case 'messageEntityEmoji': {
-        let isSupported = IS_EMOJI_SUPPORTED;
-        if(isSupported) {
-          for(const version in EmojiVersions) {
-            if(version) {
-              const emojiData = EmojiVersions[version as EMOJI_VERSION];
-              if(emojiData.hasOwnProperty(entity.unicode) && !EMOJI_VERSIONS_SUPPORTED[version as EMOJI_VERSION]) {
-                isSupported = false;
-                break;
-              }
-            }
-          }
-        }
+        const isSupported = isEmojiNative(entity.unicode);
 
         // if(!(options.wrappingDraft && isSupported)) { // * fix safari emoji
         if(!isSupported) { // no wrapping needed
@@ -559,7 +623,7 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           //   insertPart(entity, '<span class="emoji">', '</span>');
           // } else {
           element = document.createElement('img');
-          (element as HTMLImageElement).src = `assets/img/emoji/${entity.unicode}.png`;
+          (element as HTMLImageElement).src = getEmojiImageUrl(entity.unicode);
           property = 'alt';
           element.className = 'emoji emoji-image';
 
@@ -596,8 +660,8 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
       }
 
       case 'messageEntityLinebreak': {
-        // The block boundary replaces one separator in messages and drafts.
-        if(options.ignoreNextIndex === nasty.i || (!options.noTextFormat && nextEntity?._ === 'messageEntityBlockquote' && nextEntity.offset === endOffset)) {
+        // The block boundary replaces one separator in drafts.
+        if(options.ignoreNextIndex === nasty.i || (options.wrappingDraft && !options.noTextFormat && nextEntity?._ === 'messageEntityBlockquote' && nextEntity.offset === endOffset)) {
           usedText = true;
         } else if(options.wrappingDraft && IS_FIREFOX) {
           element = document.createElement('br');
@@ -630,15 +694,8 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           url = wrapped.url;
           onclick = wrapped.onclick;
 
-          if(options.whitelistedDomains) {
-            try {
-              const hostname = new URL(url).hostname;
-              if(!options.whitelistedDomains.includes(hostname)) {
-                break;
-              }
-            } catch(err) {
-              break;
-            }
+          if(options.whitelistedDomains && !isWhitelistedUrl(url, options.whitelistedDomains)) {
+            break;
           }
 
           if(entity._ === 'messageEntityTextUrl') {
@@ -649,12 +706,18 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
               ++nasty.i;
             }
 
-            if(url !== fullEntityText) {
+            // a host the server vouches for opens at once, whatever text it hides under
+            if(url !== fullEntityText && !isMaskedUrlTrusted(url)) {
               masked = true;
             }
           } else {
             masked = isSuspiciousUrl(url);
             // inner = encodeEntities(replaceUrlEncodings(entityText));
+          }
+
+          // * the address is the text, but not all of the text is drawn as such: what it reads is not where it goes
+          if(!masked && hasUndrawnText(entities, nasty.i, endOffset) && !isMaskedUrlTrusted(url)) {
+            masked = true;
           }
 
           const currentContext = !!onclick;
@@ -694,6 +757,8 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           element = document.createElement('a');
           (element as HTMLAnchorElement).href = encodeEntities('mailto:' + target);
           setBlankToAnchor(element as HTMLAnchorElement);
+          // a rich text's email has an address of its own: as with a phone, another than it reads asks first
+          askBeforeOpening(element, target.trim().toLowerCase() !== fullEntityText.trim().toLowerCase() || hasUndrawnText(entities, nasty.i, endOffset));
         }
 
         break;
@@ -731,7 +796,8 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
 
       case 'messageEntityMention': {
         // const contextUrl = !options.noLinks && siteMentions[contextSite];
-        if(!options.noLinks) {
+        // * a username is letters it reads: one partly drawn as an image or hidden is not the one it shows
+        if(!options.noLinks && !hasUndrawnText(entities, nasty.i, endOffset)) {
           const username = fullEntityText.slice(1);
 
           element = wrapTelegramUrlToAnchor('t.me/' + username);
@@ -829,6 +895,8 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
         } else {
           element.classList.add('formatted-date');
           element.setAttribute('onclick', 'onFormattedDateClick(this, event)');
+          // pressed as a link is, and its menu lights it (helpers/dom/linkPress.ts)
+          element.setAttribute(TEXT_LINK_ATTRIBUTE, '');
         }
 
         ENTITY_ELEMENT_MAP.set(element, entity);
@@ -836,9 +904,13 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
         if(Object.keys(entity.pFlags).length && !options.wrappingDraft) {
           usedText = true;
           element.dataset.originalText = fullEntityText;
+          // a text node of its own, set anew: a relative date ticks while its menu may have lit it, and
+          // the plate in it (helpers/dom/linkPress.ts) must stay
+          const textNode = document.createTextNode('');
+          element.append(textNode);
           const updateText = (text: string) => {
             element.dataset.fakeText = text;
-            element.textContent = text;
+            textNode.data = text;
           };
           if(entity.pFlags.relative) {
             if(options.middleware) {
@@ -940,6 +1012,10 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
     }
 
     if(element) markMessageLinkEntity(element, entity);
+
+    if(element && !options.wrappingDraft && ENTITY_DIRECTIONS[entity._]) {
+      element.dir = ENTITY_DIRECTIONS[entity._];
+    }
 
     if(processingBlockElement) {
       let foundNextLinebreakIndex = -1;

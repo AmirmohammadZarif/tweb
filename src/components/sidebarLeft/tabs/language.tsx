@@ -7,13 +7,14 @@ import rootScope from '@lib/rootScope';
 import usePremium from '@stores/premium';
 import {pickLanguage} from '@components/chat/translation';
 import CheckboxFieldTsx from '@components/checkboxFieldTsx';
-import showPremiumPopup from '@components/popups/premium';
 import RadioFieldTsx from '@components/radioFieldTsx';
 import RowTsx from '@components/rowTsx';
 import Section from '@components/section';
 import {useAppSettings} from '@stores/appSettings';
 import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
 import {usePromiseCollector} from '@components/solidJsTabs/promiseCollector';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
+import getDoNotTranslateLanguages from '@helpers/getDoNotTranslateLanguages';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Section 1 — translation toggles + "Do not translate" picker
@@ -23,21 +24,14 @@ const TranslateSection = () => {
   const [appSettings, setAppSettings] = useAppSettings();
   const isPremium = usePremium();
 
-  const doNotTranslate = createMemo(() => {
-    const arr = appSettings.translations.doNotTranslate;
-    if(!arr.length) {
-      return [I18n.langCodeNormalized()];
-    }
-
-    return arr;
-  });
+  const doNotTranslate = createMemo(() => getDoNotTranslateLanguages(appSettings.translations.doNotTranslate));
 
   return (
     <Section
       name="TranslateMessages"
       caption={isPremium() ? 'Translation.DoNotShow' : 'Language.TranslateMessages.Channel.Premium'}
       captionArgs={[anchorCallback(() => {
-        showPremiumPopup({feature: 'translations'});
+        hotReloadGuard.showPremiumPopup({feature: 'translations'});
       })]}
     >
       <RowTsx>
@@ -56,7 +50,7 @@ const TranslateSection = () => {
         fakeDisabled={!isPremium()}
         clickable={!isPremium() ? (e) => {
           e.preventDefault();
-          showPremiumPopup({feature: 'translations'});
+          hotReloadGuard.showPremiumPopup({feature: 'translations'});
         } : undefined}
       >
         <RowTsx.CheckboxFieldToggle>
@@ -70,7 +64,8 @@ const TranslateSection = () => {
         </RowTsx.CheckboxFieldToggle>
         <RowTsx.Title>{i18n('ShowTranslateChatButton')}</RowTsx.Title>
       </RowTsx>
-      {appSettings.translations.enabled && (<RowTsx
+      {/* the list the Translate button reads too (tdesktop shows it while either is on) */}
+      {(appSettings.translations.showInMenu || appSettings.translations.enabled) && (<RowTsx
         clickable={async() => {
           const languages = await pickLanguage(true, doNotTranslate());
           setAppSettings('translations', 'doNotTranslate', languages);
@@ -92,7 +87,7 @@ const TranslateSection = () => {
 // Section 2 — language radio list. The fetch is collected into the tab's
 // promise collector so opening waits for the list (avoids showing an empty
 // section that suddenly fills with 50+ rows). On repeat opens
-// `invokeApiCacheable` returns synchronously from cache, so no real wait.
+// `appLangPackManager.getLanguages` answers from its cache, so no real wait.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const LanguageListSection = () => {
@@ -103,9 +98,7 @@ const LanguageListSection = () => {
   let webLangCodes: string[] = [];
 
   promiseCollector.collect((async() => {
-    const langs1 = await rootScope.managers.apiManager.invokeApiCacheable('langpack.getLanguages', {
-      lang_pack: 'web'
-    });
+    const langs1 = await rootScope.managers.appLangPackManager.getLanguages('web');
     // macos langpack disabled in legacy tab — kept the structure for parity
     const langs2: LangPackLanguage[] = [];
 

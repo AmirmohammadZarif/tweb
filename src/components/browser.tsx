@@ -26,7 +26,8 @@ import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
 import I18n, {i18n} from '@lib/langPack';
 import {avatarNew} from '@components/avatarNew';
 import {getMiddleware} from '@helpers/middleware';
-import MovablePanel from '@helpers/movablePanel';
+import MovablePanel, {IS_MOVABLE_PANEL} from '@helpers/movablePanel';
+import appNavigationController, {NavigationItem} from '@components/appNavigationController';
 import {MovableState} from '@components/movableElement';
 import {Ref, resolveElements, resolveFirst} from '@solid-primitives/refs';
 import Section from '@components/section';
@@ -37,14 +38,12 @@ import SearchIndex from '@lib/searchIndex';
 import {useUser} from '@stores/peers';
 import {Game, Message, Page, User} from '@layer';
 import TelegramWebView from '@components/telegramWebView';
-import showForwardPopup from '@components/popups/forward';
 import {getOverlayRoot} from '@helpers/appWindow';
 import getPeerActiveUsernames from '@appManagers/utils/peers/getPeerActiveUsernames';
-import internalLinkProcessor from '@lib/internalLinkProcessor';
 import {INTERNAL_LINK_TYPE} from '@lib/internalLink';
 import {InstantView} from '@components/instantView';
 import {WebPage} from '@layer';
-import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
+import SolidJSHotReloadGuardProvider, {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
 import {copyTextToClipboard} from '@helpers/clipboard';
 import safeWindowOpen from '@helpers/dom/safeWindowOpen';
 import wrapTelegramRichText from '@lib/richTextProcessor/wrapTelegramRichText';
@@ -57,6 +56,8 @@ import cancelEvent from '@helpers/dom/cancelEvent';
 import clamp from '@helpers/number/clamp';
 import windowSize from '@helpers/windowSize';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
+import {getAccountSession, isSessionLeaving} from '@lib/accounts/getCurrentAccount';
 
 type BrowserPageProps<T = {}> = T & {
   title: string, // plain text
@@ -109,7 +110,7 @@ function BrowserHeaderTab(props: {
       value += (index - 2) * -40;
     }
 
-    return `translateX(${value}px)`;
+    return `translateX(calc(${value}px * var(--reflect)))`;
   });
 
   return (
@@ -150,6 +151,15 @@ function BrowserHeaderTab(props: {
       />
     </div>
   );
+}
+
+/** The header's left button: the page's own back (a mini app's BackButton), or closing the page */
+function pressBrowserBack([state, actions]: BrowserContextValue) {
+  if(state.page.needBackButton) {
+    state.page.onBackClick();
+  } else {
+    actions.close(state.page);
+  }
 }
 
 function BrowserHeader(props: {
@@ -246,13 +256,7 @@ function BrowserHeader(props: {
     <div class={styles.BrowserHeader}>
       <BrowserHeaderButton
         aria-label={I18n.format(needBackButton() ? 'AccDescr.Back' : 'Close', true)}
-        onClick={() => {
-          if(needBackButton()) {
-            state.page.onBackClick();
-          } else {
-            actions.close(state.page);
-          }
-        }}
+        onClick={() => pressBrowserBack([state, actions])}
       >
         <div class={classNames('animated-close-icon', needBackButton() && 'state-back')}></div>
       </BrowserHeaderButton>
@@ -266,7 +270,7 @@ function BrowserHeader(props: {
           <div
             class={styles.BrowserHeaderSelector}
             style={{
-              transform: `translateX(${state.index * 40 + 7 + (state.index >= 1 ? 16 : 0)}px)`,
+              transform: `translateX(calc(${state.index * 40 + 7 + (state.index >= 1 ? 16 : 0)}px * var(--reflect)))`,
               width: state.page.titleWidth() + 16 * 2 + 34 + 'px'
             }}
           >
@@ -323,7 +327,7 @@ type BrowserContextState = {
 type BrowserContextActions = {
   add: (page: BrowserPageProps) => void,
   select: (page: BrowserPageProps | number) => void,
-  close: (page: BrowserPageProps) => void,
+  close: (page: BrowserPageProps, withoutConfirmation?: boolean) => Promise<void>,
   destroy: () => void,
   toggleCollapsed: (collapse?: boolean) => void,
   replace: (page: BrowserPageProps, originalPage: BrowserPageProps) => void,
@@ -387,13 +391,21 @@ function createBrowserStore(props: {
         });
       });
     },
-    close: async(page) => {
-      const index = state.pages.findIndex((_page) => _page.id === page.id);
-      if(index === -1) {
+    close: async(page, withoutConfirmation) => {
+      const findIndex = () => state.pages.findIndex((_page) => _page.id === page.id);
+      if(findIndex() === -1) {
         return;
       }
 
-      await page.isConfirmationNeededOnClose?.();
+      if(!withoutConfirmation) {
+        await page.isConfirmationNeededOnClose?.();
+      }
+
+      // * the user was asked meanwhile: the page may be gone (the app closed itself) or moved
+      const index = findIndex();
+      if(index === -1) {
+        return;
+      }
 
       if(state.pages.length === 1) {
         actions.destroy();
@@ -467,6 +479,22 @@ function Browser(props: {
   const minHeight = height * (minWidth / width) + additionalHeight;
 
   const [state, actions] = lastContext = useContext(BrowserContext);
+
+  // * where it cannot be moved (a touch screen) the browser stands over the app as a screen of its own: back
+  // * (the system's, a swipe, Escape) is its header button there, as on Android and iOS, and not the chat under it
+  if(!IS_MOVABLE_PANEL) {
+    const navigationItem: NavigationItem = {
+      type: 'browser',
+      onPop: () => {
+        if(state.destroyed || !state.page) return;
+        pressBrowserBack([state, actions]);
+        // * it stays until the browser itself goes: a mini app's back, a page of several, a close asked about
+        return false;
+      }
+    };
+    appNavigationController.pushItem(navigationItem);
+    onCleanup(() => appNavigationController.removeItem(navigationItem));
+  }
   const [movableState, setMovableState] = createSignal<MovableState>({
     width,
     height: height + additionalHeight
@@ -654,24 +682,28 @@ export async function openWebAppInAppBrowser(options: WebAppLaunchOptions) {
     const page = lastContext[0].pages.find((page) => page.cacheKey === options.cacheKey);
     if(page) {
       lastContext[1].select(page);
+      lastContext[1].toggleCollapsed(false); // * opened again while minimized, it is shown, as a game is
       return;
     }
   }
 
+  // * the account session the mini app is opened in: it is not mounted once the tab is on another account
+  const session = getAccountSession();
   const deferred = deferredPromise<void>();
   const [needBackButton, setNeedBackButton] = createSignal(false);
-  const [destroy, setDestroy] = createSignal(false);
+  // * who closes it: the app's own close asks nothing, and goes ahead even while the user is asked about theirs
+  const [destroy, setDestroy] = createSignal<false | 'user' | 'app'>(false);
   const webApp = new WebApp({
     ...options,
     header: document.createElement('div'),
     title: document.createElement('div'),
     body: document.createElement('div'),
-    forceHide: () => setDestroy(true),
+    forceHide: (byApp) => setDestroy((closing) => byApp ? 'app' : closing || 'user'),
     onBackStatus: setNeedBackButton
   });
 
   const title = await webApp.getTitle(true);
-  if(destroy()) {
+  if(destroy() || isSessionLeaving(session)) {
     webApp.destroy();
     options.onClose?.();
     return;
@@ -686,7 +718,7 @@ export async function openWebAppInAppBrowser(options: WebAppLaunchOptions) {
     middleware: middlewareHelper.get()
   });
   await avatar.readyThumbPromise;
-  if(destroy()) {
+  if(destroy() || isSessionLeaving(session)) {
     middlewareHelper.destroy();
     webApp.destroy();
     options.onClose?.();
@@ -714,8 +746,13 @@ export async function openWebAppInAppBrowser(options: WebAppLaunchOptions) {
     });
 
     createEffect(() => {
-      if(destroy()) {
-        lastContext[1].close(initialState);
+      const closing = destroy();
+      if(closing) {
+        // * a close the user declined (the app asked to confirm it) leaves the app open, and able to close itself
+        // * again: left set, the signal would never change, and this would never run again
+        lastContext[1].close(initialState, closing === 'app').catch(() => {
+          setDestroy((closing) => closing === 'user' ? false : closing);
+        });
       }
     });
 
@@ -754,6 +791,8 @@ export async function openGameInAppBrowser(options: {
 }) {
   const {game, message, url} = options;
   const cacheKey = `game-${game.id}-${message.peerId}-${message.mid}`;
+  // * the account session the game is opened in: it is not mounted once the tab is on another account
+  const session = getAccountSession();
 
   if(lastContext) {
     const existing = lastContext[0].pages.find((page) => page.cacheKey === cacheKey);
@@ -766,7 +805,7 @@ export async function openGameInAppBrowser(options: {
 
   const shareMessage = async() => {
     const mids = await rootScope.managers.appMessagesManager.getMidsByMessage(message);
-    showForwardPopup({[message.peerId]: mids});
+    hotReloadGuard.showForwardPopup({[message.peerId]: mids});
   };
 
   const body = document.createElement('div');
@@ -797,6 +836,11 @@ export async function openGameInAppBrowser(options: {
     middleware: middlewareHelper.get()
   });
   await avatar.readyThumbPromise;
+  if(isSessionLeaving(session)) {
+    middlewareHelper.destroy();
+    telegramWebView.destroy();
+    return;
+  }
 
   return createRoot((dispose) => {
     const initialState: BrowserPageProps = {
@@ -968,7 +1012,7 @@ export async function openCatalogueInAppBrowser() {
               }
 
               const botId = targets.get(target);
-              internalLinkProcessor.processWebAppLink({
+              hotReloadGuard.internalLinkProcessor.processWebAppLink({
                 _: INTERNAL_LINK_TYPE.WEB_APP,
                 appname: '',
                 domain: getPeerActiveUsernames(useUser(botId) as User.user)[0]
@@ -1105,6 +1149,7 @@ export function openInstantViewInAppBrowser({
   const [webPageId, setWebPageId] = createSignal<Long>(_webPageId);
   const [page, setPageStore] = createStore<Page>(undefined);
   const [pageResource] = createResource<Page>(async() => {
+    const managers = bindManagersToSession(rootScope.managers);
     if(
       !TEST_PART &&
       hadCachedPage &&
@@ -1114,7 +1159,7 @@ export function openInstantViewInAppBrowser({
     }
 
     if(TEST_PART) await pause(10000);
-    return rootScope.managers.appWebPagesManager.getWebPage(url)
+    return managers.appWebPagesManager.getWebPage(url)
     .then((webPage) => {
       setWebPageId(webPage.id);
       return (webPage as WebPage.webPage).cached_page;

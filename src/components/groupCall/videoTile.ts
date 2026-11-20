@@ -6,8 +6,10 @@ import {getMiddleware} from '@helpers/middleware';
 import safePlay from '@helpers/dom/safePlay';
 import PeerTitle from '@components/peerTitle';
 import getPeerTitle from '@components/wrappers/getPeerTitle';
+import type {ActiveAccountNumber} from '@lib/accounts/types';
 import {STANDARD_TRANSITION_EASING, STANDARD_TRANSITION_IN_TIME} from '@helpers/standardTransition';
 import Icon from '@components/icon';
+import liteMode from '@helpers/liteMode';
 import Button from '@components/button';
 import {avatarNew} from '@components/avatarNew';
 import callVideoCanvasBlur from '@components/call/videoCanvasBlur';
@@ -63,6 +65,7 @@ export default class GroupCallVideoTile {
    * @param initialSize the picture's size where the call's own element already knows it: the clone
    * has no frame yet, and a 16:9 guess would reshape the tile once its first one arrived.
    * @param onSizeChange `animate` is off for the first frame, which only settles the tile.
+   * @param accountNumber the call's, which the tab may not show meanwhile
    */
   constructor(
     public readonly source: GroupCallOutputSource,
@@ -70,7 +73,8 @@ export default class GroupCallVideoTile {
     participant: GroupCallParticipant,
     video: HTMLVideoElement,
     private readonly onSizeChange: (animate: boolean) => void,
-    private readonly initialSize?: GroupCallTileSize
+    private readonly initialSize?: GroupCallTileSize,
+    accountNumber?: ActiveAccountNumber
   ) {
     this.peerId = getPeerId(participant.peer);
 
@@ -86,7 +90,8 @@ export default class GroupCallVideoTile {
       middleware: this.middlewareHelper.get(),
       size: AVATAR_SIZE,
       isDialog: false,
-      peerId: this.peerId
+      peerId: this.peerId,
+      accountNumber
     });
     avatar.node.classList.add(className + '-avatar');
     placeholder.append(avatar.node);
@@ -109,10 +114,10 @@ export default class GroupCallVideoTile {
       peerTitleElement.classList.add('peer-title');
       this.peerName = I18n.format('VoiceChat.Status.You', true);
     } else {
-      peerTitleElement = new PeerTitle({peerId: this.peerId}).element;
+      peerTitleElement = new PeerTitle({peerId: this.peerId, accountNumber}).element;
       // the title fills in later, so the name is asked for on its own
       const middleware = this.middlewareHelper.get();
-      getPeerTitle({peerId: this.peerId, plainText: true}).then((name) => {
+      getPeerTitle({peerId: this.peerId, plainText: true, accountNumber}).then((name) => {
         if(!middleware()) return;
         this.peerName = name;
         this.updateAriaLabel();
@@ -323,13 +328,17 @@ export default class GroupCallVideoTile {
     }], options);
   }
 
-  /** Grows into its place, for a tile that was nowhere before. */
+  /** Grows into its place, for a tile that was nowhere before (only fades in, with reduced animations). */
   public appear() {
     const translate = `translate3d(${this.rect.x}px, ${this.rect.y}px, 0)`;
     this.element.animate([
-      {transform: translate + ' scale(.8)', opacity: 0},
+      {transform: this.shrunk(translate), opacity: 0},
       {transform: translate, opacity: 1}
     ], {duration: GROUP_CALL_MOVE_DURATION, easing: GROUP_CALL_MOVE_EASING});
+  }
+
+  private shrunk(translate: string) {
+    return liteMode.isAvailable('motion') ? translate + ' scale(.8)' : translate;
   }
 
   public stopMoving() {
@@ -348,7 +357,7 @@ export default class GroupCallVideoTile {
     const translate = `translate3d(${this.rect.x}px, ${this.rect.y}px, 0)`;
     const animation = this.element.animate([
       {transform: translate, opacity: 1},
-      {transform: translate + ' scale(.8)', opacity: 0}
+      {transform: this.shrunk(translate), opacity: 0}
     ], {duration: GROUP_CALL_MOVE_DURATION, easing: GROUP_CALL_MOVE_EASING, fill: 'forwards'});
     animation.finished.then(() => this.destroy(), () => this.destroy());
   }

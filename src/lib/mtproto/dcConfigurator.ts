@@ -17,6 +17,7 @@ import {DcId} from '@types';
 import {getEnvironment} from '@environment/utils';
 import SocketProxied from '@lib/mtproto/transports/socketProxied';
 import {constructRelayHttpUrl, constructRelayWebSocketUrl, isRelayEnabled} from '@lib/mtproto/relay';
+import isValidDcId from '@lib/mtproto/isValidDcId';
 
 export type TransportType = 'websocket' | 'https' | 'http';
 export type ConnectionType = 'client' | 'download' | 'upload';
@@ -42,12 +43,11 @@ export function getTelegramConnectionSuffix(connectionType: ConnectionType) {
 // (`1.evil.com/` -> wss://kws1.evil.com/-1.web.telegram.org/apiws). Telegram has exactly
 // five DCs, so validate here, before the value can reach a URL or a storage key.
 export function assertValidDcId(dcId: DcId): DcId {
-  const id = +dcId;
-  if(!Number.isInteger(id) || id < 1 || id > 5) {
+  if(!isValidDcId(dcId)) {
     throw new Error('[MT] invalid dcId: ' + dcId);
   }
 
-  return id as DcId;
+  return +dcId as DcId;
 }
 
 export function constructTelegramWebSocketUrl(_dcId: DcId, connectionType: ConnectionType, premium?: boolean) {

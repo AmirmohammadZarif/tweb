@@ -30,6 +30,9 @@ import createAiEditorIcon from '@components/chat/createAiEditorIcon';
 import tooltipController from '@helpers/tooltipController';
 import captureInputContent from '@components/chat/inputEditor/captureInputContent';
 import {FOCUS_TRAP_ATTACHED_ATTRIBUTE} from '@helpers/dom/focusTrap';
+import getInputFormattingTypes from '@helpers/dom/getInputFormattingTypes';
+import isDocumentRTL from '@helpers/dom/isDocumentRTL';
+import getLayoutWidth from '@helpers/dom/getLayoutWidth';
 
 export type MarkupTooltipTypes = Extract<
   MarkdownType,
@@ -47,8 +50,12 @@ export default class MarkupTooltip {
   public container: HTMLElement;
   private wrapper: HTMLElement;
   private scrollContainer: HTMLDivElement;
+  private row: HTMLElement;
+  // * the stylesheet's, which the row is cut near (`getWidth`)
+  private width: number;
   private buttons: {[type in MarkupTooltipTypes]: HTMLElement} = {} as any;
   private buttonIcons: Partial<{[type in MarkupTooltipTypes]: {inactive: Icon, active: Icon}}> = {};
+  private quoteIcon: Icon = 'quote';
   private dateLinkDelimiter: HTMLElement;
   private extendedDelimiter: HTMLElement;
   private aiButton: HTMLElement;
@@ -100,7 +107,7 @@ export default class MarkupTooltip {
     this.wrapper = document.createElement('div');
     this.wrapper.classList.add('markup-tooltip-wrapper');
 
-    const row = document.createElement('div');
+    const row = this.row = document.createElement('div');
     row.classList.add('markup-tooltip-row');
     mountMarkupTooltipScrollable({
       mount: this.wrapper,
@@ -113,7 +120,7 @@ export default class MarkupTooltip {
       'italic',
       'underline',
       'strikethrough',
-      ['quote', 'blockquote'],
+      'quote',
       ['date', 'calendar'],
       'link',
       'monospace',
@@ -247,12 +254,12 @@ export default class MarkupTooltip {
       this.buttons.underline,
       this.buttons.strikethrough,
       this.buttons.quote,
+      this.buttons.spoiler,
       this.dateLinkDelimiter,
       this.buttons.date,
       this.buttons.link,
       this.extendedDelimiter,
       this.buttons.monospace,
-      this.buttons.spoiler,
       this.buttons.highlight,
       this.buttons.subscript,
       this.buttons.superscript
@@ -275,6 +282,7 @@ export default class MarkupTooltip {
 
     this.container.append(this.wrapper);
     getOverlayRoot().append(this.container);
+    this.width = getLayoutWidth(this.container);
 
     window.addEventListener('resize', () => {
       this.hide();
@@ -410,6 +418,16 @@ export default class MarkupTooltip {
         replaceButtonIcon(button, isActive ? icons.active : icons.inactive);
       }
     }
+
+    // a collapsed field quotes as a message does; the expanded one, a pullquote and a quote with an
+    // author quote as a block
+    const quoteIcon: Icon = editor && (editor.isExpanded() || editor.isRichQuoteSelected()) ?
+      'blockquote' :
+      'quote';
+    if(quoteIcon !== this.quoteIcon) {
+      this.quoteIcon = quoteIcon;
+      replaceButtonIcon(this.buttons.quote, quoteIcon);
+    }
   }
 
   private setTooltipPosition() {
@@ -429,8 +447,7 @@ export default class MarkupTooltip {
     const selectionRect = getRangeContentRect(range);
     const inputRect = rowsWrapper.getBoundingClientRect();
     const sizesRect = this.scrollContainer.getBoundingClientRect();
-
-    this.container.style.maxWidth = inputRect.width + 'px';
+    const width = this.getWidth(inputRect.width);
 
     const visibleRect = getVisibleRect(
       undefined,
@@ -438,6 +455,9 @@ export default class MarkupTooltip {
       false,
       selectionRect
     );
+
+    this.container.style.maxWidth = inputRect.width + 'px';
+    this.container.style.width = width + 'px';
 
     const {newHeight = 0, oldHeight = newHeight} = this.input as any;
 
@@ -450,11 +470,33 @@ export default class MarkupTooltip {
     const top = selectionTop - sizesRect.height - 8 + (true ? oldHeight - newHeight : 0);
 
     const minX = inputRect.left;
-    const maxX = (inputRect.left + inputRect.width) - Math.min(inputRect.width, sizesRect.width);
-    const x = selectionRect.left + (selectionRect.width - sizesRect.width) / 2;
+    const maxX = (inputRect.left + inputRect.width) - Math.min(inputRect.width, width);
+    const x = selectionRect.left + (selectionRect.width - width) / 2;
     const left = clamp(x, minX, maxX);
 
     this.container.style.transform = `translate3d(${left}px, ${top}px, 0)`;
+  }
+
+  // * the row scrolls along: where it does not fit whole, the tooltip ends in the middle of a button, so the half
+  // * that shows says there is more - never between two buttons, which reads as the end of the row
+  private getWidth(maxWidth: number) {
+    const limit = Math.min(this.width, maxWidth);
+    const rtl = isDocumentRTL();
+    const rowRect = this.row.getBoundingClientRect();
+    let previousCenter: number;
+    for(const button of this.row.children) {
+      if(!button.classList.contains('btn-icon') || button.classList.contains('hide')) continue;
+      const rect = button.getBoundingClientRect();
+      const start = rtl ? rowRect.right - rect.right : rect.left - rowRect.left;
+      const center = start + rect.width / 2;
+      if(start + rect.width > limit + .5) {
+        return center <= maxWidth ? center : previousCenter ?? limit;
+      }
+
+      previousCenter = center;
+    }
+
+    return limit;
   }
 
   private hasFormattableSelection(input = this.input) {
@@ -495,16 +537,13 @@ export default class MarkupTooltip {
 
     this.setActiveMarkupButton();
 
-    const canFormat = this.input.getAttribute('can-format');
-    const allowedTypes = canFormat !== null ?
-      new Set(canFormat.split(',').filter(Boolean) as MarkupTooltipTypes[]) :
-      null;
+    const formatting = getInputFormattingTypes(this.input);
     const hiddenTypes = new Set<MarkupTooltipTypes>();
     const editor = getChatInputEditor(this.input);
     (Object.keys(this.buttons) as MarkupTooltipTypes[]).forEach((type) => {
       // What the mounted schema cannot apply must not be offered: a plain field
       // carries no highlight or script marks.
-      const hidden = !!allowedTypes && !allowedTypes.has(type) || !editor?.supportsMarkup(type);
+      const hidden = formatting !== 'all' && !formatting.has(type) || !editor?.supportsMarkup(type);
       this.buttons[type].classList.toggle('hide', hidden);
       if(hidden) hiddenTypes.add(type);
     });
@@ -513,13 +552,13 @@ export default class MarkupTooltip {
       'italic',
       'underline',
       'strikethrough',
-      'quote'
+      'quote',
+      'spoiler'
     ] as const).some((type) => !hiddenTypes.has(type));
     const hasDateOrLink = (['date', 'link'] as const)
     .some((type) => !hiddenTypes.has(type));
     const hasExtendedFormatting = ([
       'monospace',
-      'spoiler',
       'highlight',
       'subscript',
       'superscript'
@@ -618,8 +657,8 @@ export default class MarkupTooltip {
 
   public canFormatInput(input: Element) {
     if(!input) return false;
-    const canFormat = input.getAttribute('can-format');
-    return canFormat !== null ? !!canFormat.trim() : input.classList.contains('input-message-input');
+    const formatting = getInputFormattingTypes(input);
+    return formatting === 'all' || !!formatting.size;
   }
 
   private handleSelectionChange = (event?: Event) => {

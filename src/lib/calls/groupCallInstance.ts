@@ -205,11 +205,17 @@ export default class GroupCallInstance extends CallInstanceBase<{
   // mute flag). `peerId` is the participant row's peer, ours included.
   speaking: (change: {peerId: PeerId, speaking: boolean}) => void
 }> {
-  public id: GroupCallId;
+  private _id: GroupCallId;
   public chatId: ChatId;
   public connections: {[k in GroupCallConnectionType]?: GroupCallConnectionInstance};
   public groupCall: GroupCall;
   public participant: GroupCallParticipant;
+  // Who a legacy video chat shows us as when it is not the account: a channel we speak as.
+  // Every main join (and rejoin) asks for it; changeGroupCallJoinAs switches it.
+  public joinAsPeerId?: PeerId;
+  // The speaker invite of the link the video chat was joined by, handed over by every main join and rejoin
+  // (tdesktop GroupCall::_joinHash); rejoinWithInviteHash sets it while the call goes on.
+  public inviteHash?: string;
 
   // ===== E2E (conference) mode =====
   // When set, this instance is a TdE2E-encrypted conference call rather than
@@ -302,17 +308,19 @@ export default class GroupCallInstance extends CallInstanceBase<{
   private mainRejoining = false;
   private mainJoinGeneration = 0;
 
-  private managers: AppManagers;
-
   constructor(options: {
     id: GroupCallInstance['id'],
     chatId: GroupCallInstance['chatId'],
     connections?: GroupCallInstance['connections'],
-    managers: AppManagers
+    managers: AppManagers,
+    accountNumber?: GroupCallInstance['accountNumber'],
+    myId?: PeerId
   }) {
     super();
 
     safeAssign(this, options);
+    this.bindAccount();
+    this.heldCall.setId(this.id);
 
     if(!this.log) {
       this.log = logger('GROUP-CALL');
@@ -345,6 +353,16 @@ export default class GroupCallInstance extends CallInstanceBase<{
         this.cleanup();
       }
     });
+  }
+
+  // * a conference joined by a link or an invitation learns its id from the join
+  public get id() {
+    return this._id;
+  }
+
+  public set id(id: GroupCallId) {
+    this._id = id;
+    this.heldCall?.setId(id);
   }
 
   public cleanup(): void {
@@ -2166,7 +2184,7 @@ export default class GroupCallInstance extends CallInstanceBase<{
   }
 
   public get selfPeerId(): PeerId {
-    return this.participant ? getPeerId(this.participant.peer) : rootScope.myId;
+    return this.participant ? getPeerId(this.participant.peer) : (this.joinAsPeerId ?? this.myId);
   }
 
   /**
@@ -2298,8 +2316,9 @@ export default class GroupCallInstance extends CallInstanceBase<{
     return state === GROUP_CALL_STATE.CLOSED;
   }
 
+  // * none for a call that never joined: it has no transport yet
   public get streamManager(): StreamManager {
-    return this.connections.main.streamManager;
+    return this.connections.main?.streamManager;
   }
 
   public get description(): localConferenceDescription {
@@ -2355,7 +2374,8 @@ export default class GroupCallInstance extends CallInstanceBase<{
 
     return {
       _: 'groupCallParticipant',
-      peer: {_: 'peerUser', user_id: peerId.toUserId()},
+      // a channel when we join as one: those are the only other peers getGroupCallJoinAs offers
+      peer: peerId.isUser() ? {_: 'peerUser', user_id: peerId.toUserId()} : {_: 'peerChannel', channel_id: peerId.toChatId()},
       pFlags: {self: true, can_self_unmute: true, ...(this.isMicrophoneMuted && {muted: true as const})},
       source: 0,
       // where it sorts stays put
@@ -3302,7 +3322,7 @@ export default class GroupCallInstance extends CallInstanceBase<{
           return;
         }
         if(participant) {
-          rootScope.dispatchEvent('group_call_participant', {groupCallId: this.id, participant});
+          rootScope.dispatchEventOfAccount(this.accountNumber, 'group_call_participant', {groupCallId: this.id, participant});
         }
       }).catch((err) => {
         this.log.warn('output track participant hydration failed', err);
@@ -3433,7 +3453,7 @@ export default class GroupCallInstance extends CallInstanceBase<{
     const isSending = (direction: RTCRtpTransceiverDirection) => direction === 'sendonly' || direction === 'sendrecv';
     return isSending(entry.direction) ||
       isSending(entry.originalDirection) ||
-      (!!rootScope.myId && entry.peerId === rootScope.myId);
+      (!!this.myId && entry.peerId === this.myId);
   }
 
   public onParticipantUpdate(participant: GroupCallParticipant) {

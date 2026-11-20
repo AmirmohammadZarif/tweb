@@ -8,9 +8,9 @@
 import deepEqual from '@helpers/object/deepEqual';
 import isObject from '@helpers/object/isObject';
 import safeReplaceObject from '@helpers/object/safeReplaceObject';
-import {ChannelAdminLogEvent, ChannelParticipant, ChannelsCreateChannel, ChannelsGetAdminLog, ChannelsGetAdminedPublicChannels, ChannelsSendAsPeers, Chat, ChatAdminRights, ChatBannedRights, ChatFull, ChatInvite, ChatParticipant, ChatPhoto, ChatReactions, EmojiStatus, InputChannel, InputChatPhoto, InputFile, InputPeer, InputUser, MessagesChats, MessagesChatInviteJoinResult, MessagesSponsoredMessages, MissingInvitee, Peer, SponsoredMessage, SponsoredPeer, StickerSet, Update, Updates} from '@layer';
+import {MessagesSetChatAvailableReactions, ChannelAdminLogEvent, ChannelParticipant, ChannelsCreateChannel, ChannelsGetAdminLog, ChannelsGetAdminedPublicChannels, ChannelsSendAsPeers, Chat, ChatAdminRights, ChatBannedRights, ChatFull, ChatInvite, ChatParticipant, ChatPhoto, ChatReactions, EmojiStatus, InputChannel, InputChatPhoto, InputFile, InputPeer, InputUser, MessagesChats, Photo, MessagesChatInviteJoinResult, MessagesSponsoredMessages, MissingInvitee, Peer, SponsoredMessage, SponsoredPeer, StickerSet, Update, Updates} from '@layer';
 import {AppManager} from '@appManagers/manager';
-import hasRights from '@appManagers/utils/chats/hasRights';
+import hasRights, {isSendRight} from '@appManagers/utils/chats/hasRights';
 import getParticipantPeerId from '@appManagers/utils/chats/getParticipantPeerId';
 import {AppStoragesManager} from '@appManagers/appStoragesManager';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
@@ -19,12 +19,21 @@ import tsNow from '@helpers/tsNow';
 import getPeerActiveUsernames from '@appManagers/utils/peers/getPeerActiveUsernames';
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 import getPeerId from '@appManagers/utils/peers/getPeerId';
+import {getUpdatesList} from '@lib/calls/helpers/groupCallUpdates';
+import noop from '@helpers/noop';
 import callbackify from '@helpers/callbackify';
 import {SlicedCachedFetcher} from '@appManagers/utils/chats/slicedCachedFetcher';
 import {CHAT_LEGACY_ADMIN_RIGHTS} from '@lib/appManagers/utils/chats/constants';
+import getPhotoInput from '@appManagers/utils/photos/getPhotoInput';
 import {getStickerSetInputById} from '@lib/appManagers/utils/stickers/getStickerSetInput';
+import forgetFailedRequest from '@helpers/forgetFailedRequest';
+import setBooleanFlag from '@helpers/object/setBooleanFlag';
 
 export type Channel = Chat.channel;
+export type ChatAvailableReactionsOptions = {
+  reactionsLimit?: number, // sent as `reactions_limit` when defined; omitted keeps the server's value
+  paidEnabled?: boolean // sent as `paid_enabled` when defined, `false` included
+};
 export type ChatPhotoUpload = {
   file: InputFile,
   video?: InputFile,
@@ -65,6 +74,8 @@ type GetAdminLogsFetcherKeyArgs = Pick<FetchAdminLogsArgs, 'channelId' | 'flags'
 
 export class AppChatsManager extends AppManager {
   private storage: AppStoragesManager['storages']['chats'];
+  /** The chats kept on disk are in: what is asked of them before then finds none */
+  public loaded: Promise<unknown>;
 
   private chats: {[id: ChatId]: Exclude<Chat, Chat.chatEmpty>};
   // private usernames: any;
@@ -74,6 +85,11 @@ export class AppChatsManager extends AppManager {
   private recommendations: {[chatId: ChatId]: MaybePromise<MessagesChats>};
   // * the paid messages price the full channel last named for this user (0 — exempt)
   private fullPaidMessagesStars: Map<ChatId, number> = new Map();
+  // * the admin behind a message posted as the channel, by `${chatId}_${mid}`: asked once a session,
+  // * an answer that did not come included (desktop's `LookupMessageAuthor`)
+  private messageAuthors: Map<string, Promise<PeerId>> = new Map();
+  // * the saves of a chat's allowed reactions sent and the newest one applied, see `setChatAvailableReactions`
+  private reactionsSaves: {[chatId: ChatId]: {sent: number, applied: {reactions: number, limit: number, paid: number}, values: ChatAvailableReactionsOptions & {reactions?: ChatReactions}}} = {};
 
   protected after() {
     this.clear(true);
@@ -84,7 +100,7 @@ export class AppChatsManager extends AppManager {
       updateChatDefaultBannedRights: this.onUpdateChatDefaultBannedRights
     });
 
-    return Promise.all([
+    return this.loaded = Promise.all([
       this.appStateManager.getState(),
       this.appStoragesManager.loadStorage('chats')
     ]).then(([state, {results: chats, storage}]) => {
@@ -285,10 +301,13 @@ export class AppChatsManager extends AppManager {
       const changedProfileSignatures = (oldChat as Chat.channel).pFlags.signature_profiles !== (chat as Chat.channel).pFlags.signature_profiles;
 
       const storiesCallback = this.appStoriesManager.saveApiPeerStories(chat as Chat.channel, oldChat as Chat.channel);
+      // Preserve notifications for in-place mutations; a separate normalized payload can
+      // prove that a repeated history/profile response did not change this peer.
+      const unchanged = oldChat !== chat && deepEqual(oldChat, chat);
 
       safeReplaceObject(oldChat, chat);
       this.mirrorChat(oldChat);
-      this.rootScope.dispatchEvent('chat_update', chat.id);
+      if(!unchanged) this.rootScope.dispatchEvent('chat_update', chat.id);
 
       storiesCallback?.();
 
@@ -365,19 +384,27 @@ export class AppChatsManager extends AppManager {
       delete chat.linked_community_id;
     }
 
-    this.mirrorChat(chat);
-    this.rootScope.dispatchEvent('chat_update', chatId);
+    this.onChatChanged(chat);
     this.appCommunitiesManager.handlePeerLinkedCommunityUpdate({
       peerId: chatId.toPeerId(true),
       previousCommunityId,
       communityId
     });
-    if(this.peersStorage.isPeerNeeded(chatId.toPeerId(true))) {
+    return true;
+  }
+
+  /**
+   * A chat changed in place: the tabs' copy of it (what they read synchronously), the listeners and the copy kept
+   * for the next start follow
+   */
+  private onChatChanged(chat: Exclude<Chat, Chat.chatEmpty>) {
+    this.mirrorChat(chat);
+    this.rootScope.dispatchEvent('chat_update', chat.id);
+    if(this.peersStorage.isPeerNeeded(chat.id.toPeerId(true))) {
       this.storage.set({
-        [chatId]: chat
+        [chat.id]: chat
       });
     }
-    return true;
   }
 
   /**
@@ -389,7 +416,40 @@ export class AppChatsManager extends AppManager {
    * @returns
    */
   public hasRights(id: ChatId, action: ChatRights, rights?: ChatAdminRights | ChatBannedRights, isThread?: boolean) {
-    return hasRights(this.getChat(id), action, rights, isThread);
+    // * what the member sends is let past the group's own restrictions once their boosts are enough, wherever it
+    // * is asked (tdesktop's unrestrictedByBoosts in amRestricted)
+    const defaultBansLifted = rights === undefined && isSendRight(action) && this.isRestrictionLiftedByBoosts(id, action);
+    return hasRights(this.getChat(id), action, rights, isThread, defaultBansLifted);
+  }
+
+  /**
+   * Whether boosts can let the member past the group's own restriction of `action` (no `action`: slow mode's
+   * wait), as iOS and Android have it: a supergroup that asks for boosts to lift them — not a broadcast group,
+   * where only admins write — and never past a ban of the member's own. Read from the full chat already fetched
+   */
+  public canBoostsLiftRestriction(id: ChatId, action?: ChatRights) {
+    const chat = this.getChat(id) as Chat.channel;
+    if(
+      chat?._ !== 'channel' ||
+      !chat.pFlags.megagroup ||
+      chat.pFlags.gigagroup ||
+      (action && chat.banned_rights?.pFlags[action as keyof ChatBannedRights['pFlags']])
+    ) {
+      return false;
+    }
+
+    const channelFull = this.appProfileManager.getCachedFullChat(id) as ChatFull.channelFull;
+    return !!channelFull?.boosts_unrestrict;
+  }
+
+  // * a member who has given the group as many boosts as it asks for is let past what boosts can lift
+  public isRestrictionLiftedByBoosts(id: ChatId, action?: ChatRights) {
+    if(!this.canBoostsLiftRestriction(id, action)) {
+      return false;
+    }
+
+    const channelFull = this.appProfileManager.getCachedFullChat(id) as ChatFull.channelFull;
+    return (channelFull.boosts_applied || 0) >= channelFull.boosts_unrestrict;
   }
 
   public editChatDefaultBannedRights(id: ChatId, banned_rights: ChatBannedRights) {
@@ -490,6 +550,27 @@ export class AppChatsManager extends AppManager {
     if(chat?._ !== 'channel') return false;
 
     return !!(chat.admin_rights?.pFlags?.manage_direct_messages);
+  }
+
+  /**
+   * Who of the admins wrote a message of the channel's direct messages posted as the channel, for
+   * an admin to see (`channels.getMessageAuthor`); nothing when the server does not say
+   */
+  public getMessageAuthor(chatId: ChatId, mid: number) {
+    const key = `${chatId}_${mid}`;
+    let promise = this.messageAuthors.get(key);
+    if(!promise) {
+      promise = this.apiManager.invokeApi('channels.getMessageAuthor', {
+        channel: this.getChannelInput(chatId),
+        id: getServerMessageId(mid)
+      }).then((user) => {
+        this.appUsersManager.saveApiUser(user);
+        return user._ === 'user' ? user.id.toPeerId(false) : undefined;
+      }, (): PeerId => undefined);
+      this.messageAuthors.set(key, promise);
+    }
+
+    return promise;
   }
 
   /**
@@ -845,7 +926,8 @@ export class AppChatsManager extends AppManager {
     const peerId = getParticipantPeerId(participant);
     const userId = peerId.toUserId();
     const makingAdmin = Object.keys(rights.pFlags).length > 0;
-    const canStickToLegacy = !rank && (!makingAdmin || deepEqual(rights, CHAT_LEGACY_ADMIN_RIGHTS));
+    // * a tag no longer needs a supergroup: a basic group keeps it apart from the rights (as desktop does)
+    const canStickToLegacy = !makingAdmin || deepEqual(rights, CHAT_LEGACY_ADMIN_RIGHTS);
 
     if(!wasChannel && canStickToLegacy) {
       const editChatAdmin = () => this.apiManager.invokeApi('messages.editChatAdmin', {
@@ -876,6 +958,11 @@ export class AppChatsManager extends AppManager {
         is_admin: makingAdmin,
         version: 0
       });
+
+      const prevRank = typeof(participant) === 'object' ? (participant as ChatParticipant.chatParticipant).rank : undefined;
+      if(makingAdmin && rank !== (prevRank || '')) {
+        await this.editParticipantRank(id, peerId, rank);
+      }
 
       return id;
     }
@@ -920,6 +1007,21 @@ export class AppChatsManager extends AppManager {
     return returnParticipant ? update.new_participant : id;
   }
 
+  /**
+   * Sets a member tag, or removes it with an empty string. Not optimistic: the caches change once the server accepts
+   */
+  public async editParticipantRank(id: ChatId, peerId: PeerId, rank: string) {
+    const updates = await this.apiManager.invokeApi('messages.editChatParticipantRank', {
+      peer: this.appPeersManager.getInputPeerById(id.toPeerId(true)),
+      participant: this.appPeersManager.getInputPeerById(peerId),
+      rank
+    });
+
+    this.apiUpdatesManager.processUpdateMessage(updates);
+    // * the answer for a supergroup may carry no update of the tag
+    this.appProfileManager.applyParticipantRank(id, peerId.toUserId(), rank);
+  }
+
   public editPhoto(id: ChatId, upload?: InputFile | ChatPhotoUpload) {
     const inputChatPhoto: InputChatPhoto = upload ? {
       _: 'inputChatUploadedPhoto',
@@ -930,7 +1032,19 @@ export class AppChatsManager extends AppManager {
       _: 'inputChatPhotoEmpty'
     };
 
-    let promise: any;
+    return this.setChatPhoto(id, inputChatPhoto);
+  }
+
+  /** One of the chat's earlier photos made its photo again ("Set as Main") */
+  public setExistingPhoto(id: ChatId, photoId: Photo.photo['id']) {
+    return this.setChatPhoto(id, {
+      _: 'inputChatPhoto',
+      id: getPhotoInput(this.appPhotosManager.getPhoto(photoId))
+    });
+  }
+
+  private setChatPhoto(id: ChatId, inputChatPhoto: InputChatPhoto) {
+    let promise: Promise<Updates>;
     if(this.isChannel(id) || this.isCommunity(id)) {
       promise = this.apiManager.invokeApi('channels.editPhoto', {
         channel: this.getChannelInput(id),
@@ -1028,6 +1142,8 @@ export class AppChatsManager extends AppManager {
         banned_rights: bannedRights,
         kicked_by: this.appUsersManager.getSelf().id,
         peer: this.appPeersManager.getOutputPeer(peerId),
+        // * a restriction leaves the member's tag where it was
+        rank: isObject(participant) ? (participant as ChannelParticipant.channelParticipant).rank : undefined,
         pFlags: bannedRights.pFlags.view_messages ? {left: true} : {}
       } : undefined
     });
@@ -1075,17 +1191,105 @@ export class AppChatsManager extends AppManager {
     });
   }
 
-  public setChatAvailableReactions(id: ChatId, reactions: ChatReactions) {
-    this.appProfileManager.modifyCachedFullChat(id, (chatFull) => {
-      if('available_reactions' in chatFull) {
-        chatFull.available_reactions = reactions;
-      }
-    });
-
-    return this.apiManager.invokeApi('messages.setChatAvailableReactions', {
+  /**
+   * Saves the chat's allowed reactions. The cache changes only after the server accepted the request.
+   * `CHAT_NOT_MODIFIED` is a success; `REACTION_INVALID` refreshes the full chat and the reactions
+   * catalog before rejecting; any other error is rejected as is.
+   */
+  public async setChatAvailableReactions(id: ChatId, reactions: ChatReactions, options: ChatAvailableReactionsOptions = {}) {
+    const {reactionsLimit, paidEnabled} = options;
+    const params: MessagesSetChatAvailableReactions = {
       peer: this.getInputPeer(id),
       available_reactions: reactions
-    }).then(this.onChatUpdated.bind(this, id));
+    };
+    if(reactionsLimit !== undefined) {
+      params.reactions_limit = reactionsLimit;
+    }
+    if(paidEnabled !== undefined) {
+      params.paid_enabled = paidEnabled;
+    }
+
+    // * of saves overlapping in flight (an autosave and the flush on leaving), an answer that comes after a newer
+    // * one was applied changes nothing
+    // * the generation is kept per field: an answer applies each field it carries unless a newer save
+    // * that carried the same field was applied already
+    const saves = this.reactionsSaves[id] ??= {sent: 0, applied: {reactions: 0, limit: 0, paid: 0}, values: {}};
+    const generation = ++saves.sent;
+    const apply = () => {
+      const fresh = (field: 'reactions' | 'limit' | 'paid', carried: boolean) => {
+        if(!carried || generation < saves.applied[field]) {
+          return false;
+        }
+
+        saves.applied[field] = generation;
+        return true;
+      };
+
+      const freshReactions = fresh('reactions', true);
+      const freshLimit = fresh('limit', reactionsLimit !== undefined);
+      const freshPaid = fresh('paid', paidEnabled !== undefined);
+      if(freshReactions) saves.values.reactions = reactions;
+      if(freshLimit) saves.values.reactionsLimit = reactionsLimit;
+      if(freshPaid) saves.values.paidEnabled = paidEnabled;
+
+      this.applyChatAvailableReactions(id, freshReactions ? reactions : undefined, {
+        reactionsLimit: freshLimit ? reactionsLimit : undefined,
+        paidEnabled: freshPaid ? paidEnabled : undefined
+      });
+    };
+
+    let updates: Updates;
+    try {
+      updates = await this.apiManager.invokeApi('messages.setChatAvailableReactions', params);
+    } catch(err) {
+      if((err as ApiError).type === 'CHAT_NOT_MODIFIED') {
+        apply();
+        return;
+      }
+
+      if((err as ApiError).type === 'REACTION_INVALID') {
+        const appliedBefore = {...saves.applied};
+        await Promise.allSettled([
+          this.appProfileManager.getChatFull(id, true),
+          this.appReactionsManager.resetAvailableReactions()
+        ]);
+
+        // * the refresh may hold a snapshot older than a save applied while it was in flight:
+        // * replay only the fields such a save advanced
+        const advanced = (field: 'reactions' | 'limit' | 'paid') => saves.applied[field] !== appliedBefore[field];
+        if(advanced('reactions') || advanced('limit') || advanced('paid')) {
+          this.applyChatAvailableReactions(id, advanced('reactions') ? saves.values.reactions : undefined, {
+            reactionsLimit: advanced('limit') ? saves.values.reactionsLimit : undefined,
+            paidEnabled: advanced('paid') ? saves.values.paidEnabled : undefined
+          });
+        }
+      }
+
+      throw err;
+    }
+
+    this.onChatUpdated(id, updates);
+    apply();
+  }
+
+  private applyChatAvailableReactions(id: ChatId, reactions: ChatReactions | undefined, options: ChatAvailableReactionsOptions) {
+    this.appProfileManager.modifyCachedFullChat(id, (chatFull) => {
+      if(chatFull._ === 'communityFull') {
+        return false;
+      }
+
+      if(reactions) {
+        chatFull.available_reactions = reactions;
+      }
+
+      if(options.reactionsLimit !== undefined) {
+        chatFull.reactions_limit = options.reactionsLimit;
+      }
+
+      if(options.paidEnabled !== undefined && chatFull._ === 'channelFull') {
+        setBooleanFlag(chatFull.pFlags, 'paid_reactions_available', options.paidEnabled);
+      }
+    });
   }
 
   public getSendAs(channelId: ChatId, forPaidReactions: boolean = false) {
@@ -1312,13 +1516,50 @@ export class AppChatsManager extends AppManager {
     });
   }
 
+  /**
+   * Approves or dismisses every pending join request at once, or only those that came through
+   * `link`. The pending counter is the server's: its `updatePendingJoinRequests` when the answer carries
+   * one, else the queue read anew - never put at zero, which a request that came meanwhile contradicts.
+   */
+  public hideAllChatJoinRequests(chatId: ChatId, approved: boolean, link?: string) {
+    return this.apiManager.invokeApi('messages.hideAllChatJoinRequests', {
+      peer: this.appChatsManager.getInputPeer(chatId),
+      approved,
+      link
+    }).then((updates) => {
+      this.onChatUpdated(chatId, updates, true);
+      const peerId = chatId.toPeerId(true);
+      const counted = getUpdatesList(updates).some((update) => {
+        return update._ === 'updatePendingJoinRequests' && getPeerId(update.peer) === peerId;
+      });
+
+      if(!counted) {
+        // * not waited for: the requests are answered already
+        this.appChatInvitesManager.reloadPendingJoinRequests(chatId).catch(noop);
+      }
+    });
+  }
+
+  public updateEmojiStatus(chatId: ChatId, emojiStatus: EmojiStatus) {
+    return this.apiManager.invokeApiSingleProcess({
+      method: 'channels.updateEmojiStatus',
+      params: {
+        channel: this.getChannelInput(chatId),
+        emoji_status: emojiStatus
+      },
+      processResult: (updates) => {
+        this.apiUpdatesManager.processUpdateMessage(updates);
+      }
+    });
+  }
+
   public getChannelRecommendations(chatId?: ChatId) {
     const result = this.recommendations[chatId];
     if(result) {
       return result;
     }
 
-    const promise = this.recommendations[chatId] = this.apiManager.invokeApiSingleProcess({
+    const promise = this.recommendations[chatId] = forgetFailedRequest(this.apiManager.invokeApiSingleProcess({
       method: 'channels.getChannelRecommendations',
       params: {
         channel: chatId ? this.getChannelInput(chatId) : undefined
@@ -1332,7 +1573,7 @@ export class AppChatsManager extends AppManager {
 
         return messagesChats;
       }
-    });
+    }), () => this.recommendations[chatId], () => delete this.recommendations[chatId]);
 
     return promise;
   }
@@ -1451,7 +1692,7 @@ export class AppChatsManager extends AppManager {
     const chat = this.chats[chatId] as Chat.chat;
     if(chat) {
       chat.default_banned_rights = update.default_banned_rights;
-      this.rootScope.dispatchEvent('chat_update', chatId);
+      this.onChatChanged(chat);
     }
   };
 }
