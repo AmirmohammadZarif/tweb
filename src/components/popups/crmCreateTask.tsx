@@ -1,4 +1,5 @@
 import {createEffect, createResource, createSignal, For, on, Show} from 'solid-js';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 import PopupElement, {createPopup} from '@components/popups/indexTsx';
 import {I18nTsx} from '@helpers/solid/i18n';
 import I18n, {i18n} from '@lib/langPack';
@@ -62,7 +63,7 @@ export default function showCrmCreateTaskPopup(props: CrmTaskSourceProps & {
   // Lets the caller refresh its own list; the popup owns no list of its own.
   onCreated?: () => void
 }) {
-  const managers = rootScope.managers;
+  const managers = bindManagersToSession(rootScope.managers);
   const initial = splitCapture(props.text || '');
   const sourcePeerId = props.peerId?.isUser() ? props.peerId : undefined;
 

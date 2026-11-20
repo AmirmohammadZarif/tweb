@@ -21,6 +21,21 @@ export class AppLangPackManager extends AppManager {
     }, {override: ignoreCache});
   }
 
+  /** The language itself: its name and, `pFlags.rtl`, whether it is written right to left. */
+  public getLanguage(langCode: string, langPack: string) {
+    return this.apiManager.invokeApiCacheable('langpack.getLanguage', {
+      lang_code: langCode,
+      lang_pack: langPack
+    });
+  }
+
+  /** Every language of a pack, for the language list in Settings */
+  public getLanguages(langPack: string) {
+    return this.apiManager.invokeApiCacheable('langpack.getLanguages', {
+      lang_pack: langPack
+    });
+  }
+
   public getCountriesList(langCode: string, ignoreCache?: boolean) {
     return this.apiManager.invokeApiCacheable('help.getCountriesList', {
       lang_code: langCode,

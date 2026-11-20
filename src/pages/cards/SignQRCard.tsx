@@ -13,10 +13,8 @@ import pause from '@helpers/schedulers/pause';
 import {paintQrCode} from '@helpers/qrCode/paintQrCode';
 import type {DcId} from '@types';
 import {AuthAuthorization, AuthLoginToken} from '@layer';
-import App from '@config/app';
 import {LangPackKey, i18n} from '@lib/langPack';
 import AccountController from '@lib/accounts/accountController';
-import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
 import rootScope from '@lib/rootScope';
 import {startCrmTelegramLogin} from '@components/popups/crmTelegramLogin';
 
@@ -38,7 +36,7 @@ const QR_SIZE = 240;
  * card. The loop terminates when the card unmounts (cleanup flips `stopped`).
  */
 export default function SignQRCard(_props: {spec: Spec}) {
-  const {managers, navigate, toIm} = useAuthFlow();
+  const {accountNumber, managers, navigate, toIm} = useAuthFlow();
 
   // Persistent host for the QR canvas (qr-code-styling injects its canvas
   // into this div). We hand it to <MediaHeader.Sticker element={...}>.
@@ -134,27 +132,22 @@ export default function SignQRCard(_props: {spec: Spec}) {
 
   /* ---------- iterate loop ---------- */
 
-  const options: {dcId?: DcId, ignoreErrors: true} = {ignoreErrors: true};
+  // * the DC the account behind the QR lives on, once the server has said so
+  let migratedDcId: DcId | undefined;
   let prevToken: Uint8Array | number[] | undefined;
 
   async function iterate(QRCodeStyling: any, isLoop: boolean): Promise<boolean> {
     try {
       const userIds = await AccountController.getUserIds();
-      let loginToken = await managers.apiManager.invokeApi('auth.exportLoginToken', {
-        api_id: App.id,
-        api_hash: App.hash,
-        except_ids: userIds.map((userId) => userId.toUserId())
-      }, {ignoreErrors: true});
+      let loginToken = await managers.appAccountManager.exportLoginToken(userIds.map((userId) => userId.toUserId()));
 
       if(loginToken._ === 'auth.loginTokenMigrateTo') {
-        if(!options.dcId) {
-          options.dcId = loginToken.dc_id as DcId;
+        if(!migratedDcId) {
+          migratedDcId = loginToken.dc_id as DcId;
           managers.apiManager.setBaseDcId(loginToken.dc_id);
         }
 
-        loginToken = await managers.apiManager.invokeApi('auth.importLoginToken', {
-          token: loginToken.token
-        }, options) as AuthLoginToken.authLoginToken;
+        loginToken = await managers.appAccountManager.importLoginToken(loginToken.token, migratedDcId) as AuthLoginToken.authLoginToken;
       }
 
       if(loginToken._ === 'auth.loginTokenSuccess') {
@@ -176,6 +169,11 @@ export default function SignQRCard(_props: {spec: Spec}) {
         await pause(diff > FETCH_INTERVAL ? 1e3 * FETCH_INTERVAL : 1e3 * diff | 0);
       }
     } catch(err) {
+      // * the card is gone: what was on its way is dropped, not an error of the login
+      if(stopped) {
+        return true;
+      }
+
       switch((err as ApiError).type) {
         case 'SESSION_PASSWORD_NEEDED':
           navigate({name: 'password'});
@@ -254,7 +252,7 @@ export default function SignQRCard(_props: {spec: Spec}) {
         }}
         text="Login.QR.Cancel"
       />
-      {getCurrentAccount() === 1 && <LanguageChangeButton />}
+      {accountNumber === 1 && <LanguageChangeButton />}
       <PasskeyLoginButton />
     </AuthCard>
   );

@@ -11,7 +11,13 @@ function starsSubscriptionPricing(amount: number): StarsSubscriptionPricing {
   };
 }
 
+/** as many of the latest requesters as the chat's bar of requests shows */
+const RECENT_REQUESTERS_LIMIT = 3;
+
 export default class AppChatInvitesManager extends AppManager {
+  /** how many `updatePendingJoinRequests` came for each chat (`reloadPendingJoinRequests`) */
+  private pendingJoinRequestsRevisions = new Map<PeerId, number>();
+
   protected after() {
     this.apiUpdatesManager.addMultipleEventsListeners({
       updatePendingJoinRequests: this.onUpdatePendingJoinRequests,
@@ -24,11 +30,12 @@ export default class AppChatInvitesManager extends AppManager {
   private onUpdatePendingJoinRequests = async(
     update: Update.updatePendingJoinRequests
   ) => {
+    const peerId = getPeerId(update.peer);
+    this.pendingJoinRequestsRevisions.set(peerId, (this.pendingJoinRequestsRevisions.get(peerId) ?? 0) + 1);
     if(this.appCommunitiesManager.handlePendingJoinRequestsUpdate(update)) {
       return;
     }
 
-    const peerId = getPeerId(update.peer);
     const state = await this.appStateManager.getState();
     delete state.hideChatJoinRequests[peerId];
     this.appStateManager.pushToState('hideChatJoinRequests', state.hideChatJoinRequests);
@@ -111,20 +118,33 @@ export default class AppChatInvitesManager extends AppManager {
     });
   }
 
+  /**
+   * A page of an admin's invite links, active or revoked, with the server's count of them all; the next page goes
+   * on from the last link of the one before - its `date` and `link`, which are sent together or not at all.
+   */
   public getExportedChatInvites({
     chatId,
     revoked,
-    adminId
+    adminId,
+    limit = 50,
+    offsetDate,
+    offsetLink
   }: {
     chatId: ChatId,
     revoked?: boolean,
-    adminId?: UserId
+    adminId?: UserId,
+    limit?: number,
+    offsetDate?: number,
+    offsetLink?: string
   }) {
+    const hasOffset = offsetLink !== undefined;
     return this.apiManager.invokeApi('messages.getExportedChatInvites', {
       peer: this.appChatsManager.getInputPeer(chatId),
       admin_id: adminId ? this.appUsersManager.getUserInput(adminId) : {_: 'inputUserSelf'},
-      limit: 50,
-      revoked
+      limit,
+      revoked,
+      offset_date: hasOffset ? offsetDate ?? 0 : undefined,
+      offset_link: offsetLink
     }).then((exportedChatInvites) => {
       this.appUsersManager.saveApiUsers(exportedChatInvites.users);
       return exportedChatInvites;
@@ -214,6 +234,26 @@ export default class AppChatInvitesManager extends AppManager {
     }).then((chatInviteImporters) => {
       this.appUsersManager.saveApiUsers(chatInviteImporters.users);
       return chatInviteImporters;
+    });
+  }
+
+  /**
+   * Shows a chat's queue of join requests as the server has it now, as its `updatePendingJoinRequests` would - for
+   * when one has changed it without saying so. One that comes while the queue is read is the newer word and stays.
+   */
+  public async reloadPendingJoinRequests(chatId: ChatId) {
+    const peerId = chatId.toPeerId(true);
+    const revision = this.pendingJoinRequestsRevisions.get(peerId);
+    const {count, importers} = await this.getChatInviteImporters({chatId, requested: true, limit: RECENT_REQUESTERS_LIMIT});
+    if(this.pendingJoinRequestsRevisions.get(peerId) !== revision) {
+      return;
+    }
+
+    this.apiUpdatesManager.processLocalUpdate({
+      _: 'updatePendingJoinRequests',
+      peer: this.appPeersManager.getOutputPeer(peerId),
+      requests_pending: count,
+      recent_requesters: importers.map((importer) => importer.user_id)
     });
   }
 }

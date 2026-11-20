@@ -1,12 +1,12 @@
 import PopupElement, {createPopup} from '@components/popups/indexTsx';
 import {PaymentsCheckedGiftCode} from '@layer';
-import renderImageFromUrl from '@helpers/dom/renderImageFromUrl';
+import Star3D from '@components/star3D';
 import {LangPackKey, i18n} from '@lib/langPack';
 import {InviteLink} from '@components/sidebarLeft/tabs/inviteLink';
-import {createSignal, JSX, onCleanup, onMount} from 'solid-js';
+import {createSignal, JSX, onCleanup} from 'solid-js';
 import {formatDaysDuration, formatFullSentTime} from '@helpers/date';
 import getPeerId from '@appManagers/utils/peers/getPeerId';
-import appImManager, {ChatSetPeerOptions} from '@lib/appImManager';
+import {ChatSetPeerOptions} from '@lib/appImManager';
 import rootScope from '@lib/rootScope';
 import PeerTitle from '@components/peerTitle';
 import shareUrlToPeers from '@components/popups/shareUrl';
@@ -14,7 +14,6 @@ import {simulateClickEvent} from '@helpers/dom/clickEvent';
 import toggleDisability from '@helpers/dom/toggleDisability';
 import {toastNew} from '@components/toast';
 import shouldDisplayGiftCodeAsGift from '@helpers/shouldDisplayGiftCodeAsGift';
-import showPremiumPopup from '@components/popups/premium';
 import confirmationPopup from '@components/confirmationPopup';
 import anchorCallback from '@helpers/dom/anchorCallback';
 import DotRenderer from '@components/dotRenderer';
@@ -23,6 +22,8 @@ import Table, {TablePeer} from '@components/table';
 import MediaHeader from '@components/mediaHeader';
 import ListenerSetter from '@helpers/listenerSetter';
 import {getMiddleware} from '@helpers/middleware';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 const ANIMATION_GROUP = 'STICKERS-POPUP';
 
@@ -74,10 +75,11 @@ export default async function showGiftLinkPopup(
   stack?: ChatSetPeerOptions['stack'],
   checkedGiftCode?: PaymentsCheckedGiftCode
 ) {
+  const managers = bindManagersToSession(rootScope.managers);
   const isInChat = !!checkedGiftCode;
   const giftCode = checkedGiftCode ?? await rootScope.managers.appPaymentsManager.checkGiftCode(slug);
   if(shouldDisplayGiftCodeAsGift(giftCode)) {
-    showPremiumPopup({gift: giftCode, stack});
+    hotReloadGuard.showPremiumPopup({gift: giftCode, stack});
     return;
   }
 
@@ -140,7 +142,7 @@ export default async function showGiftLinkPopup(
         peerId={peerId}
         onClick={() => {
           hideWithCallback(() => {
-            appImManager.setInnerPeer({peerId});
+            hotReloadGuard.appImManager.setInnerPeer({peerId});
           });
         }}
       />
@@ -153,7 +155,7 @@ export default async function showGiftLinkPopup(
 
     const giveawayAnchor = (giftCode.giveaway_msg_id || isGiveaway) && anchorCallback(() => {
       hideWithCallback(() => {
-        appImManager.setInnerPeer({
+        hotReloadGuard.appImManager.setInnerPeer({
           peerId: fromPeerId,
           lastMsgId: giftCode.giveaway_msg_id
         });
@@ -181,13 +183,12 @@ export default async function showGiftLinkPopup(
       });
     });
 
-    let img: HTMLImageElement;
     let confirmButton: HTMLButtonElement;
 
     const wrapper = (
       <div class="popup-gift-link-wrapper">
         <MediaHeader marginTop marginBottom>
-          <MediaHeader.Sticker size={120} element={<img alt="" ref={img} />} />
+          <MediaHeader.Sticker size={126} element={<Star3D kind="premium" size={120} />} />
           <MediaHeader.Title size={20}>{i18n(titleLangKey)}</MediaHeader.Title>
           <MediaHeader.Subtitle>
             {
@@ -215,13 +216,9 @@ export default async function showGiftLinkPopup(
       </div>
     );
 
-    // after mount: `decode()` on an image still being moved into the tree rejects as "broken"
-    onMount(() => {
-      renderImageFromUrl(img, `assets/img/premium-star${window.devicePixelRatio > 1 ? '@2x' : ''}.png`);
-    });
-
     return (
       <PopupElement
+        managers={managers}
         class="popup-boosts popup-gift-link"
         closable
         old

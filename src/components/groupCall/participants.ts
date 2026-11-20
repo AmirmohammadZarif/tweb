@@ -8,7 +8,6 @@ import safeAssign from '@helpers/object/safeAssign';
 import positionMenu from '@helpers/positionMenu';
 import ScrollableLoader from '@helpers/scrollableLoader';
 import {GroupCallParticipant} from '@layer';
-import appImManager from '@lib/appImManager';
 import {AppManagers} from '@lib/managers';
 import getPeerId from '@appManagers/utils/peers/getPeerId';
 import GroupCallInstance from '@lib/calls/groupCallInstance';
@@ -26,6 +25,10 @@ import {getMiddleware} from '@helpers/middleware';
 import type GroupCallVideoGrid from '@components/groupCall/videoGrid';
 import type {GroupCallVideoTileType} from '@components/groupCall/videoTile';
 import {toastNew} from '@components/toast';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
+import {showCallAccount} from '@lib/calls/callAccount';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
+import type {Accessor} from 'solid-js';
 
 export class GroupCallParticipantContextMenu {
   private buttons: ButtonMenuItemOptionsVerifiable[];
@@ -236,16 +239,19 @@ export class GroupCallParticipantContextMenu {
     this.contextMenus.forEach((contextMenu) => contextMenu.close());
   }
 
-  /** Their profile, or the chat with them; the call carries on behind its plate either way. */
-  private openPeer(profile: boolean) {
+  /**
+   * Their profile, or the chat with them - on the call's account; the call carries on behind its plate
+   * either way.
+   */
+  private async openPeer(profile: boolean) {
     const peerId = this.targetPeerId;
     PopupElement.getPopups(GROUP_CALL_POPUP_KIND)[0]?.hide();
 
-    const opened = appImManager.setInnerPeer({peerId});
+    await showCallAccount(this.instance.accountNumber);
+    const opened = hotReloadGuard.appImManager.setInnerPeer({peerId});
     if(profile) {
-      void Promise.resolve(opened).then(async() => {
-        const {default: appSidebarRight} = await import('@components/sidebarRight');
-        appSidebarRight.toggleSidebar(true);
+      void Promise.resolve(opened).then(() => {
+        hotReloadGuard.appSidebarRight.toggleSidebar(true);
       }).catch((err) => {
         console.error('open group call participant profile failed', err);
       });
@@ -271,13 +277,14 @@ export class GroupCallParticipantContextMenu {
   };
 
   private async removeParticipant(): Promise<void> {
+    const managers = bindManagersToSession(this.managers);
     const {chatId, instance} = this;
     const peerId = this.targetPeerId;
     const generation = this.openGeneration;
     const isConference = !!instance.e2e;
     let isBroadcast: boolean;
     try {
-      isBroadcast = !isConference && await this.managers.appChatsManager.isBroadcast(chatId);
+      isBroadcast = !isConference && await managers.appChatsManager.isBroadcast(chatId);
     } catch(err) {
       if(!this.destroyed && this.openGeneration === generation) {
         console.error('load remove-participant confirmation failed', err);
@@ -288,13 +295,15 @@ export class GroupCallParticipantContextMenu {
     if(this.destroyed || this.openGeneration !== generation) return;
 
     try {
+      const {accountNumber} = instance;
       await confirmationPopup({
         peerId,
-        title: new PeerTitle({peerId}).element,
+        accountNumber,
+        title: new PeerTitle({peerId, accountNumber}).element,
         descriptionLangKey: isConference ?
           'VoiceChat.RemovePeer.Confirm.Call' :
           (isBroadcast ? 'VoiceChat.RemovePeer.Confirm.Channel' : 'VoiceChat.RemovePeer.Confirm'),
-        descriptionLangArgs: [new PeerTitle({peerId}).element],
+        descriptionLangArgs: [new PeerTitle({peerId, accountNumber}).element],
         button: {
           langKey: 'VoiceChat.RemovePeer.Confirm.OK',
           isDanger: true
@@ -309,7 +318,7 @@ export class GroupCallParticipantContextMenu {
       if(isConference) {
         await instance.kickConferenceParticipant(peerId);
       } else {
-        await this.managers.appChatsManager.kickFromChat(chatId, peerId);
+        await managers.appChatsManager.kickFromChat(chatId, peerId);
       }
     } catch(err) {
       if(this.destroyed) return;
@@ -350,8 +359,8 @@ export default class GroupCallParticipantsElement {
     managers: AppManagers,
     videoList?: HTMLElement,
     videoGrid?: GroupCallVideoGrid,
-    /** What a conference offers under its last participant. */
-    actions?: GroupCallParticipantsActions
+    /** What grows the call, under its last participant. */
+    actions?: Accessor<GroupCallParticipantsActions | undefined>
   }) {
     safeAssign(this, options);
 

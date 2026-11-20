@@ -20,7 +20,7 @@ import setWorkerProxy from '@helpers/setWorkerProxy';
 import toggleAttributePolyfill from '@helpers/dom/toggleAttributePolyfill';
 import rootScope from '@lib/rootScope';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
-import I18n, {checkLangPackForUpdates, i18n, LangPackKey} from '@lib/langPack';
+import I18n, {checkLangPackForUpdates} from '@lib/langPack';
 import '@helpers/peerIdPolyfill';
 import '@lib/polyfill';
 import '@lib/debug/mountLogExport'; // main-thread-only: wires window.downloadLogs / collectLogs
@@ -35,13 +35,15 @@ import overlayCounter from '@helpers/overlayCounter';
 import {getAppWindow, onAppWindowChange} from '@helpers/appWindow';
 import singleInstance, {InstanceDeactivateReason} from '@lib/singleInstance';
 import {parseUriParamsLine} from '@helpers/string/parseUriParams';
+import getWebAuthImport from '@lib/accounts/getWebAuthImport';
 import Modes from '@config/modes';
 import {AuthState} from '@types';
-import DEBUG, {IS_BETA, IS_POPUP_SANDBOX} from '@config/debug';
+import DEBUG, {IS_BETA, IS_POPUP_SANDBOX, IS_WIDGET_SANDBOX} from '@config/debug';
 import IS_INSTALL_PROMPT_SUPPORTED from '@environment/installPrompt';
 import cacheInstallPrompt from '@helpers/dom/installPrompt';
 import {fillLocalizedDates} from '@helpers/date';
 import {createEffect} from 'solid-js';
+import {setHotReloadGuardLoader} from '@lib/solidjs/hotReloadGuardProvider';
 import {IS_OVERLAY_SCROLL_SUPPORTED, USE_CUSTOM_SCROLL, USE_NATIVE_SCROLL} from '@environment/overlayScrollSupport';
 import IMAGE_MIME_TYPES_SUPPORTED, {IMAGE_MIME_TYPES_SUPPORTED_PROMISE} from '@environment/imageMimeTypesSupport';
 import MEDIA_MIME_TYPES_SUPPORTED from '@environment/mediaMimeTypesSupport';
@@ -49,15 +51,15 @@ import {doubleRaf} from '@helpers/schedulers';
 import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
 import AccountController from '@lib/accounts/accountController';
 import {changeAccount} from '@lib/accounts/changeAccount';
+import {getValidatedAccount} from '@lib/accounts/getValidatedAccount';
 import {MAX_ACCOUNTS_FREE, MAX_ACCOUNTS_PREMIUM} from '@lib/accounts/constants';
 import sessionStorage from '@lib/sessionStorage';
 import replaceChildrenPolyfill from '@helpers/dom/replaceChildrenPolyfill';
 import listenForWindowPrint from '@helpers/dom/windowPrint';
 import cancelImageEvents from '@helpers/dom/cancelImageEvents';
 import listenForLinkPress from '@helpers/dom/linkPress';
-import PopupElement, {createPopup} from '@components/popups/indexTsx';
+import {DeactivatedScreen, onStartImportFailed, showDeactivatedScreen} from '@/pages/deactivatedScreen';
 import PasscodeLockScreenController from '@components/passcodeLock/passcodeLockScreenController'; PasscodeLockScreenController;
-import type {LangPackDifference} from '@layer';
 import commonStateStorage from '@lib/commonStateStorage';
 import {useAppSettings, setAppSettingsSilent} from '@stores/appSettings';
 import {isUserCollapsedLeft} from '@helpers/updateColumnWidths';
@@ -95,6 +97,16 @@ IMAGE_MIME_TYPES_SUPPORTED_PROMISE.then((mimeTypes) => {
 // navigated to our own origin — costing search-referred visitors an extra full
 // reload to land back on the same page. There is no A version of this client,
 // so the split is gone.
+
+function getPermanentWebVersion() {
+  const value = localStorage.getItem('kz_version');
+  try {
+    return JSON.parse(value);
+  } catch(err) {
+    // * as an older K wrote it
+    return value;
+  }
+}
 
 async function checkLastActiveAccountFromTMe() {
   try {
@@ -343,11 +355,7 @@ function onInstanceDeactivated(reason: InstanceDeactivateReason) {
 
   const onOtherClientClick = onTabsClick;
 
-  const map: {[key in InstanceDeactivateReason]: {
-    title: LangPackKey,
-    subtitle: LangPackKey,
-    onClick: () => void
-  }} = {
+  const map: {[key in InstanceDeactivateReason]: DeactivatedScreen} = {
     version: {
       title: 'Deactivated.Version.Title',
       subtitle: 'Deactivated.Version.Subtitle',
@@ -365,24 +373,7 @@ function onInstanceDeactivated(reason: InstanceDeactivateReason) {
     }
   };
 
-  document.body.classList.add('deactivated');
-
-  const header = document.createElement('div');
-  header.classList.add('header');
-  header.append(i18n(map[reason].title));
-
-  const subtitle = document.createElement('div');
-  subtitle.classList.add('subtitle');
-  subtitle.append(i18n(map[reason].subtitle));
-
-  // the entry file is plain .ts, so the popup is composed by calling the component
-  createPopup(() => PopupElement({
-    class: 'popup-instance-deactivated',
-    containerClass: 'instance-deactivated-container',
-    closable: true,
-    onClose: map[reason].onClick,
-    children: [header, subtitle]
-  }));
+  showDeactivatedScreen(map[reason]);
 
   // A new build was deployed: don't make an idle tab wait for a click. Reload
   // as soon as the tab is (or becomes) unfocused so that agents mid-reply are
@@ -402,15 +393,17 @@ function onInstanceDeactivated(reason: InstanceDeactivateReason) {
 
 const TIME_LABEL = 'Elapsed time since unlocked';
 
-function setDocumentLangPackProperties(langPack: LangPackDifference.langPackDifference) {
-  if(langPack.lang_code === 'ar' || langPack.lang_code === 'fa' && IS_BETA && false) {
-    document.documentElement.classList.add('is-rtl');
-    document.documentElement.dir = 'rtl';
-    document.documentElement.lang = langPack.lang_code;
-    I18n.setRTL(true);
-  } else {
-    document.documentElement.dir = 'ltr';
-  }
+/**
+ * The test servers have accounts and chats of their own (Modes.test, `?test=1`), and nothing else on the screen tells
+ * them from the real ones: the corner says so for as long as the page runs on them, the sign-in screens too. Here and
+ * not in a module of its own, which would be one more module whose edit reloads the page (importGraphBudget).
+ */
+function mountTestDcBadge() {
+  const badge = document.createElement('div');
+  badge.classList.add('test-dc-badge');
+  badge.dir = 'ltr';
+  badge.textContent = 'Test DC';
+  document.body.append(badge);
 }
 
 (window as any)['showIconLibrary'] = async() => {
@@ -420,12 +413,28 @@ function setDocumentLangPackProperties(langPack: LangPackDifference.langPackDiff
 
 // The popup sandbox, over a running app (`?popups=1` boots straight into it instead). The bare
 // `import.meta.env.DEV` is deliberate: only a `false` literal at the call site makes rolldown drop
-// the dynamic import before chunking. The authorized preview is a dev server, so it is covered.
-if(import.meta.env.DEV) {
+// the dynamic import before chunking. The authorized preview is a dev server, so it is covered, and
+// the bundle it builds for a remote device (`VITE_PREVIEW`, a literal too) keeps both sandboxes for
+// Settings → Experimental; a production build has neither.
+if(import.meta.env.DEV || import.meta.env.VITE_PREVIEW) {
   (window as any)['showPopupSandbox'] = async() => {
     const {showPopupSandbox} = await import('@components/popupSandbox');
     await showPopupSandbox();
   };
+
+  // the bubbles of the open chat, put in any state by click: the module, once loaded, puts its own opener in place of
+  // this one (`@components/bubbleSandbox`)
+  const loadBubbleSandbox = async() => {
+    await import('@components/bubbleSandbox');
+    const show = (window as any)['showBubbleSandbox'];
+    if(show !== loadBubbleSandbox) show();
+  };
+  (window as any)['showBubbleSandbox'] = loadBubbleSandbox;
+
+  // widgets from fixtures in the open chat, `(await widgetSandbox()).inject()`, and the widget sandbox over the app
+  // (`?widgets=1` boots straight into it instead)
+  (window as any)['widgetSandbox'] = async() => (await import('@lib/widgetSandbox/debug')).default;
+  (window as any)['showWidgetSandbox'] = async() => (await import('@lib/widgetSandbox/debug')).default.show();
 }
 
 const boot = async() => {
@@ -440,6 +449,7 @@ const boot = async() => {
   cancelImageEvents();
   listenForLinkPress();
   setRootClasses();
+  if(Modes.test) mountTestDcBadge();
 
   // ?popups=1 — the popup sandbox: every popup, opened by click with mock data and no session.
   // It has to take over here, before the session is restored and the auth flow starts.
@@ -455,6 +465,19 @@ const boot = async() => {
     bootSucceeded();
     return;
   }
+
+  // ?widgets=1 — the widget sandbox, on the popup sandbox's mock environment; the preview's built bundle
+  // has it too (VITE_PREVIEW is a literal there, as DEV is on the dev server).
+  if((import.meta.env.DEV || import.meta.env.VITE_PREVIEW) && IS_WIDGET_SANDBOX) {
+    await import('@components/popupSandbox/bootstrapState');
+    const {startWidgetSandbox} = await import('@components/widgetSandbox/sandbox');
+    await startWidgetSandbox();
+    return;
+  }
+
+  // the media editor the sign-up screen opens for the new account's photo mounts the app's top level, which nothing
+  // has loaded yet then
+  setHotReloadGuardLoader(() => import('./pages/bootstrapIm').then(({importAppTopLevel}) => importAppTopLevel()));
 
   rootScope.managers = getProxiedManagers();
   // Straight after managers exist: the reporter only registers listeners here,
@@ -481,8 +504,7 @@ const boot = async() => {
     appChatBackground.attach();
     appChatBackground.setBackground({transition: 'instant'});
 
-    const langPack = await I18n.getCacheLangPackAndApply();
-    setDocumentLangPackProperties(langPack);
+    await I18n.getCacheLangPackAndApply();
 
     if(IS_BETA) import('./pages/bootstrapIm'); // cache it
     // const settings = await commonStateStorage.get('settings');
@@ -563,7 +585,7 @@ const boot = async() => {
   themeController.setThemeListener();
 
   // * fetch lang pack updates
-  if((langPack.localVersion !== App.langPackLocalVersion || true) && IS_BETA) {
+  if((langPack.localVersion !== I18n.getLocalVersion() || true) && IS_BETA) {
     I18n.getLangPackAndApply(langPack.lang_code);
   } else {
     checkLangPackForUpdates();
@@ -606,20 +628,16 @@ const boot = async() => {
   appChatBackground.attach();
   appChatBackground.setBackground({transition: 'instant'});
 
-  setDocumentLangPackProperties(langPack);
-
   let authState = stateResult.state.authState;
 
   const hash = location.hash;
   const splitted = hash.split('?');
   const params = parseUriParamsLine(splitted[1] ?? splitted[0].slice(1));
-  const webAuthTokenIsTest = params.tgWebAuthTest !== undefined && !!+params.tgWebAuthTest;
-  if(params.tgWebAuthToken && authState._ !== 'authStateSignedIn') {
+  // * a sign-in handed over with a part missing or malformed is not tried: the token is only taken out of the address
+  const webAuthImport = getWebAuthImport(params);
+  if(webAuthImport && authState._ !== 'authStateSignedIn') {
     const data: AuthState.signImport['data'] = {
-      token: params.tgWebAuthToken,
-      dcId: +params.tgWebAuthDcId,
-      userId: params.tgWebAuthUserId.toUserId(),
-      isTest: webAuthTokenIsTest,
+      ...webAuthImport,
       tgAddr: params.tgaddr
     };
 
@@ -643,8 +661,8 @@ const boot = async() => {
   // Already signed in, so the import above never ran and the token is left
   // hanging — a token for the other environment is unreachable from here, the
   // rest is ours to drop.
-  if(params.tgWebAuthToken && authState._ === 'authStateSignedIn' && webAuthTokenIsTest === Modes.test) {
-    rootScope.managers.appAccountManager.cancelWebTokenAuthorization(params.tgWebAuthToken, +params.tgWebAuthDcId);
+  if(webAuthImport && authState._ === 'authStateSignedIn' && webAuthImport.isTest === Modes.test) {
+    rootScope.managers.appAccountManager.cancelWebTokenAuthorization(webAuthImport.token, webAuthImport.dcId);
   }
 
   if(params.tgWebAuthToken) {
@@ -655,14 +673,24 @@ const boot = async() => {
     console.log('Will mount auth page:', authState._, Date.now() / 1000);
 
     (async() => {
-      const totalAccounts = await AccountController.getTotalAccounts();
+      const [accountNumbers, freeAccountNumber] = await Promise.all([
+        AccountController.getAccountNumbers(),
+        AccountController.getFreeAccountNumber()
+      ]);
       const hasSomeonePremium = await apiManagerProxy.hasSomeonePremium();
       const maxAccountNumber = hasSomeonePremium ? MAX_ACCOUNTS_PREMIUM : MAX_ACCOUNTS_FREE;
 
       const currentAccount = getCurrentAccount();
+      // * the first slot is left empty when Web A signs its account out, with its other accounts still there:
+      // * the tab goes on to them with the link it was opened by, unless that link signs in here
+      const isEmptyFirstSlot = currentAccount === 1 && !!accountNumbers.length && authState._ !== 'authStateSignImport';
+      const canSignInHere = currentAccount === freeAccountNumber &&
+        accountNumbers.length < maxAccountNumber &&
+        !isEmptyFirstSlot;
 
-      if(currentAccount > Math.min(maxAccountNumber, totalAccounts + 1)) {
-        changeAccount(1);
+      const accountNumber = accountNumbers[0] ?? freeAccountNumber ?? 1;
+      if(!canSignInHere && accountNumber !== currentAccount) {
+        changeAccount(accountNumber, false, isEmptyFirstSlot);
       }
     })();
 
@@ -678,8 +706,22 @@ const boot = async() => {
 
     }
 
-    const {mountAuthFlow} = await import('./pages/mountAuthFlow');
-    mountAuthFlow(authState);
+    const {mountAuthFlow} = await import('./pages/mountAuthFlow').catch(onStartImportFailed);
+    const accountNumber = getCurrentAccount();
+    mountAuthFlow(authState, {
+      accountNumber,
+      managers: rootScope.managers,
+      // * a page opened on a slot of its own to add an account goes back to the account it was added from
+      back: accountNumber !== 1 ? async(host) => {
+        await sessionStorage.set({should_animate_main: 1});
+        const previousAccount = getValidatedAccount(await sessionStorage.get('previous_account'));
+        await sessionStorage.delete('previous_account');
+        await host.leave();
+        changeAccount(previousAccount);
+      } : undefined,
+      toIm: () => import('./pages/bootstrapIm').catch(onStartImportFailed).then(({bootstrapIm}) => bootstrapIm()),
+      openAccount: (accountNumber) => changeAccount(accountNumber)
+    });
     bootSucceeded();
   } else {
     console.log('Will mount IM page:', Date.now() / 1000);
@@ -688,7 +730,7 @@ const boot = async() => {
     fadeInWhenFontsReady(document.getElementById('main-columns'), fontsPromise);
 
     const [{bootstrapIm}, shouldAnimate] = await Promise.all([
-      import('./pages/bootstrapIm'),
+      import('./pages/bootstrapIm').catch(onStartImportFailed),
       sessionStorage.get('should_animate_main')
     ]);
 

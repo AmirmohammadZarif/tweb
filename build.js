@@ -22,11 +22,13 @@ function readSSHConfig() {
 
 function changeVersion(langVersion) {
   const version = process.argv[2] || 'same';
-  const changelog = process.argv[3] || 'same';
-  const child = spawn(npmCmd, ['run', 'change-version', version, changelog, langVersion], {shell: true});
+  const child = spawn(npmCmd, ['run', 'change-version', version, langVersion], {shell: true});
   child.stdout.on('data', (chunk) => {
     console.log(chunk.toString());
   });
+
+  // * why a version was refused
+  child.stderr.pipe(process.stderr);
 
   return new Promise((resolve, reject) => {
     child.on('close', (code) => {
@@ -148,6 +150,11 @@ function compressFolder(folderPath) {
   console.log(`stderr: ${stderr}`);
 }); */
 
+if(process.argv[3]) {
+  console.error('A version\'s changelog is the "### Unreleased" section of CHANGELOG.md and CHANGELOG_ru.md, not an argument');
+  process.exit(1);
+}
+
 formatLang()
 .then(applyNewLang)
 .then((version) => {
@@ -157,19 +164,18 @@ formatLang()
   console.error('Failed to apply new lang');
   return changeVersion('same');
 }).then(() => {
-  const child = spawn(npmCmd, ['run', 'build'], {shell: true});
+  // * the full test run before the build goes ahead of every run waiting in the machine's test queue
+  const child = spawn(npmCmd, ['run', 'build'], {shell: true, env: {...process.env, TWEB_TEST_QUEUE_PRIORITY: '1'}});
   child.stdout.on('data', (chunk) => {
     console.log(chunk.toString());
   });
 
-  let error = '';
-  child.stderr.on('data', (chunk) => {
-    error += chunk.toString();
-  });
+  // * as it comes: a build waiting for its turn in the test queue says so on stderr
+  child.stderr.pipe(process.stderr);
 
   child.on('close', (code) => {
     if(code != 0) {
-      console.error(error, `build child process exited with code ${code}`);
+      console.error(`build child process exited with code ${code}`);
     } else {
       onCompiled();
     }

@@ -12,8 +12,7 @@ import noop from '@helpers/noop';
 import {Message, MessageMedia, WebPage} from '@layer';
 import {MyDocument} from '@appManagers/appDocsManager';
 import appDownloadManager, {Progress} from '@lib/appDownloadManager';
-import appImManager from '@lib/appImManager';
-import {AppManagers} from '@lib/managers';
+import {ReadingManagers} from '@lib/managers';
 import getDownloadMediaDetails from '@appManagers/utils/download/getDownloadMediaDetails';
 import choosePhotoSize from '@appManagers/utils/photos/choosePhotoSize';
 import I18n, {joinElementsWith} from '@lib/langPack';
@@ -36,17 +35,18 @@ import wrapSenderToPeer from '@components/wrappers/senderToPeer';
 import wrapSentTime from '@components/wrappers/sentTime';
 import {Middleware} from '@helpers/middleware';
 import readBlobAsText from '@helpers/blob/readBlobAsText';
-import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
+import SolidJSHotReloadGuardProvider, {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
 import {openMarkdownInstantView} from '@components/markdownInstantView';
 import isPlayableDocument from '@appManagers/utils/docs/isPlayableDocument';
+import {hotListen} from '@helpers/hotModule';
 
-rootScope.addEventListener('document_downloading', (docId) => {
+// * a file shown in more than one place (another message, shared media, another tab) shows a download of it started
+// * in one of them everywhere: the other rows join it and never start one
+const attachToDownloadOfRow: WeakMap<HTMLElement, () => void> = new WeakMap();
+
+hotListen(import.meta.hot, rootScope, 'document_downloading', (docId) => {
   const elements = Array.from(document.querySelectorAll(`.document[data-doc-id="${docId}"]`)) as HTMLElement[];
-  elements.forEach((element) => {
-    if(element.querySelector('.preloader-container.manual')) {
-      simulateClickEvent(element);
-    }
-  });
+  elements.forEach((element) => attachToDownloadOfRow.get(element)?.());
 });
 
 export default async function wrapDocument({
@@ -73,7 +73,9 @@ export default async function wrapDocument({
   customAudioToTextButton,
   globalMedia,
   doc: docOverride,
-  slot
+  slot,
+  draft,
+  cover
 }: {
   message: Message.message,
   middleware: Middleware,
@@ -86,7 +88,7 @@ export default async function wrapDocument({
   autoDownloadSize?: number,
   lazyLoadQueue?: LazyLoadQueue,
   sizeType?: MediaSizeType,
-  managers?: AppManagers,
+  managers?: ReadingManagers,
   cacheContext?: ThumbCache,
   fontSize?: number,
   getSize?: () => number,
@@ -111,7 +113,14 @@ export default async function wrapDocument({
    * AudioElement / `appMediaPlaybackController.addMedia`. See
    * `AddMediaArgs.slot`.
    */
-  slot?: number
+  slot?: number,
+  /**
+   * A file of a draft, as the composer shows one: the user's own, not sent yet. Its upload shows and
+   * cancels as an outgoing message's does; nothing else opens or downloads it.
+   */
+  draft?: boolean,
+  /** A track's cover before it is sent (an object URL). See `AudioElementOptions`. */
+  cover?: string
 }): Promise<HTMLElement> {
   fontWeight ??= 500;
   sizeType ??= '' as any;
@@ -145,7 +154,8 @@ export default async function wrapDocument({
       fontWeight,
       fontSize,
       sizeType,
-      getSize
+      getSize,
+      cover
     });
   }
 
@@ -163,8 +173,17 @@ export default async function wrapDocument({
   // return docDiv;
 
   const canActivate = !(!uploadingFileName && message.pFlags.is_outgoing && !message.mid);
-  const icoDiv = canActivate && Modes.a11y ? Button('', {noRipple: true}) : document.createElement('div');
-  if(canActivate && Modes.a11y) icoDiv.setAttribute('aria-label', I18n.format('AccDescr.OpenDocument', true, [doc.file_name || 'Unknown.file']));
+  const canOpen = canActivate && !draft;
+  // * what a click does with the file (`load` takes the same turns): a Markdown one opens in Instant View, a
+  // * medium the viewer plays is kept for the bubble to open it there, and any other is downloaded to the disk
+  const canSaveToCache = doc.size <= MAX_FILE_SAVE_SIZE;
+  const isMarkdown = (doc: MyDocument) => ext === 'md' || ext === 'markdown' || /^text\/(x-)?markdown\b/i.test(doc.mime_type || '');
+  const isViewable = (doc: MyDocument) => MEDIA_MIME_TYPES_SUPPORTED.has(doc.mime_type) && !!doc.thumbs?.length && canSaveToCache;
+  const icoDiv = canOpen && Modes.a11y ? Button('', {noRipple: true}) : document.createElement('div');
+  if(canOpen && Modes.a11y) {
+    const opens = isMarkdown(doc) || isViewable(doc);
+    icoDiv.setAttribute('aria-label', I18n.format(opens ? 'AccDescr.OpenDocument' : 'AccDescr.DownloadDocument', true, [doc.file_name || 'Unknown.file']));
+  }
   icoDiv.classList.add('document-ico');
   let icoTextEl: HTMLElement;
 
@@ -233,12 +252,13 @@ export default async function wrapDocument({
     descriptionParts.push(await wrapSenderToPeer(message));
   }
 
+  // the room the download's progress takes ("1 MB / 2 MB") kept when nothing follows the size: after
+  // the parts rather than one of them, or their separator stood before an empty place
+  let progressRoom: HTMLElement;
   if(!withTime && !showSender) {
-    const b = document.createElement('span');
-    const bytesMaxEl = formatBytes(doc.size);
-    b.append(bytesJoiner, bytesMaxEl);
-    b.style.visibility = 'hidden';
-    descriptionParts.push(b);
+    progressRoom = document.createElement('span');
+    progressRoom.append(bytesJoiner, formatBytes(doc.size));
+    progressRoom.style.visibility = 'hidden';
   }
 
   docDiv.innerHTML = `
@@ -248,7 +268,7 @@ export default async function wrapDocument({
   `;
 
   const nameDiv = docDiv.querySelector('.document-name') as HTMLElement;
-  const middleEllipsisEl = new MiddleEllipsisElement();
+  const middleEllipsisEl = MiddleEllipsisElement.create();
   middleEllipsisEl.dataset.fontWeight = '' + fontWeight;
   middleEllipsisEl.dataset.fontSize = '' + fontSize;
   middleEllipsisEl.dataset.sizeType = sizeType;
@@ -269,6 +289,7 @@ export default async function wrapDocument({
 
   const sizeDiv = docDiv.querySelector('.document-size') as HTMLElement;
   bytesContainer.append(...joinElementsWith(descriptionParts, ' · '));
+  if(progressRoom) bytesContainer.append(progressRoom);
   sizeDiv.append(bytesContainer);
 
   docDiv.prepend(icoDiv);
@@ -276,8 +297,6 @@ export default async function wrapDocument({
   if(!canActivate) {
     return docDiv;
   }
-
-  const canSaveToCache = doc.size <= MAX_FILE_SAVE_SIZE;
 
   let downloadDiv: HTMLElement, preloader: ProgressivePreloader = null;
   const onLoad = () => {
@@ -317,8 +336,10 @@ export default async function wrapDocument({
     const sizeContainer = document.createElement('span');
     const _bytesContainer = formatBytes(doc.size);
     sizeContainer.style.position = 'absolute';
-    sizeContainer.style.left = '0';
-    promise.then(onLoad, noop).finally(() => {
+    sizeContainer.style.insetInlineStart = '0';
+    // a transfer that failed or was cancelled leaves the row as it was, as a failed download does; one
+    // that is done shows the file once its progress has come round to the end
+    promise.then(() => preloader?.whenCaughtUp()).then(onLoad, () => docDiv.classList.remove('downloading')).finally(() => {
       // sizeContainer.replaceWith(bytesContainer);
       bytesContainer.style.visibility = '';
       sizeContainer.remove();
@@ -341,15 +362,17 @@ export default async function wrapDocument({
   };
 
   // ! DO NOT USE ASYNC/AWAIT HERE ! SAFARI WON'T LET DOWNLOAD THE FILE BECAUSE OF ASYNC
-  const load = (e?: Event) => {
+  const load = (e?: Event, onlyAttach?: boolean) => {
     const save = !e || e.isTrusted;
     const doc = (docDiv as any).doc;
     // const doc = await managers.appDocsManager.getDoc(docDiv.dataset.docId);
     let download: CancellablePromise<any>;
-    const queueId = appImManager.chat.bubbles ? appImManager.chat.bubbles.lazyLoadQueue.queueId : undefined;
-    if(!save) {
+    const queueId = hotReloadGuard.appImManager.chat?.bubbles?.lazyLoadQueue.queueId;
+    if(onlyAttach) {
+      download = appDownloadManager.attachToDownloadToDisc(doc);
+    } else if(!save) {
       download = appDownloadManager.downloadToDisc({media: doc, queueId}, true);
-    } else if(ext === 'md' || ext === 'markdown' || /^text\/(x-)?markdown\b/i.test(doc.mime_type || '')) {
+    } else if(isMarkdown(doc)) {
       download = appDownloadManager.downloadMedia({media: doc, queueId});
       download.then(readBlobAsText).then((raw) => {
         openMarkdownInstantView({
@@ -368,11 +391,7 @@ export default async function wrapDocument({
           }, liteMode.isAvailable('animations') ? 250 : 0);
         });
       }
-    } else if(
-      MEDIA_MIME_TYPES_SUPPORTED.has(doc.mime_type) &&
-      doc.thumbs?.length &&
-      canSaveToCache
-    ) {
+    } else if(isViewable(doc)) {
       download = appDownloadManager.downloadMediaURL({media: doc, queueId});
     } else {
       download = appDownloadManager.downloadToDisc({media: doc, queueId});
@@ -401,7 +420,8 @@ export default async function wrapDocument({
   const {fileName: downloadFileName} = getDownloadMediaDetails({media: doc, downloadId: '1'});
   if(await managers.apiFileManager.isDownloading(downloadFileName)) {
     downloadDiv = docDiv.querySelector('.document-download') || icoDiv;
-    const promise = appDownloadManager.downloadToDisc({media: doc}, true);
+    // * the save may be over by the time this reaches it: then the file waits for a click
+    const promise = appDownloadManager.attachToDownloadToDisc(doc);
 
     preloader = new ProgressivePreloader();
     preloader.attach(downloadDiv, false, promise);
@@ -437,8 +457,14 @@ export default async function wrapDocument({
 
     if(preloader) {
       preloader.onClick(e);
-    } else {
+    } else if(canOpen) {
       load(e);
+    }
+  });
+
+  attachToDownloadOfRow.set(docDiv, () => {
+    if(preloader?.preloader.classList.contains('manual')) {
+      load(undefined, true);
     }
   });
 

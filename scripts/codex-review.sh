@@ -1,0 +1,380 @@
+#!/bin/bash
+#
+# A code review by Codex (GPT), for the agents working in this repo.
+#
+# Asked for a review, an agent does not review its own change: it hands the
+# change to `codex exec review`, together with what the change is for, then
+# checks what comes back against the code (.claude/skills/codex-review/SKILL.md).
+# A second Codex, beside it, checks the change for duplicated code and nothing
+# else, which AGENTS.md's final review asks for: the review looks for bugs, and
+# in its first 65 runs here (to 2026-10) it reported no duplicated code at all.
+# Each reads the change and the code around it in a sandbox of its own, which
+# reads everything and writes nowhere but a temp dir of the run's own, with the
+# network off: it cannot touch a tree other sessions work in. It may run tsc and
+# a test file there to check what it finds; the tests the change needs stay with
+# the agent.
+#
+# Usage: bash scripts/codex-review.sh [--fast] [--no-duplicates] [--about <text>] [--since <sha>] <what>
+#
+# What is reviewed — exactly one of:
+#   --commit <sha>      what a commit changes
+#   --base <branch>     the current branch and its uncommitted changes against
+#                       <branch>: a worktree's own branch against master
+#   --uncommitted       every uncommitted change, untracked files too; only in
+#                       a checkout nobody else works in
+#   --paths <path>...   these files (from the checkout's root) as they are in
+#                       the tree, on top of HEAD
+#   --patch <file>      this diff, on top of HEAD (`git diff HEAD`, not the
+#                       index-relative `git diff`)
+# --paths and --patch are for a checkout shared with other sessions, where
+# --uncommitted would review everyone's work in progress.
+#
+# --about says what the change is for and what it does on purpose, the way a
+# commit message would: Codex reviews the change against it rather than
+# guessing the intent from the diff. Codex cannot be given instructions next to
+# a commit, so the change goes to it as one commit — HEAD's, a branch's or the
+# tree's changes on top of their base — whose message is that text, built in a
+# throwaway index on no branch, with HEAD and the real index untouched. A commit
+# already has a message, so --about is optional for --commit and --base and
+# required for the rest.
+#
+# --since <sha> reviews only what changed after an earlier review of the same
+# change: <sha> is the commit that review was given, printed as "(as <sha>)", and
+# it becomes the parent, so the diff Codex sees is just the fixes made since; the
+# code around them is all there to read. For every target but --commit, and only
+# while the base of the review — HEAD, or the merge base for --base — is still the
+# one that review was built on: every commit built here names it in a
+# "Built-by: scripts/codex-review.sh on <sha>" line.
+#
+# The models are tried in order until one answers: CODEX_REVIEW_MODELS (default
+# "gpt-6.1-sol gpt-6-astra"), each at CODEX_REVIEW_EFFORT (default xhigh), each
+# attempt for at most CODEX_REVIEW_TIMEOUT minutes (default 20).
+#
+# --fast runs them in Codex's fast mode (the "priority" service tier), which spends
+# more of the plan's limits — only when the user asks for it. It speeds up the
+# model's output, not its thinking: measured on gpt-6.1-sol in 2026-10, a review got
+# 0–20% faster. A model that does not offer the tier runs at normal speed, and the
+# script says so.
+#
+# --no-duplicates leaves the duplicate check out. It belongs to a change's first
+# round: duplicated code comes with the code a change adds, and the later rounds
+# look at fixes, each of them reviewed by the round after it.
+#
+# Prints the review, then the duplicate check, and keeps them (review.md,
+# duplicates.md), with Codex's event logs, in tmp/codex-review/. A duplicate check
+# that no model answered is printed as such, with why: check that yourself.
+# Exit status:
+#   0  reviewed; the review may still list findings
+#   2  bad arguments, or nothing to review
+#   3  Codex is unavailable: not installed, signed out, every model refused or
+#      failed the review. The reason is printed, and the duplicate check if it
+#      answered all the same; review the change some other way.
+#   4  cannot run here: ~/.codex is not writable, as inside an agent's sandbox,
+#      which keeps Codex off the network too. Run this outside the sandbox.
+#
+set -uo pipefail
+
+say() { echo "[codex-review] $*" >&2; }
+die() { local code=$1; shift; say "$*"; exit "$code"; }
+USAGE='usage: bash scripts/codex-review.sh [--fast] [--no-duplicates] [--about <text>] [--since <sha>] --commit <sha> | --base <branch> | --uncommitted | --paths <path>... | --patch <file>'
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || die 2 "not inside a git checkout"
+
+# the options may stand anywhere, before the target or after it
+about= fast=0 duplicates=1 since= rest=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --about) [ $# -ge 2 ] || die 2 "$USAGE"; about=$2; shift 2;;
+    --fast) fast=1; shift;;
+    --no-duplicates) duplicates=0; shift;;
+    --since) [ $# -ge 2 ] || die 2 "$USAGE"; since=$2; shift 2;;
+    *) rest+=("$1"); shift;;
+  esac
+done
+set -- "${rest[@]}"
+mode=${1:-}
+[ $# -gt 0 ] && shift
+case "$mode" in
+  --commit|--base|--patch) [ $# -eq 1 ] || die 2 "$USAGE";;
+  --uncommitted) [ $# -eq 0 ] || die 2 "$USAGE";;
+  --paths) [ $# -ge 1 ] || die 2 "$USAGE";;
+  *) die 2 "$USAGE";;
+esac
+case "$mode" in
+  --commit|--base) ;;
+  *) [ -n "$about" ] || die 2 "say what the change is for and what it does on purpose: --about <text>";;
+esac
+# HEAD is read once: another session may commit while this runs
+head=$(git rev-parse --verify -q HEAD) || die 2 "no commit to review against"
+if [ -n "$since" ]; then
+  [ "$mode" != --commit ] || die 2 "--since goes with every target but --commit"
+  sha=$(git rev-parse --verify -q "$since^{commit}") || die 2 "no such commit: $since"
+  since=$sha
+fi
+case "$mode" in
+  --commit)
+    sha=$(git rev-parse --verify -q "$1^{commit}") || die 2 "no such commit: $1"
+    [ -z "$about" ] || git rev-parse --verify -q "$sha^" >/dev/null || die 2 "--about needs a commit with a parent";;
+  --base)
+    base=$(git merge-base "$head" "$1" 2>/dev/null) || die 2 "no such branch, or nothing in common with it: $1";;
+  --patch)
+    [ -s "$1" ] || die 2 "no such patch, or it is empty: $1"
+    patch=$(realpath "$1");;
+esac
+# What the change is built on: HEAD, or the merge base for --base. The rounds' commits stand one on
+# top of the other on it, and each names it in its Built-by line; an earlier round built on another
+# base, moved forward or back, would bring whatever lies between the two into the diff.
+anchor=$head anchor_name=HEAD
+if [ "$mode" = --base ]; then anchor=$base anchor_name='the merge base'; fi
+BUILT_BY="Built-by: scripts/codex-review.sh on"
+if [ -n "$since" ]; then
+  built_on=$(git log -1 --format=%B "$since" | grep -xE "$BUILT_BY [0-9a-f]{40}" | tail -1 | awk '{print $NF}')
+  [ -n "$built_on" ] || die 2 "${since:0:9} is not a commit this script built for a review"
+  [ "$built_on" = "$anchor" ] ||
+    die 2 "$anchor_name has moved since the review of ${since:0:9}: the fixes cannot be told apart from what lies between, review the whole change"
+fi
+# tells Codex that only the fixes since an earlier round are under review
+since_note() {
+  [ -z "$since" ] || printf '\n\nOnly the fixes made since an earlier review of this change (%s) are under review\nhere; the change as a whole was reviewed then.' "${since:0:9}"
+}
+cd "$ROOT" || die 2 "cannot enter $ROOT"
+
+# the standalone installer puts it here, and a non-login shell may not have it on PATH
+command -v codex >/dev/null || PATH=$HOME/.local/bin:$PATH
+command -v codex >/dev/null || die 3 "Codex is unavailable: codex is not installed"
+CODEX_DIR=${CODEX_HOME:-$HOME/.codex}
+[ -d "$CODEX_DIR" ] || die 3 "Codex is unavailable: it was never set up ($CODEX_DIR is missing)"
+probe=$(mktemp "$CODEX_DIR/.codex-review.XXXXXX" 2>/dev/null) ||
+  die 4 "cannot write to $CODEX_DIR: inside a sandbox? Run this outside it"
+rm -f "$probe"
+codex login status >/dev/null 2>&1 || die 3 "Codex is unavailable: signed out (codex login status)"
+
+mkdir -p tmp/codex-review || die 2 "cannot create tmp/codex-review"
+find tmp/codex-review -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null
+OUT=tmp/codex-review/$(date +%Y%m%d-%H%M%S)-$$
+mkdir "$OUT" || die 2 "cannot create $OUT"
+
+# HEAD's tree plus the changes asked for. Everything uncommitted starts from a copy of the real index,
+# whose cached file stats spare hashing the whole tree again.
+tree_of_changes() {
+  local index
+  index=$(git rev-parse --path-format=absolute --git-path index) || die 2 "cannot find the index"
+  export GIT_INDEX_FILE=$OUT/index
+  case "$mode" in
+    --paths)
+      git read-tree "$head" || die 2 "cannot read HEAD"
+      git add -A -- "$@" || die 2 "cannot take these paths: $*";;
+    --patch)
+      git read-tree "$head" || die 2 "cannot read HEAD"
+      git apply --cached "$patch" || die 2 "the patch does not apply to HEAD: $patch";;
+    *)
+      cp "$index" "$GIT_INDEX_FILE" || die 2 "cannot copy the index"
+      git add -A . || die 2 "cannot take the uncommitted changes";;
+  esac
+  git write-tree || die 2 "cannot write the tree"
+  rm -f "$GIT_INDEX_FILE"
+}
+
+# the change as one commit on no branch, whose message is $message
+review_commit() {
+  local tree=$1 parent=$2
+  if [ "$tree" = "$(git rev-parse "$parent^{tree}")" ]; then
+    rm -rf "$OUT"
+    die 2 "nothing to review: no changes"
+  fi
+  printf '%s\n\n%s %s\n' "$message" "$BUILT_BY" "$anchor" | git commit-tree "$tree" -p "$parent" || die 2 "cannot build the commit"
+}
+
+case "$mode" in
+  --commit)
+    what="commit $(git log -1 --format='%h %s' "$sha")"
+    if [ -n "$about" ]; then
+      message=$(printf '%s\n\nThe commit'"'"'s own message:\n\n%s' "$about" "$(git log -1 --format=%B "$sha")")
+      anchor=$(git rev-parse "$sha^")
+      sha=$(review_commit "$(git rev-parse "$sha^{tree}")" "$sha^") || exit
+    fi;;
+  --base)
+    what="$(git branch --show-current) against $1"
+    message=${about:-The changes of $what}
+    commits=$(git log --reverse --format='- %s' "$base..$head")
+    [ -z "$commits" ] || message=$(printf '%s\n\nThe commits on the branch:\n%s' "$message" "$commits")
+    message="$message$(since_note)"
+    [ -z "$since" ] || what="$what, the fixes since ${since:0:9}"
+    tree=$(tree_of_changes) || exit
+    sha=$(review_commit "$tree" "${since:-$base}") || exit;;
+  *)
+    case "$mode" in
+      --paths) what="the changes to $*";;
+      --patch) what="the patch $1";;
+      *) what='the uncommitted changes';;
+    esac
+    message="$about$(since_note)"
+    [ -z "$since" ] || what="$what, the fixes since ${since:0:9}"
+    tree=$(tree_of_changes "$@") || exit
+    sha=$(review_commit "$tree" "${since:-$head}") || exit;;
+esac
+# a commit built here gets named
+[ "$mode" = --commit ] && [ -z "$about" ] || what="$what (as ${sha:0:9})"
+title=$(git log -1 --format=%s "$sha")
+
+# why an attempt failed, from its event log: the turn's error, which may wrap the API's JSON answer
+failure() {
+  node -e '
+    let message;
+    for(const line of require("fs").readFileSync(process.argv[1], "utf8").split("\n")) {
+      try {
+        const event = JSON.parse(line);
+        if(event.type === "turn.failed") message = event.error?.message;
+        else if(event.type === "error") message = event.message;
+      } catch{}
+    }
+    try {
+      const inner = JSON.parse(message);
+      message = inner.error?.message ?? inner.message ?? message;
+    } catch{}
+    if(message) console.log(message);
+  ' "$1" 2>/dev/null
+}
+
+read -r -a models <<< "${CODEX_REVIEW_MODELS:-gpt-6.1-sol gpt-6-astra}"
+effort=${CODEX_REVIEW_EFFORT:-xhigh}
+minutes=${CODEX_REVIEW_TIMEOUT:-20}
+limit=()
+command -v timeout >/dev/null && limit=(timeout "${minutes}m")
+tier=() how=$effort
+if [ "$fast" = 1 ]; then tier=(-c 'service_tier="priority"'); how="$effort, fast"; fi
+# Codex's sandbox reads everything and writes nowhere but a temp dir of the run's own, gone with it, so that the tests
+# it runs to check a finding run: in a sandbox with nowhere to write every vitest it started failed (the forks pool
+# hands the modules to its workers through files in the temp dir), and it spent steps on ways around that. Codex
+# also checks the commit out there to test its exact tree, so the dir is not under a tmp/ dir: the vite config denies
+# every path through one. One dir for each pass: Codex mounts guards over .git and the like in every dir it may write,
+# made up on the spot where there are none, and in a dir several Codex runs share at once those collide.
+# pnpm checks the dependencies before it runs a script, and in a worktree that check runs an install, which writes
+# into the checkout: it is skipped.
+cache=${XDG_CACHE_HOME:-$HOME/.cache}
+mkdir -p "$cache" && scratch=$(mktemp -d "$cache/codex-review.XXXXXX") || die 2 "cannot create a temp dir in $cache"
+trap 'rm -rf "$scratch"' EXIT
+# those of runs that were killed
+find "$cache" -mindepth 1 -maxdepth 1 -type d -name 'codex-review.*' -mmin +1440 -exec rm -rf {} + 2>/dev/null
+# vite.config.ts makes this one from its example on its first load in a checkout, which the sandbox cannot do: in a
+# checkout that never had a test run, a build or a dev server (a worktree made for the review), no test would start
+[ -e src/langPackLocalVersion.ts ] || cp -n src/langPackLocalVersion.example.ts src/langPackLocalVersion.ts
+
+# What the duplicate check is asked. `codex exec review` takes no instructions next to a commit, so this is a plain
+# `codex exec`, which answers in the shape asked here: findings with the review's levels, which the rounds go by.
+duplicates_prompt=$(cat <<'EOF'
+Check commit @SHA@ of this repository for duplicated code, and for nothing else: another reviewer is looking for
+bugs in it at the same time. AGENTS.md's rule is that a change never duplicates code: before it adds logic, a
+helper, a component, styles or a constant, it reuses or extends what the codebase already has.
+
+The commit is the change: `git show @SHA@` gives its diff, and its message says what the change is for. The
+checkout's files may differ from the commit's tree, so search and read the commit's own tree:
+`git grep -n <pattern> @SHA@ -- . ':!public'`, `git show @SHA@:<path>`.
+
+Report:
+- what the commit adds that the codebase already has: a function, a component, a hook, a store, a manager
+  method, styles (a block of rules, a mixin, a variable), a constant, a type, a string in src/lang.ts whose text
+  another key already has;
+- what the commit itself writes more than once;
+- code the commit replaces but leaves in place, now used by nothing.
+
+Search for each piece the commit adds by its names, by the calls and literals it is made of and by what it does,
+and read every candidate before reporting it. Report only what you have read on both sides and found to do the
+same thing; code that looks alike and behaves differently is not a duplicate. Leave out generated files
+(src/layer.d.ts, src/scripts/out/, src/lib/settingsSearch/generated.ts, public/) and vendored code (src/vendor/).
+
+Write each finding as:
+
+N. **[P2] What is duplicated** — the new code (path:lines), the code it repeats (path:lines), what both do, and
+how to reuse: call the existing code, extend it with what this case needs, or move the shared part into a module
+of its own. The reuse is as small as the need: one case's need does not go into a mechanism every caller pays for.
+
+[P2] is a function, a component, or a block of styles or logic written again; [P3] is a constant, a string, a
+type or a few lines. If the commit duplicates nothing, say so in one line. Change no files.
+EOF
+)
+[ $duplicates = 0 ] || printf '%s\n' "${duplicates_prompt//@SHA@/$sha}" > "$OUT/duplicates-prompt.md"
+
+# One pass over the change, the models tried in order until one answers. It leaves its answer in $OUT/<pass>.md, and
+# in $OUT/<pass>.status the lines "ok", the model and how it ran, or "failed" and why each model failed.
+run_pass() {
+  local pass=$1 dir=$scratch/$1 how=$how failures=() model log task input code reason
+  mkdir "$dir" || { printf '%s\n' failed "cannot create $dir" > "$OUT/$pass.status"; return; }
+  local sandbox=(-c 'default_permissions="tweb_review"' -c "permissions.tweb_review.filesystem={\":root\"=\"read\", \"$dir\"=\"write\"}")
+  for model in "${models[@]}"; do
+    log=$OUT/$pass-$model
+    case "$pass" in
+      review)
+        say "$model ($how) reviews $what…"
+        task=(review --commit "$sha" --title "$title" --json -o "$log.md") input=/dev/null;;
+      duplicates)
+        say "$model ($how) checks $what for duplicated code…"
+        task=(--json -o "$log.md" -) input=$OUT/duplicates-prompt.md;;
+    esac
+    TMPDIR=$dir pnpm_config_verify_deps_before_run=false \
+    "${limit[@]}" codex exec -m "$model" -c "model_reasoning_effort=\"$effort\"" "${tier[@]}" "${sandbox[@]}" --ephemeral \
+      "${task[@]}" > "$log.jsonl" 2> "$log.stderr" < "$input"
+    code=$?
+    if [ $code -eq 0 ] && grep -q '"type":"turn.completed"' "$log.jsonl" && [ -s "$log.md" ]; then
+      cp "$log.md" "$OUT/$pass.md"
+      if [ "$fast" = 1 ] && grep -q 'is not advertised as supported' "$log.jsonl"; then
+        say "$model does not offer fast mode: it ran at normal speed"
+        how=$effort
+      fi
+      printf '%s\n' ok "$model" "$how" > "$OUT/$pass.status"
+      return
+    fi
+    if [ $code -eq 124 ]; then
+      reason="no answer in $minutes min"
+    else
+      reason=$(failure "$log.jsonl")
+      [ -n "$reason" ] || reason=$(grep -v '^[[:space:]]*$' "$log.stderr" | tail -1)
+      [ -n "$reason" ] || reason="exit $code"
+    fi
+    say "$model failed ($pass): $reason"
+    failures+=("$model: $reason")
+  done
+  printf '%s\n' failed "${failures[@]}" > "$OUT/$pass.status"
+}
+
+# the two passes at once: the duplicate check takes about as long as the review
+run_pass review &
+if [ $duplicates = 1 ]; then run_pass duplicates & fi
+wait
+
+# what a pass left, into $status; true when it answered
+read_status() {
+  local line
+  status=()
+  [ -s "$OUT/$1.status" ] && while IFS= read -r line; do status+=("$line"); done < "$OUT/$1.status"
+  [ "${status[0]:-}" = ok ]
+}
+# why a pass did not answer
+pass_failures() {
+  local IFS=';'
+  if [ ${#status[@]} -gt 1 ]; then echo "${status[*]:1}" | sed 's/;/; /g'; else echo 'it stopped without an answer'; fi
+}
+show_pass() {
+  echo "$2 by ${status[1]} (${status[2]}) of $what:"
+  echo
+  # an answer may end with no newline, or with several
+  printf '%s\n\n' "$(cat "$OUT/$1.md")"
+}
+
+reviewed=0 unavailable=
+if read_status review; then
+  reviewed=1
+  show_pass review 'Codex review'
+else
+  unavailable=$(pass_failures)
+fi
+if [ $duplicates = 0 ]; then
+  :
+elif read_status duplicates; then
+  show_pass duplicates 'Codex duplicate check'
+elif [ $reviewed = 1 ]; then
+  echo "The duplicate check did not answer ($(pass_failures)): check the change for duplicated code yourself."
+  echo
+fi
+echo "(kept in $OUT/)"
+[ $reviewed = 1 ] || die 3 "Codex is unavailable: $unavailable"

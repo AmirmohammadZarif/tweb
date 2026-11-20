@@ -1,9 +1,7 @@
 import rootScope from '@lib/rootScope';
 import {toastNew} from '@components/toast';
-import appSidebarLeft from '@components/sidebarLeft';
-import appImManager from '@lib/appImManager';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
 import mediaSizes from '@helpers/mediaSizes';
-import {AppProjectTasksTab} from '@components/solidJsTabs/tabs';
 import showCrmCreateTaskPopup, {CrmTaskSourceProps} from '@components/popups/crmCreateTask';
 
 /**
@@ -25,10 +23,10 @@ import showCrmCreateTaskPopup, {CrmTaskSourceProps} from '@components/popups/crm
  */
 export function openCrmTasksTab() {
   if(mediaSizes.isMobile) {
-    appImManager.setPeer(); // closes the chat, revealing the left column
+    hotReloadGuard.appImManager.setPeer(); // closes the chat, revealing the left column
   }
 
-  appSidebarLeft.createTab(AppProjectTasksTab).open();
+  hotReloadGuard.appSidebarLeft.createTab(hotReloadGuard.tabs.AppProjectTasksTab).open();
 }
 
 export default async function createCrmTaskFromText(rawTitle: string, source: CrmTaskSourceProps = {}) {

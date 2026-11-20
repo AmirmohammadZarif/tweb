@@ -1,5 +1,6 @@
 import type {MyDraftMessage} from '@appManagers/appDraftsManager';
 import type {MyMessage} from '@appManagers/appMessagesManager';
+import type {Middleware} from '@helpers/middleware';
 import Icon from '@components/icon';
 import type {
   WrapMessageForReplyOptions
@@ -28,6 +29,8 @@ export default async function renderDialogSubtitleParts(options: {
   withoutMessageIcon?: boolean,
   prependPeerId?: PeerId,
   middleware: MiddlewarePromise,
+  /** the lifetime of what the parts hold, the custom emoji of the text among them */
+  wrapMiddleware?: Middleware,
   textColor: string,
   messageRenderer?: MessageRenderer,
   peerTitleRenderer?: PeerTitleRenderer
@@ -80,6 +83,8 @@ export default async function renderDialogSubtitleParts(options: {
   const names: (Promise<HTMLElement> | HTMLElement)[] = [];
   const withChatName = !!options.prependPeerId;
   let draftLabel: HTMLElement;
+  // * a business bot writes in a private chat for its owner: it is named, as anyone writing in a group is
+  const businessBotId = lastMessage?._ === 'message' && lastMessage.via_business_bot_id;
 
   if(draftMessage) {
     const span = document.createElement('span');
@@ -88,15 +93,14 @@ export default async function renderDialogSubtitleParts(options: {
     // * not a name — it labels the message and stays right in front of it
     draftLabel = span;
   } else if(
-    lastMessage &&
-    peerId.isAnyChat() &&
-    peerId !== lastMessage.fromId &&
-    lastMessage._ === 'message'
+    lastMessage?._ === 'message' &&
+    (businessBotId || (peerId.isAnyChat() && peerId !== lastMessage.fromId))
   ) {
     const span = document.createElement('span');
     span.classList.add('primary-text');
+    const senderPeerId = businessBotId ? (businessBotId as UserId).toPeerId(false) : lastMessage.fromId;
 
-    if(lastMessage.fromId === rootScope.myId) {
+    if(senderPeerId === rootScope.myId) {
       span.append(i18n('FromYou'));
       names.push(span);
     } else {
@@ -107,7 +111,7 @@ export default async function renderDialogSubtitleParts(options: {
       })
       .then((wrapPeerTitle) => {
         return middleware(wrapPeerTitle({
-          peerId: lastMessage.fromId,
+          peerId: senderPeerId,
           onlyFirstName: true
         }));
       })
@@ -163,9 +167,10 @@ export default async function renderDialogSubtitleParts(options: {
 
   willPrepend.unshift(...names);
 
+  // * the row's title names the sender: a transfer's line leaves the name out
   const wrapOptions: Partial<
     WrapMessageForReplyOptions & WrapRichTextOptions
-  > = {textColor};
+  > = {textColor, middleware: options.wrapMiddleware, compact: 'list'};
   let fragment: DocumentFragment;
   let wrapResult: ReturnType<typeof wrapMessageForReply>;
   if(highlightWord && lastMessage?._ === 'message' && lastMessage.message) {

@@ -3,6 +3,32 @@ import lottieLoader from '@lib/lottie/lottieLoader';
 import LottiePlayer from '@lib/lottie/lottiePlayer';
 import CodeInputFieldCompat from '@components/codeInputField';
 import {fastRaf} from '@helpers/schedulers';
+import withTimeout from '@helpers/schedulers/withTimeout';
+import forgetFailedRequest from '@helpers/forgetFailedRequest';
+import noop from '@helpers/noop';
+
+const IDLE_ASSET = 'TwoFactorSetupMonkeyIdle';
+const TRACKING_ASSET = 'TwoFactorSetupMonkeyTracking';
+
+/** How long a card waits for its monkey before it opens without it (a slow link, a failed fetch): */
+const PRELOAD_WAIT_MS = 1000;
+
+let loaded: Promise<void>;
+
+/**
+ * Loads what the monkey is drawn from - its two animations, and what a page's first sticker otherwise starts after its
+ * card has opened (lottieLoader.loadLottieEngine) - so that the card opens with it drawn. Started on the card before it (the number), as soon as one is typed; whatever opens the code card waits for
+ * it. Resolves once loaded, or after PRELOAD_WAIT_MS, and never rejects; a failed load is tried again by the next call.
+ */
+export function preloadTrackingMonkey() {
+  loaded ??= forgetFailedRequest(Promise.all([
+    lottieLoader.loadLottieEngine(),
+    lottieLoader.loadAnimationFromURLManually(IDLE_ASSET),
+    lottieLoader.loadAnimationFromURLManually(TRACKING_ASSET)
+  ]).then(noop), () => loaded, () => loaded = undefined);
+
+  return withTimeout(loaded, PRELOAD_WAIT_MS).catch(noop);
+}
 
 export default class TrackingMonkey {
   public container: HTMLElement;
@@ -106,7 +132,7 @@ export default class TrackingMonkey {
         autoplay: true,
         width: this.size,
         height: this.size
-      }, 'TwoFactorSetupMonkeyIdle').then((animation) => {
+      }, IDLE_ASSET).then((animation) => {
         this.idleAnimation = animation;
 
         // ! animationIntersector will stop animation instantly
@@ -123,7 +149,7 @@ export default class TrackingMonkey {
         autoplay: false,
         width: this.size,
         height: this.size
-      }, 'TwoFactorSetupMonkeyTracking').then((_animation) => {
+      }, TRACKING_ASSET).then((_animation) => {
         this.animation = _animation;
 
         if(!this.inputField.value.length) {

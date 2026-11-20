@@ -31,7 +31,9 @@ export function earliestSelectableMinuteMs(minTimeMs: number, nowMs: number) {
 
 export function getWeekDays() {
   const dateTimeFormat = I18n.getDateTimeFormat({weekday: 'long'});
-  const date = new Date(Date.UTC(2017, 0, 2));
+  // Monday, January 2nd, at local noon: the formatter works in local time, so a UTC
+  // midnight would still be Sunday anywhere west of Greenwich.
+  const date = new Date(2017, 0, 2, 12);
   const out: string[] = [];
   for(let i = 0; i < 7; ++i) {
     out.push(capitalizeFirstLetter(dateTimeFormat.format(date)));
@@ -42,11 +44,11 @@ export function getWeekDays() {
 
 export function getMonths() {
   const dateTimeFormat = I18n.getDateTimeFormat({month: 'long'});
-  const date = new Date(Date.UTC(2017, 0, 1));
+  // The middle of each month in local time, as the formatter reads it: a UTC midnight on
+  // January 1st is still December west of Greenwich, and stepping that 31st skipped February.
   const out: string[] = [];
   for(let i = 0; i < 12; ++i) {
-    out.push(capitalizeFirstLetter(dateTimeFormat.format(date)));
-    date.setMonth(date.getMonth() + 1);
+    out.push(capitalizeFirstLetter(dateTimeFormat.format(new Date(2017, i, 15))));
   }
   return out;
 }

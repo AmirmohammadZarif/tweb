@@ -10,20 +10,17 @@ import SearchListLoader from '@helpers/searchListLoader';
 import {Message, MessageMedia, WebPage} from '@layer';
 import confirmationPopup from '@components/confirmationPopup';
 import appDownloadManager from '@lib/appDownloadManager';
-import appImManager from '@lib/appImManager';
 import {MyMessage} from '@appManagers/appMessagesManager';
 import {MyPhoto} from '@appManagers/appPhotosManager';
 import canSaveMessageMedia from '@appManagers/utils/messages/canSaveMessageMedia';
-import getMediaFromMessage from '@appManagers/utils/messages/getMediaFromMessage';
+import {getMediaFromMessageOrRich} from '@appManagers/utils/messages/getMediaFromMessage';
 import wrapRichText from '@richTextProcessor/wrapRichText';
 import {MediaSearchContext} from '@components/appMediaPlaybackController';
 import AppMediaViewerBase, {MEDIA_VIEWER_CLASSNAME} from '@components/mediaViewer/base';
 import overlayAvatarVideoOnMover from '@components/mediaViewer/avatarVideo';
 import {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import showDeleteMessagesPopup from '@components/popups/deleteMessages';
-import showForwardPopup from '@components/popups/forward';
 import Scrollable from '@components/scrollable';
-import appSidebarRight from '@components/sidebarRight';
 import AppSharedMediaTab from '@components/sidebarRight/tabs/sharedMediaTab';
 import {ChatType} from '@components/chat/chatType';
 import getFwdFromName from '@appManagers/utils/messages/getFwdFromName';
@@ -34,10 +31,21 @@ import wrapEmojiText from '@richTextProcessor/wrapEmojiText';
 import wrapWebPageDescription from '@components/wrappers/webPageDescription';
 import Button from '@components/button';
 import onQuoteClick from '@helpers/dom/onQuoteClick';
-import {canCopyMediaToClipboard} from '@helpers/copyMediaToClipboard';
+import {canCopyMediaToClipboard, canCopyVideoFrameToClipboard} from '@helpers/copyMediaToClipboard';
+import toHHMMSS from '@helpers/string/toHHMMSS';
+import {getPeerProfilePhotoActions, reportProfilePhoto, setMainProfilePhoto} from '@components/mediaViewer/profilePhotoActions';
 import {setButtonLoader} from '@components/putPreloader';
 import copyMessageMediaWithFeedback from '@components/copyMessageMediaWithFeedback';
 import {canEditMessageMediaWithEditor, getEditMediaLangKey} from '@components/chat/editMessageMedia';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
+import AlbumThumbs, {AlbumThumbItem, ALBUM_THUMBS_CLASSNAME, getAlbumThumbsHeight} from '@components/mediaViewer/albumThumbs';
+import apiManagerProxy from '@lib/apiManagerProxy';
+import {batch, createSignal} from 'solid-js';
+import {render} from 'solid-js/web';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
+import Modes from '@config/modes';
+
+const isItemIndex = (index: number) => typeof(index) === 'number' && index >= 0;
 
 type AppMediaViewerTargetType = {
   element: HTMLElement,
@@ -52,7 +60,7 @@ export const onMediaCaptionClick = (caption: HTMLElement, e: MouseEvent) => {
   const spoiler = findUpClassName(e.target, 'spoiler');
   const quoteDiv = findUpClassName(e.target, 'quote-like-collapsable');
   const isSpoilerVisible = caption.classList.contains('is-spoiler-visible');
-  if(quoteDiv && !a && (!spoiler || isSpoilerVisible)) {
+  if(quoteDiv && (!spoiler || isSpoilerVisible)) {
     if(onQuoteClick(e, quoteDiv)) {
       return;
     }
@@ -82,9 +90,21 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
   protected btnMenuDownload: ButtonMenuItemOptionsVerifiable;
   protected btnMenuDelete: ButtonMenuItemOptionsVerifiable;
   protected btnMenuEdit: ButtonMenuItemOptionsVerifiable;
+  protected btnMenuShareAtTime: ButtonMenuItemOptionsVerifiable;
+  protected btnMenuSetMainPhoto: ButtonMenuItemOptionsVerifiable;
+  protected btnMenuReportPhoto: ButtonMenuItemOptionsVerifiable;
   private deleteAsChatPhoto = false;
   private btnMenuEditText = new I18n.IntlElement({key: 'EditThisPhoto'});
+  private btnMenuCopyText = new I18n.IntlElement({key: 'MediaViewer.Context.Copy'});
+  private btnMenuShareAtTimeText = new I18n.IntlElement();
+  private canShareAtTime = false;
+  // * the second the menu offered, so that what is shared is what it said
+  private shareAtTime = 0;
   private videoAvatarCleanup?: () => void;
+  private albumThumbItems = createSignal<AlbumThumbItem[]>([]);
+  private albumThumbIndex = createSignal(0);
+  // * the same object for a thumb while its album stays on screen, so the strip moves it instead of redrawing
+  private albumThumbCache: Map<string, AlbumThumbItem> = new Map();
 
   get searchContext() {
     return this.listLoader.searchContext;
@@ -95,7 +115,7 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
       processItem: (item) => {
         const isForDocument = this.searchContext.inputFilter._ === 'inputMessagesFilterDocument';
         const {mid, peerId} = item;
-        const media = getMediaFromMessage(item, true);
+        const media = getMediaFromMessageOrRich(item);
 
         if(!media) return;
 
@@ -148,8 +168,27 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
     const captionScrollable = new Scrollable(this.content.caption);
     captionScrollable.onAdditionalScroll = setCaptionTimeout;
 
+    const albumThumbs = document.createElement('div');
+    albumThumbs.classList.add(ALBUM_THUMBS_CLASSNAME, MEDIA_VIEWER_CLASSNAME + '-appear');
+    const disposeAlbumThumbs = render(() => AlbumThumbs({
+      items: this.albumThumbItems[0],
+      current: this.albumThumbIndex[0],
+      onSelect: this.onAlbumThumbSelect
+    }), albumThumbs);
+    this.middlewareHelper.get().onDestroy(disposeAlbumThumbs);
+
     // this.content.main.append(this.content.caption);
-    this.wholeDiv.append(this.content.caption);
+    this.wholeDiv.append(albumThumbs, this.content.caption);
+
+    const onLoadedMore = this.listLoader.onLoadedMore;
+    this.listLoader.onLoadedMore = () => {
+      onLoadedMore();
+      // * an album at the edge of what was loaded gets the rest of its items
+      const {message, index} = this.target || {};
+      if(message) {
+        this.setAlbumThumbs(message, index, this.listLoader.previous, this.listLoader.next, true);
+      }
+    };
 
     attachClickEvent(this.buttons.delete, this.onDeleteClick);
     attachClickEvent(this.buttons.copy, this.onCopyMediaClick);
@@ -164,9 +203,14 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
       icon: 'forward',
       text: 'Forward',
       onClick: this.onForwardClick
+    }, this.btnMenuShareAtTime = {
+      icon: 'forward',
+      textElement: this.btnMenuShareAtTimeText.element,
+      onClick: this.onShareAtTimeClick,
+      verify: this.verifyShareAtTime
     }, this.btnMenuCopy = {
       icon: 'copy',
-      text: 'MediaViewer.Context.Copy',
+      textElement: this.btnMenuCopyText.element,
       onClick: this.onCopyMediaClick,
       keepOpen: true,
       verify: () => false
@@ -174,6 +218,16 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
       icon: 'download',
       text: 'MediaViewer.Context.Download',
       onClick: this.onDownloadClick
+    }, this.btnMenuSetMainPhoto = {
+      icon: 'user',
+      text: 'SetAsMain',
+      onClick: this.onSetMainPhotoClick,
+      verify: () => false
+    }, this.btnMenuReportPhoto = {
+      icon: 'flag',
+      text: 'ReportChat',
+      onClick: this.onReportPhotoClick,
+      verify: () => false
     }, this.btnMenuDelete = {
       icon: 'delete',
       className: 'danger',
@@ -181,7 +235,7 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
       onClick: this.onDeleteClick
     }];
 
-    this.setBtnMenuToggle(buttons);
+    this.setBtnMenuToggle(buttons, [this.btnMenuShareAtTime, this.btnMenuSetMainPhoto, this.btnMenuReportPhoto]);
 
     // * constructing html end
 
@@ -242,6 +296,7 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
   };
 
   onDeleteClick = async() => {
+    const managers = bindManagersToSession(this.managers);
     const target = this.target;
     if(this.deleteAsChatPhoto) {
       try {
@@ -257,7 +312,7 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
         return;
       }
 
-      await this.managers.appChatsManager.editPhoto(target.peerId.toChatId());
+      await managers.appChatsManager.editPhoto(target.peerId.toChatId());
       this.target = {element: this.content.media} as any;
       this.close();
       return;
@@ -276,7 +331,7 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
 
   onEditClick = async() => {
     const {peerId, mid} = this.target;
-    const chat = appImManager.chat;
+    const chat = hotReloadGuard.appImManager.chat;
     if(chat?.peerId !== peerId) {
       return;
     }
@@ -296,7 +351,7 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
     const target = this.target;
     if(target.mid) {
       // appSidebarRight.forwardTab.open([target.mid]);
-      showForwardPopup({
+      hotReloadGuard.showForwardPopup({
         [target.peerId]: [target.mid]
       }, () => {
         return this.close();
@@ -313,13 +368,13 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
       // .then(() => mediaSizes.isMobile ? appSidebarRight.sharedMediaTab.closeBtn.click() : Promise.resolve())
       .then(async() => {
         if(mediaSizes.isMobile) {
-          const tab = appSidebarRight.getTab(AppSharedMediaTab);
+          const tab = hotReloadGuard.appSidebarRight.getTab(AppSharedMediaTab);
           if(tab) {
             tab.close();
           }
         }
 
-        appImManager.setInnerPeer({
+        hotReloadGuard.appImManager.setInnerPeer({
           peerId: message.peerId,
           lastMsgId: mid,
           threadId
@@ -331,23 +386,70 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
   onDownloadClick = async(_: any, docId?: DocId) => {
     if(docId) {
       const doc = await this.managers.appDocsManager.getDoc(docId);
-      appDownloadManager.downloadToDisc({media: doc, queueId: appImManager.chat.bubbles.lazyLoadQueue.queueId});
+      appDownloadManager.downloadToDisc({media: doc, queueId: hotReloadGuard.appImManager.chat.bubbles.lazyLoadQueue.queueId});
       return;
     }
     const {message, index} = this.target;
-    const media = getMediaFromMessage(message, true, index);
+    const media = getMediaFromMessageOrRich(message, index);
     if(!media) return;
-    appDownloadManager.downloadToDisc({media, queueId: appImManager.chat.bubbles.lazyLoadQueue.queueId});
+    appDownloadManager.downloadToDisc({media, queueId: hotReloadGuard.appImManager.chat.bubbles.lazyLoadQueue.queueId});
   };
 
   onCopyMediaClick = () => {
     const {message, index} = this.target;
     copyMessageMediaWithFeedback({
       message,
+      media: getMediaFromMessageOrRich(message, index),
       index,
+      video: this.getShownVideo(),
       button: this.btnMenuCopy,
       cleanup: setButtonLoader(this.buttons.copy as HTMLButtonElement)
     });
+  };
+
+  // * tdesktop's "Share at 0:42": the forward starts the video there for whoever it goes to. Only once this slide's
+  // * video is there, as tdesktop's needs its player (the base refreshes the menu when it comes)
+  private verifyShareAtTime = () => {
+    const video = this.canShareAtTime && this.getShownVideo();
+    if(!video) {
+      return false;
+    }
+
+    this.shareAtTime = Math.floor(video.currentTime || 0);
+    this.btnMenuShareAtTimeText.compareAndUpdate({
+      key: 'MediaViewer.Context.ShareAtTime',
+      args: [toHHMMSS(this.shareAtTime)]
+    });
+    return true;
+  };
+
+  // * the actions only the menus have act on the slide their menu was opened on (`getMenuTarget`)
+  onShareAtTimeClick = () => {
+    const target = this.getMenuTarget();
+    if(!target) return;
+    this.getShownVideo()?.pause();
+    hotReloadGuard.showForwardPopup({
+      [target.peerId]: [target.mid]
+    }, () => {
+      return this.close();
+    }, undefined, undefined, undefined, this.shareAtTime);
+  };
+
+  private getPhotoId({message, index}: AppMediaViewerTargetType) {
+    return (getMediaFromMessageOrRich(message, index) as MyPhoto).id;
+  }
+
+  onSetMainPhotoClick = async() => {
+    const target = this.getMenuTarget();
+    if(!target) return;
+    if(await setMainProfilePhoto(this.managers, target.peerId, this.getPhotoId(target)) && this.target === target) {
+      this.close();
+    }
+  };
+
+  onReportPhotoClick = () => {
+    const target = this.getMenuTarget();
+    if(target) reportProfilePhoto(target.peerId, this.getPhotoId(target));
   };
 
   private setCaption(message: MyMessage) {
@@ -356,7 +458,7 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
       this.author.nameEl.append(i18n('SponsoredMessageAd'));
     }
 
-    const media = getMediaFromMessage(message, true);
+    const media = getMediaFromMessageOrRich(message);
     const loadPromises: Promise<any>[] = [];
     const richTextOptions: Parameters<typeof wrapRichText>[1] = {
       maxMediaTimestamp: ((media as MyDocument)?.type === 'video' && (media as MyDocument).duration) || undefined,
@@ -386,7 +488,7 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
 
       attachClickEvent(button, () => {
         this.close().then(() => {
-          appImManager.onSponsoredBoxClick(message as Message.message);
+          hotReloadGuard.appImManager.onSponsoredBoxClick(message as Message.message);
         });
       });
     } else if(hasCaption = !!(message as Message.message).message) {
@@ -442,30 +544,192 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
     return this;
   }
 
+  protected getBottomChromeHeight() {
+    return this.albumThumbItems[0]().length > 1 ? getAlbumThumbsHeight() : 0;
+  }
+
+  private getTargetMessage(target: Pick<AppMediaViewerTargetType, 'peerId' | 'mid' | 'message'>) {
+    if(target.message) {
+      return target.message;
+    }
+
+    // * synchronous: whether the strip is there decides the media's room before the viewer opens
+    return this.searchContext?.isScheduled ?
+      apiManagerProxy.getMessageFromStorage(`${target.peerId}_scheduled`, target.mid) :
+      apiManagerProxy.getMessageByPeer(target.peerId, target.mid);
+  }
+
+  // * an album is the messages of one grouped_id, or the items of one message that carries several (paid
+  // * media; an Instant View page's media come as such items too). A single item's index is null or -1
+  private getAlbumKey(target: Pick<AppMediaViewerTargetType, 'peerId' | 'mid' | 'message' | 'index'>) {
+    const groupedId = (this.getTargetMessage(target) as Message.message)?.grouped_id;
+    if(groupedId) {
+      return `${target.peerId}_${groupedId}`;
+    }
+
+    if(isItemIndex(target.index)) {
+      return `${target.peerId}_${target.mid}_items`;
+    }
+  }
+
+  private getTargetKey(target: Pick<AppMediaViewerTargetType, 'peerId' | 'mid' | 'index'>) {
+    return `${target.peerId}_${target.mid}_${isItemIndex(target.index) ? target.index : ''}`;
+  }
+
+  /**
+   * The thumbs of the album `message` belongs to, from the items around it in the list: only what the
+   * viewer can go to gets a thumb, in the order the arrows go.
+   */
+  private setAlbumThumbs(
+    message: MyMessage,
+    index: number,
+    previous: AppMediaViewerTargetType[],
+    next: AppMediaViewerTargetType[],
+    relayout?: boolean
+  ) {
+    const current: AppMediaViewerTargetType = {element: undefined, peerId: message.peerId, mid: message.mid, message, index};
+    const key = this.getAlbumKey(current);
+    const run: AppMediaViewerTargetType[] = [current];
+    if(key) {
+      for(let i = previous.length - 1; i >= 0 && this.getAlbumKey(previous[i]) === key; --i) {
+        run.unshift(previous[i]);
+      }
+
+      for(let i = 0; i < next.length && this.getAlbumKey(next[i]) === key; ++i) {
+        run.push(next[i]);
+      }
+    }
+
+    const cache = this.albumThumbCache;
+    const items: AlbumThumbItem[] = [];
+    for(const target of run) {
+      const thumbKey = this.getTargetKey(target);
+      let item = cache.get(thumbKey);
+      if(!item) {
+        const targetMessage = this.getTargetMessage(target);
+        const media = targetMessage && getMediaFromMessageOrRich(targetMessage, target.index) as MyPhoto | MyDocument;
+        if(!media) {
+          break;
+        }
+
+        item = {key: thumbKey, media, message: targetMessage};
+      }
+
+      items.push(item);
+    }
+
+    const heightBefore = this.getBottomChromeHeight();
+    cache.clear();
+    items.forEach((item) => cache.set(item.key, item));
+    batch(() => {
+      this.albumThumbIndex[1](Math.max(0, items.indexOf(cache.get(this.getTargetKey(current)))));
+      this.albumThumbItems[1](items.length > 1 ? items : []);
+    });
+
+    // * on open the base class lays the viewer out right after
+    if(relayout && heightBefore !== this.getBottomChromeHeight()) {
+      this.applyLayoutVariables();
+    }
+  }
+
+  protected applyLayoutPadding() {
+    super.applyLayoutPadding();
+    // * the caption stands on the strip
+    this.wholeDiv.style.setProperty('--media-viewer-album-height', this.getBottomChromeHeight() + 'px');
+  }
+
+  /**
+   * "3 of 15" before the date, as tdesktop and the avatar viewer have it: the place in the list the arrows
+   * go through. A list given whole counts on itself; a search asks the server for the place of the item
+   * opened, and the loader counts every other from it over the results it loads (`getPosition`).
+   */
+  private setPositionCounter() {
+    const target = this.target;
+    const render = ({position, count}: {position: number, count: number}) => {
+      this.setDateExtra(count > 1 ? i18n('Of', [position, count]) : undefined);
+    };
+
+    if(this.local || this.searchContext.useSearch === false) {
+      const {previous, next} = this.listLoader;
+      render({position: previous.length + 1, count: previous.length + 1 + next.length});
+      return;
+    }
+
+    const position = this.listLoader.getPosition(target);
+    if(position) {
+      render(position);
+      return;
+    }
+
+    this.listLoader.loadPosition(target).then((result) => {
+      if(result && this.target === target) {
+        render(result);
+      }
+    });
+  }
+
+  private onAlbumThumbSelect = (index: number) => {
+    if(this.setMoverPromise) {
+      return;
+    }
+
+    const key = this.albumThumbItems[0]()[index]?.key;
+    const {previous, next} = this.listLoader;
+    const previousIndex = previous.findIndex((target) => this.getTargetKey(target) === key);
+    if(previousIndex !== -1) {
+      this.listLoader.go(previousIndex - previous.length);
+      return;
+    }
+
+    const nextIndex = next.findIndex((target) => this.getTargetKey(target) === key);
+    if(nextIndex !== -1) {
+      this.listLoader.go(nextIndex + 1);
+    }
+  };
+
   private setMessageActionVisibility(options: {
     cantForward: boolean,
     cantCopy: boolean,
     cantDownload: boolean,
     cantDelete: boolean,
     cantEdit: boolean,
-    editLangKey?: LangPackKey
+    cantShareAtTime?: boolean,
+    cantSetMainPhoto?: boolean,
+    cantReportPhoto?: boolean,
+    editLangKey?: LangPackKey,
+    copyFrame?: boolean
   }) {
     if(options.editLangKey) {
       this.btnMenuEditText.compareAndUpdate({key: options.editLangKey});
       this.buttons.edit.setAttribute('aria-label', I18n.format(options.editLangKey, true));
     }
 
+    const copyLangKey: LangPackKey = options.copyFrame ? 'MediaViewer.Context.CopyFrame' : 'MediaViewer.Context.Copy';
+    if(this.btnMenuCopyText.key !== copyLangKey) {
+      this.btnMenuCopyText.compareAndUpdate({key: copyLangKey});
+      this.buttons.copy.setAttribute('aria-label', I18n.format(copyLangKey, true));
+    }
+
+    this.canShareAtTime = !(options.cantShareAtTime ?? true);
+
     const actions: [(HTMLElement | ButtonMenuItemOptionsVerifiable)[], boolean][] = [
       [[this.buttons.edit, this.btnMenuEdit], options.cantEdit],
       [[this.buttons.forward, this.btnMenuForward], options.cantForward],
       [[this.buttons.copy, this.btnMenuCopy], options.cantCopy],
       [[this.buttons.download, this.btnMenuDownload], options.cantDownload],
+      [[this.btnMenuSetMainPhoto], options.cantSetMainPhoto ?? true],
+      [[this.btnMenuReportPhoto], options.cantReportPhoto ?? true],
       [[this.buttons.delete, this.btnMenuDelete], options.cantDelete]
     ];
 
     actions.forEach(([buttons, hide]) => {
       buttons.forEach((button) => {
         if(button instanceof HTMLElement) {
+          // * hidden on every page until its rights come: with the keyboard layer, the focus it holds stays in the
+          // * viewer rather than dropping to the page's body
+          if(hide && Modes.a11y && button.contains(button.ownerDocument.activeElement)) {
+            this.wholeDiv.focus({preventScroll: true});
+          }
           button.classList.toggle('hide', hide);
         } else {
           button.verify = () => !hide;
@@ -474,6 +738,7 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
     });
 
     this.wholeDiv.classList.toggle('no-forwards', options.cantDownload);
+    this.updateMoreMenu();
   }
 
   public openMedia({
@@ -497,10 +762,11 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
     /* , needLoadMore = true */
   }) {
     if(this.setMoverPromise) return this.setMoverPromise;
+    if(this.isAskedTooLate()) return Promise.resolve();
 
     const mid = message.mid;
     const fromId = (message as Message.message).fwd_from && !message.fromId ? getFwdFromName((message as Message.message).fwd_from) : message.fromId;
-    const media = getMediaFromMessage(message, true, index);
+    const media = getMediaFromMessageOrRich(message, index);
 
     const isSponsored = !!(message as Message.message).pFlags.sponsored || !message.fromId;
     const noAuthor = isSponsored;
@@ -515,8 +781,8 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
     const canOpenEditor = !this.local &&
       !isSponsored &&
       canEditMessageMediaWithEditor(message as Message.message) &&
-      appImManager.chat?.peerId === message.peerId &&
-      !!appImManager.chat.input?.messageInput;
+      hotReloadGuard.appImManager.chat?.peerId === message.peerId &&
+      !!hotReloadGuard.appImManager.chat.input?.messageInput;
 
     // Start with a conservative state, but do not put worker-proxy permission checks
     // in front of the first animation frame. The controls reconcile as soon as all
@@ -528,13 +794,27 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
       isServiceMessage || noAuthor ? Promise.resolve(false) : this.managers.appMessagesManager.canForward(message),
       isChatPhotoEdit ?
         this.managers.appChatsManager.hasRights(message.peerId.toChatId(), 'change_info') :
-        this.managers.appMessagesManager.canDeleteMessage(message),
+        // * a local message (an Instant View's, a bot's preview) is in no history to be deleted from
+        this.local ? Promise.resolve(false) : this.managers.appMessagesManager.canDeleteMessage(message),
       canOpenEditor ? this.managers.appMessagesManager.canEditMessage(message, 'text') : Promise.resolve(false)
     ]);
 
     this.removeTimestamps();
     this.setCaption(message);
 
+    // * before the base class sizes the media: the strip takes room under it. The list is set on the
+    // * first open only, from the targets given here
+    this.setAlbumThumbs(
+      message,
+      index,
+      this.isFirstOpen ? prevTargets : this.listLoader.previous,
+      this.isFirstOpen ? nextTargets : this.listLoader.next
+    );
+
+    // * a video shared at a moment ("Share at 0:42") starts there, as in tdesktop; a seek asked for (a timestamp
+    // * link) goes first
+    const messageMedia = (message as Message.message).media;
+    const sharedAt = messageMedia?._ === 'messageMediaDocument' ? messageMedia.video_timestamp || undefined : undefined;
     const promise = super._openMedia({
       media: media as MyPhoto | MyDocument,
       timestamp: message.date,
@@ -545,7 +825,7 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
       prevTargets,
       nextTargets,
       message,
-      mediaTimestamp,
+      mediaTimestamp: mediaTimestamp ?? sharedAt,
       noAuthor
       /* , needLoadMore */
     });
@@ -554,20 +834,37 @@ export default class AppMediaViewer extends AppMediaViewerBase<'caption', 'delet
     this.target.message = message;
     this.target.index = index;
 
+    if(!noAuthor) {
+      this.setPositionCounter();
+    }
+
     void permissionsPromise.then(([noForwards, canForward, canDelete, canEdit]) => {
       if(this.target?.message !== message) return;
       const cantForward = !canForward;
       const cantDownload = (isServiceMessage ? noForwards : cantForward && !isSponsored) || !canSaveMessageMedia(message, noForwards);
-      const cantCopy = cantDownload || !canCopyMediaToClipboard(media);
+      const copyFrame = canCopyVideoFrameToClipboard(media as MyDocument);
+      const cantCopy = cantDownload || !(copyFrame || canCopyMediaToClipboard(media));
       const cantDelete = !canDelete;
       this.deleteAsChatPhoto = isChatPhotoEdit && !cantDelete;
+      // * a chat's photo: the right asked for it is to change the chat's info
+      const photoActions = isChatPhotoEdit && (media as MyPhoto)?._ === 'photo' ? getPeerProfilePhotoActions({
+        peerId: message.peerId,
+        photoId: (media as MyPhoto).id,
+        canChangeInfo: canDelete
+      }) : undefined;
+      // * the message's own video, not a link preview's, as tdesktop has it
+      const isOwnVideo = (message as Message.message).media?._ === 'messageMediaDocument' && (media as MyDocument)?.type === 'video';
       this.setMessageActionVisibility({
         cantForward,
         cantCopy,
         cantDownload,
         cantDelete,
         cantEdit: !canEdit,
-        editLangKey: getEditMediaLangKey(message as Message.message)
+        cantShareAtTime: cantForward || !isOwnVideo,
+        cantSetMainPhoto: !photoActions?.canSetMain,
+        cantReportPhoto: !photoActions?.canReport,
+        editLangKey: getEditMediaLangKey(message as Message.message),
+        copyFrame
       });
     }).catch((error) => {
       this.log.warn('failed to resolve media viewer actions', error);

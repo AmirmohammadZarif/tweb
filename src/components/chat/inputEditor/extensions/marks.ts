@@ -1,6 +1,65 @@
-import {Mark, mergeAttributes} from '@tiptap/core';
+import {Mark, markInputRule, markPasteRule, mergeAttributes} from '@tiptap/core';
+import {
+  Bold,
+  starInputRegex as doubleStarInputRegex,
+  starPasteRegex as doubleStarPasteRegex,
+  underscoreInputRegex as doubleUnderscoreInputRegex,
+  underscorePasteRegex as doubleUnderscorePasteRegex
+} from '@tiptap/extension-bold';
+import {Italic} from '@tiptap/extension-italic';
+import {Strike} from '@tiptap/extension-strike';
+import {Underline} from '@tiptap/extension-underline';
 import classNames from '@helpers/string/classNames';
 import {isAllowedLinkHref} from '@helpers/string/normalizeLinkUrl';
+
+// The marks' keys are Ctrl (Cmd on a Mac) and the letter, nothing more. Tiptap also binds the capital
+// letter, which ProseMirror's keymap matches with Shift held — Ctrl+Shift+B is the browser's bookmarks bar,
+// Ctrl+Shift+I its DevTools — and strikethrough to Ctrl+Shift+S, a screenshot in Firefox: strikethrough is
+// Ctrl+S on a selection (handleMarkdownShortcut). A capital from Caps Lock still finds the lowercase binding
+// by the key's code.
+
+// Typed and pasted markdown is Telegram's, not CommonMark's: `**` is bold and `__` italic, as in
+// every official client and in the parser a sent message goes through (MARKDOWN_ENTITIES), and a
+// single `*` or `_` marks nothing. Tiptap's own rules read `__` as bold and `*` / `_` as italic.
+export const ChatBold = Bold.extend({
+  addKeyboardShortcuts() {
+    return {'Mod-b': () => this.editor.commands.toggleBold()};
+  },
+
+  addInputRules() {
+    return [markInputRule({find: doubleStarInputRegex, type: this.type})];
+  },
+
+  addPasteRules() {
+    return [markPasteRule({find: doubleStarPasteRegex, type: this.type})];
+  }
+});
+
+export const ChatItalic = Italic.extend({
+  addKeyboardShortcuts() {
+    return {'Mod-i': () => this.editor.commands.toggleItalic()};
+  },
+
+  addInputRules() {
+    return [markInputRule({find: doubleUnderscoreInputRegex, type: this.type})];
+  },
+
+  addPasteRules() {
+    return [markPasteRule({find: doubleUnderscorePasteRegex, type: this.type})];
+  }
+});
+
+export const ChatUnderline = Underline.extend({
+  addKeyboardShortcuts() {
+    return {'Mod-u': () => this.editor.commands.toggleUnderline()};
+  }
+});
+
+export const ChatStrike = Strike.extend({
+  addKeyboardShortcuts() {
+    return {};
+  }
+});
 
 const DATE_FLAGS = [
   'relative',
@@ -133,7 +192,13 @@ export const ChatMentionName = Mark.create({
   parseHTML() {
     return [{
       tag: 'a.follow[data-follow]',
-      getAttrs: (element) => ({userId: element.getAttribute('data-follow')})
+      // ahead of the link's `a[href]`: a mention's href is the user id, and as a link it would be one to "#42"
+      priority: 51,
+      getAttrs: (element) => {
+        // any pasted HTML can bring `data-follow`: only a user id makes a mention
+        const follow = element.getAttribute('data-follow');
+        return /^\d+$/.test(follow) && +follow ? {userId: follow} : false;
+      }
     }];
   },
 

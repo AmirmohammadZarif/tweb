@@ -1,5 +1,6 @@
 @use "sass:math";
 @use "../../shared" as *;
+@use "popupVariables" as *;
 
 .popup-new-media {
   --popup-width: 420px;
@@ -41,26 +42,19 @@
   .scrollable {
     position: relative;
   }
-
-  .btn-menu-overlay {
-    z-index: 3;
-  }
-
-  .menu-send {
-    z-index: 4;
-    top: calc(100% + .25rem);
-  }
 }
 
 .popup-new-media.popup-send-photo {
-  .menu-send {
-    top: unset;
-    bottom: 4.5rem;
-    right: var(--section-padding-inline);
+  // The files' card ends flush with the media box, the scroll and the body, which all clip, so its
+  // shadow was cut off. The box keeps room for it inside all three, and the body hands those pixels
+  // straight back to the caption below, which stays put (as the shell's scroll does, `_popup.scss`).
+  .popup-photo {
+    padding-bottom: $popup-scroll-bleed;
   }
 
   .popup-body {
     position: relative;
+    margin-bottom: -$popup-scroll-bleed;
   }
 
   .scrollable {
@@ -69,7 +63,7 @@
 
   .checkbox-field {
     margin-bottom: 0;
-    margin-left: 0;
+    margin-inline-start: 0;
   }
 
   .popup-item-album {
@@ -113,7 +107,7 @@
     --height: calc(var(--messages-time-text-size) + .375rem);
     position: absolute;
     top: .75rem;
-    left: .75rem;
+    inset-inline-start: .75rem;
     border-radius: var(--height);
     background-color: var(--message-time-background);
     padding: 0px 6px;
@@ -140,6 +134,12 @@
     border-radius: 0;
   }
 
+  // room at a file's end for its delete button, which shows over it on a hover and always on touch
+  .document,
+  .popup-item-document .audio {
+    padding-inline-end: 3.5rem;
+  }
+
   .document {
     --icon-margin: .5rem;
     --icon-size: 3rem;
@@ -147,7 +147,6 @@
     border-radius: $border-radius-medium;
     cursor: default;
     height: 3.5rem;
-    padding-inline-end: 3.5rem;
 
     @include hover-background-effect() {
       --message-background-color: var(--light-filled-secondary-text-color);
@@ -173,6 +172,8 @@
     .is-touch & {
       opacity: 1;
     }
+
+    @include reveal-on-focus;
   }
 
   .document {
@@ -201,16 +202,6 @@
     &-size {
       color: var(--input-placeholder-color);
       margin-top: .125rem;
-    }
-  }
-
-  .btn-menu-reactions {
-    &-container {
-      --bubble-side-offset: 0;
-    }
-
-    &-bubble {
-      display: none;
     }
   }
 

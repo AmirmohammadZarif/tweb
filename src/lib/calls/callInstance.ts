@@ -16,7 +16,6 @@ import safeAssign from '@helpers/object/safeAssign';
 import {InputPhoneCall, PhoneCall, PhoneCallDiscardReason, PhoneCallProtocol, PhoneConnection} from '@layer';
 import {emojiFromCodePoints} from '@vendor/emoji';
 import type {CallId} from '@appManagers/appCallsManager';
-import type {AppManagers} from '@lib/managers';
 import {logger} from '@lib/logger';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import CallInstanceBase from '@lib/calls/callInstanceBase';
@@ -38,6 +37,7 @@ import {black, silence} from '@lib/calls/p2P/fallbackMedia';
 import P2PConnectionRecovery, {P2PRecoveryTrigger} from '@lib/calls/p2P/connectionRecovery';
 import P2PCallStats, {P2PCallStatsReport} from '@lib/calls/p2P/callStats';
 import watchLowBattery from '@lib/calls/p2P/lowBattery';
+import {describeNoiseSuppressionStatus, getNoiseSuppressionStatus} from '@lib/calls/noiseSuppression/noiseSuppression';
 import {
   ActiveLocalMedia,
   buildIceServers,
@@ -231,7 +231,6 @@ export default class CallInstance extends CallInstanceBase<{
   // `signalBars`.
   public signalBars: number | undefined;
 
-  private managers: AppManagers;
   private hangUpTimeout: number;
   private hangUpStarted = false;
 
@@ -370,6 +369,8 @@ export default class CallInstance extends CallInstanceBase<{
     isOutgoing: boolean,
     interlocutorUserId: UserId,
     managers: CallInstance['managers'],
+    accountNumber?: CallInstance['accountNumber'],
+    myId?: PeerId,
     protocol?: PhoneCallProtocol
   }) {
     super();
@@ -381,6 +382,8 @@ export default class CallInstance extends CallInstanceBase<{
     }
 
     safeAssign(this, options);
+    this.bindAccount();
+    this.addEventListener('id', (id) => this.heldCall.setId(id));
 
     this.createdAt = performance.now();
     this.joined = false;
@@ -454,23 +457,27 @@ export default class CallInstance extends CallInstanceBase<{
       element.autoplay = true;
       element.muted = true;
       element.setAttribute('playsinline', 'true');
-      // Mirror ONLY our own self-view (`type === 'input'`), never the remote
-      // peer's video — same rule as callInstanceBase.tryAddTrack and every
-      // other client (iOS/tgcalls, FaceTime, …). The flip is a local "looking
-      // in a mirror" convenience; the wire carries un-mirrored frames, so the
-      // peer sees us as in real life. Mirroring their feed would invert any
-      // text they hold up. Rear-facing own camera (`facingMode === 'environment'`)
-      // stays un-mirrored — handled by shouldMirrorVideoTrack.
-      const track = stream.getVideoTracks()[0];
-      if(type === 'input' && shouldMirrorVideoTrack(track)) {
-        element.classList.add('call-video-mirror');
-      }
       this.videoElements.set(type, element);
     }
 
     if(element.srcObject !== stream) {
       element.srcObject = stream;
     }
+
+    // Mirror ONLY our own self-view (`type === 'input'`), never the remote
+    // peer's video — same rule as callInstanceBase.tryAddTrack and every
+    // other client (iOS/tgcalls, FaceTime, …). The flip is a local "looking
+    // in a mirror" convenience; the wire carries un-mirrored frames, so the
+    // peer sees us as in real life. Mirroring their feed would invert any
+    // text they hold up. Rear-facing own camera (`facingMode === 'environment'`)
+    // stays un-mirrored — handled by shouldMirrorVideoTrack — and so does our
+    // screen, whatever its track says of itself. The element stays while its
+    // stream changes (the camera, then the screen, then the camera again), so
+    // it is mirrored for the stream it shows now.
+    element.classList.toggle(
+      'call-video-mirror',
+      type === 'input' && stream !== streams.ownPresentation && shouldMirrorVideoTrack(stream.getVideoTracks()[0])
+    );
 
     return element;
   }
@@ -953,6 +960,11 @@ export default class CallInstance extends CallInstanceBase<{
 
     const stats = this.p2p?.stats;
     if(stats) {
+      const noiseSuppression = getNoiseSuppressionStatus(getStreamTrack(this.p2p.streams.ownAudio));
+      if(noiseSuppression) {
+        stats.addEvent(describeNoiseSuppressionStatus(noiseSuppression));
+      }
+
       stats.addEvent(`hang up: ${discardReason?._ ?? 'none'}${discardedByOtherParty ? ' (by the peer)' : ''}`);
       if(discardReason?._ === 'phoneCallDiscardReasonDisconnect' && this.p2pConnectionState !== 'connected') {
         stats.setFailed();
@@ -1415,6 +1427,10 @@ export default class CallInstance extends CallInstanceBase<{
       });
       throw err;
     }
+  }
+
+  public getInputAudioTrack() {
+    return getStreamTrack(this.p2p?.streams.ownAudio);
   }
 
   // A microphone track (not the silent placeholder) that has not ended: it

@@ -1,4 +1,5 @@
 import {createSignal, For} from 'solid-js';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 import PopupElement, {createPopup} from '@components/popups/indexTsx';
 import Button from '@components/buttonTsx';
 import rootScope from '@lib/rootScope';
@@ -18,7 +19,7 @@ import type {CrmTelegramLoginAccount} from '@lib/crm/types';
  * rotated while the agent was choosing is never sent stale.
  */
 export async function startCrmTelegramLogin(getToken: () => string | undefined): Promise<void> {
-  const crm = rootScope.managers.appCrmManager;
+  const crm = bindManagersToSession(rootScope.managers).appCrmManager;
   if(!(await crm.isConnected())) {
     showCrmLoginPopup(() => void startCrmTelegramLogin(getToken));
     return;

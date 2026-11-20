@@ -2,7 +2,7 @@ import type AppMediaViewerBase from '@components/mediaViewer/base';
 import showSharedFolderInvitePopup from '@components/popups/sharedFolderInvite';
 import showJoinChatInvitePopup from '@components/popups/joinChatInvite';
 import {createPaymentPopup} from '@components/popups/payment';
-import showPeerPopup from '@components/popups/peer';
+import confirmOpenUrl from '@components/popups/confirmOpenUrl';
 import {showPickUser3Popup, showSharingPicker2Popup} from '@components/popups/pickUser';
 import showStickersPopup from '@components/popups/stickers';
 import {toastNew, hideToast} from '@components/toast';
@@ -10,6 +10,7 @@ import {MOUNT_CLASS_TO} from '@config/debug';
 import IS_GROUP_CALL_SUPPORTED from '@environment/groupCallSupport';
 import {CONFERENCE_CALL_SLUG_REGEXP} from '@lib/calls/constants';
 import addAnchorListener, {listenForMaskedAnchorAuxClicks} from '@helpers/addAnchorListener';
+import {PROXY_LINK_TYPES} from '@lib/richTextProcessor/wrapUrl';
 import assumeType from '@helpers/assumeType';
 import findUpAttribute from '@helpers/dom/findUpAttribute';
 import findUpClassName from '@helpers/dom/findUpClassName';
@@ -17,10 +18,10 @@ import {User, AttachMenuPeerType, MessagesBotApp, BotApp, ChatlistsChatlistInvit
 import {i18n, LangPackKey, _i18n} from '@lib/langPack';
 import {PHONE_NUMBER_REG_EXP} from '@lib/richTextProcessor';
 import {isWebAppNameValid} from '@lib/richTextProcessor/validators';
-import appImManager, {APP_TABS, JoinConferenceOptions} from '@lib/appImManager';
+import appImManager, {JoinConferenceOptions} from '@lib/appImManager';
 import {makeFullMid} from '@appManagers/utils/messages/fullMid';
 import {INTERNAL_LINK_TYPE, InternalLinkTypeMap, InternalLink} from '@lib/internalLink';
-import {AppManagers} from '@lib/managers';
+import {TabManagers} from '@lib/managers';
 import {createStoriesViewerWithPeer} from '@components/stories/viewer';
 import {simulateClickEvent} from '@helpers/dom/clickEvent';
 import shake from '@helpers/dom/shake';
@@ -31,6 +32,7 @@ import showBoostPopup from '@components/popups/boost';
 import showGiftLinkPopup from '@components/popups/giftLink';
 import showStarsPopup, {showGiftStarsPicker} from '@components/popups/stars';
 import showSendGiftPopup from '@components/popups/sendGift';
+import showMyQrCodePopup from '@components/popups/myQrCode';
 import showSendGiftPicker from '@components/popups/sendGiftPicker';
 import type {RequestWebViewOptions} from '@appManagers/appAttachMenuBotsManager';
 import {prefetchStars} from '@stores/stars';
@@ -42,7 +44,7 @@ import appSidebarRight from '@components/sidebarRight';
 import pause from '@helpers/schedulers/pause';
 import namedPromises from '@helpers/namedPromises';
 import {openInstantViewInAppBrowser} from '@components/browser';
-import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
+import SolidJSHotReloadGuardProvider, {registerHotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import appSidebarLeft from '@components/sidebarLeft';
 import {AppContactsTab} from '@components/solidJsTabs/tabs';
@@ -55,11 +57,38 @@ import showBirthdayPopup, {saveMyBirthday} from '@components/popups/birthday';
 import {getStickerSetInputByShortName} from '@lib/appManagers/utils/stickers/getStickerSetInput';
 import {AppMyStoriesTab} from '@components/solidJsTabs/tabs';
 import showAddBotToChat from '@components/popups/addBotToChat';
+import {isJoinVoiceChatAnchor} from '@components/wrappers/joinVoiceChatAnchor';
 import getBotAddToChatScope from '@appManagers/utils/bots/getBotAddToChatScope';
 import parseBotAdminRights from '@appManagers/utils/bots/parseBotAdminRights';
 import isEphemeralMessage from '@appManagers/utils/messages/isEphemeralMessage';
 import parseChatSpecificTag from '@lib/richTextProcessor/parseChatSpecificTag';
 import searchByTag from '@lib/richTextProcessor/searchByTag';
+import {APP_TABS} from '@lib/appColumns';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
+import openBankCardMenu from '@components/bankCardMenu';
+import confirmationPopup from '@components/confirmationPopup';
+import wrapPeerTitle from '@components/wrappers/peerTitle';
+import wrapRichText from '@lib/richTextProcessor/wrapRichText';
+import {getManagersSession, isSessionLeaving} from '@lib/accounts/getCurrentAccount';
+import {isWalletReleased} from '@lib/wallet/release';
+import {tryDecodeURIComponent} from '@helpers/string/parseUriParams';
+import type {AppManagers} from '@lib/managers';
+
+/**
+ * For a lookup whose failure is only a miss: any error is one but MIDDLEWARE, the end of the account
+ * session it was asked in - the flow it belongs to stops there rather than go on as a miss on the
+ * account the tab shows now.
+ */
+const missUnlessSessionEnded = (err: ApiError): undefined => {
+  if(err?.type === 'MIDDLEWARE') {
+    throw err;
+  }
+
+  return undefined;
+};
+
+// what a free-messages link says comes this long after its chat opens (Android's 300 ms)
+const NO_PAID_TOKEN_TOAST_DELAY = 300;
 
 /**
  * A link whose section we know but whose path we do not — the one thing worse
@@ -71,11 +100,11 @@ const showUnsupportedLinkToast = () => {
 };
 
 export class InternalLinkProcessor {
-  protected managers: AppManagers;
+  protected managers: TabManagers;
   private processingAddAiStyleSlugs: Set<string> = new Set();
   private tagSearchVersion = 0;
 
-  private showUsernameResolveError(err: ApiError) {
+  public showUsernameResolveError(err: ApiError) {
     if(err.type === 'USERNAME_NOT_OCCUPIED') {
       toastNew({langPackKey: 'NoUsernameFound'});
     } else if(err.type === 'USERNAME_INVALID') {
@@ -83,7 +112,17 @@ export class InternalLinkProcessor {
     }
   }
 
-  public construct(managers: AppManagers) {
+  /**
+   * Asks before a link goes where its address points - a masked link's real address, a tg:// link
+   * this client cannot open - and Open follows it as a plain link, within that press of the button.
+   */
+  private showOpenUrlAlert(element: HTMLAnchorElement) {
+    const a = element.cloneNode(true) as HTMLAnchorElement;
+    a.removeAttribute('onclick');
+    confirmOpenUrl(a);
+  }
+
+  public construct(managers: TabManagers) {
     this.managers = managers;
 
     // a middle click never reaches an anchor's inline `onclick`, so the alert below is wired to it
@@ -92,27 +131,29 @@ export class InternalLinkProcessor {
 
     addAnchorListener<{}>({
       name: 'showMaskedAlert',
-      callback: ({element}) => {
-        const href = element.href;
-
-        const a = element.cloneNode(true) as HTMLAnchorElement;
-        a.className = 'anchor-url';
-        a.innerText = href;
-        a.removeAttribute('onclick');
-
-        showPeerPopup('popup-masked-url', {
-          titleLangKey: 'OpenUrlTitle',
-          descriptionLangKey: 'OpenUrlAlert2',
-          descriptionLangArgs: [a],
-          buttons: [{
-            langKey: 'Open',
-            callback: () => {
-              a.click();
-            }
-          }]
-        });
-      }
+      callback: ({element}) => this.showOpenUrlAlert(element)
     });
+
+    // a tg:// link that nothing below handles (wrapUrl names this handler for it)
+    addAnchorListener<{}>({
+      name: 'unknownDeepLink',
+      noPathnameParams: true,
+      noUriParams: true,
+      callback: ({element}) => this.processUnknownDeepLink(element)
+    });
+
+    // * a proxy to connect to (t.me/proxy?…, t.me/socks?…, tg://proxy?…, tg://socks?…): a browser cannot
+    // * reach Telegram through one, so it is a link this client does not open, never the profile @proxy
+    PROXY_LINK_TYPES.forEach((name) => {
+      addAnchorListener({name, noPathnameParams: true, noUriParams: true, callback: showUnsupportedLinkToast});
+      addAnchorListener({name, protocol: 'tg', noPathnameParams: true, noUriParams: true, callback: showUnsupportedLinkToast});
+    });
+
+    // a bank card number in a text (wrapRichText) is a link to its menu, not to anywhere
+    (window as any).onBankCardClick = (element: HTMLElement, e: MouseEvent) => {
+      cancelEvent(e);
+      openBankCardMenu(element, e);
+    };
 
     addAnchorListener<{uriParams: {command: string, bot: string}}>({
       name: 'execBotCommand',
@@ -120,7 +161,8 @@ export class InternalLinkProcessor {
         const {command, bot} = uriParams;
         const chat = appImManager.chat;
         let sendingParams = chat.input?.getEphemeralSendingSnapshot() || {
-          peerId: chat.peerId
+          peerId: chat.peerId,
+          threadId: chat.threadId
         };
         const bubble = findUpClassName(element, 'bubble');
         if(
@@ -277,9 +319,10 @@ export class InternalLinkProcessor {
       }>({
         name: 'voicechat',
         protocol: 'tg',
-        callback: ({uriParams}) => {
+        callback: ({uriParams, element}) => {
           const link = this.makeLink(INTERNAL_LINK_TYPE.VOICE_CHAT, uriParams);
-          return this.processInternalLink(link);
+          // * straight to the handler: only here is it known whether the press was on the chat's own "join"
+          return this.processVoiceChatLink(link, {fromServiceMessage: isJoinVoiceChatAnchor(element)});
         }
       });
 
@@ -317,14 +360,14 @@ export class InternalLinkProcessor {
       });
     }
 
-    type K1 = {thread?: string, comment?: string, t?: string, option?: string};
-    type K2 = {thread?: string, comment?: string, start?: string, startgroup?: string, startchannel?: string, admin?: string, t?: string, text?: string, option?: string};
+    type K1 = {thread?: string, comment?: string, t?: string, option?: string, single?: string};
+    type K2 = {thread?: string, comment?: string, start?: string, startgroup?: string, startchannel?: string, admin?: string, t?: string, text?: string, option?: string, single?: string, game?: string, free?: string};
     type K3 = {startattach?: string, attach?: string, choose?: TelegramChoosePeerType};
     type K4 = {startapp?: string, mode?: 'compact' | 'fullscreen'};
     type K5 = {story?: string};
     type K6 = {boost?: string};
     type K7 = {voicechat?: string, videochat?: string, livestream?: string};
-    type K8 = {text?: string};
+    type K8 = {text?: string, free?: string};
 
     addAnchorListener<{
     //   pathnameParams: ['c', string, string],
@@ -337,6 +380,11 @@ export class InternalLinkProcessor {
     }>({
       name: 'im',
       callback: async({pathnameParams, uriParams, element, masked}) => {
+        // t.me/s/<username> is the web page of a chat, and names it as t.me/<username> does (Android reads it so)
+        if(pathnameParams?.[0] === 's' && pathnameParams.length > 1) {
+          pathnameParams = pathnameParams.slice(1) as typeof pathnameParams;
+        }
+
         let link: InternalLink;
         if('voicechat' in uriParams || 'videochat' in uriParams || 'livestream' in uriParams) {
           assumeType<K7>(uriParams);
@@ -374,7 +422,8 @@ export class InternalLinkProcessor {
           link = {
             _: INTERNAL_LINK_TYPE.USER_PHONE_NUMBER,
             phone: pathnameParams[0],
-            text: (uriParams as K8).text
+            text: (uriParams as K8).text,
+            free: (uriParams as K8).free
           };
         } else if(pathnameParams[0] === 'c') {
           assumeType<K1>(uriParams);
@@ -388,7 +437,8 @@ export class InternalLinkProcessor {
             comment: uriParams.comment,
             option: 'option' in uriParams ? uriParams.option : undefined,
             stack: appImManager.getStackFromElement(element),
-            t: uriParams.t
+            t: uriParams.t,
+            single: uriParams.single
           };
         } else if(pathnameParams[1] ? isWebAppNameValid(pathnameParams[1]) : (uriParams as K4).startapp !== undefined) {
           assumeType<K4>(uriParams);
@@ -416,7 +466,10 @@ export class InternalLinkProcessor {
             option: 'option' in uriParams ? uriParams.option : undefined,
             stack: appImManager.getStackFromElement(element),
             t: uriParams.t,
-            text: uriParams.text
+            text: uriParams.text,
+            single: uriParams.single,
+            game: uriParams.game,
+            free: uriParams.free
           };
         }
 
@@ -465,13 +518,20 @@ export class InternalLinkProcessor {
         appname?: string,
         startapp?: string,
         compact?: string,
-        story?: string
+        story?: string,
+        single?: string,
+        free?: string
       }
     }>({
       name: 'resolve',
       protocol: 'tg',
       callback: ({uriParams, element, masked}) => {
         let link: InternalLink;
+        // * a dApp's request addressed to the wallet by name
+        if(isWalletReleased() && uriParams.domain?.toLowerCase() === 'sendgrams' && uriParams.startapp?.startsWith('tonconnect-')) {
+          return this.processInternalLink(this.makeLink(INTERNAL_LINK_TYPE.TON_CONNECT, {url: element.href}));
+        }
+
         if(uriParams.voicechat !== undefined || uriParams.videochat !== undefined || uriParams.livestream !== undefined) {
           link = this.makeLink(INTERNAL_LINK_TYPE.VOICE_CHAT, uriParams as Required<typeof uriParams>);
         } else if(uriParams.story) {
@@ -507,7 +567,8 @@ export class InternalLinkProcessor {
         channel: string,
         post: string,
         thread?: string,
-        comment?: string
+        comment?: string,
+        single?: string
       }
     }>({
       name: 'privatepost',
@@ -676,6 +737,98 @@ export class InternalLinkProcessor {
         return this.processInternalLink(link);
       }
     });
+
+    // * the wallet's links (Grams to send, TON Connect, a TON address's menu) are known only once it is released:
+    // * till then they stay what they were — a username, an unknown tg:// link, a plain one
+    if(isWalletReleased()) {
+      // t.me/sendgrams?to=@user&amount=…&text=…&encrypted=1 and tg://sendgrams?to=…
+      type SendGramsParams = {to?: string, amount?: string, text?: string, comment?: string, encrypted?: string, startapp?: string, id?: string, v?: string, r?: string};
+      const onSendGrams = ({uriParams, element}: {uriParams: SendGramsParams, element?: HTMLAnchorElement}) => {
+        // * with TON Connect's fields (id, v, r or a `tonconnect-` start parameter) the wallet's link is a dApp's
+        if(uriParams.startapp?.startsWith('tonconnect-') || uriParams.id !== undefined || uriParams.v !== undefined || uriParams.r !== undefined) {
+          return this.processInternalLink(this.makeLink(INTERNAL_LINK_TYPE.TON_CONNECT, {url: element.href}));
+        }
+
+        // * a link that names two recipients or two amounts means neither (iOS)
+        try {
+          const search = new URL(element.href).searchParams;
+          if(search.getAll('to').length > 1 || search.getAll('amount').length > 1) {
+            return;
+          }
+        } catch(err) {}
+
+        const link = this.makeLink(INTERNAL_LINK_TYPE.WALLET_SEND, {
+          to: uriParams.to,
+          amount: uriParams.amount,
+          text: uriParams.text || uriParams.comment,
+          encrypted: uriParams.encrypted
+        });
+        return this.processInternalLink(link);
+      };
+
+      addAnchorListener<{uriParams: SendGramsParams}>({
+        name: 'sendgrams',
+        callback: onSendGrams
+      });
+
+      addAnchorListener<{uriParams: SendGramsParams}>({
+        name: 'sendgrams',
+        protocol: 'tg',
+        callback: onSendGrams
+      });
+
+      // * a connected app's request is shown as it arrives in the service chat (iOS, tdesktop): TON Connect's code is
+      // * loaded for the first one only
+      rootScope.addEventListener('wallet_tonconnect_request', (action) => {
+        if(action.accepted || action.declined) return;
+        import('@components/wallet/tonConnect').then(({queueTonConnectRequest}) => queueTonConnectRequest(action));
+      });
+
+      // tc://?v=2&id=…&r=… and tg://ton-connect?…: a dApp connecting to the wallet
+      const onTonConnect = ({element}: {element?: HTMLAnchorElement}) => {
+        return this.processInternalLink(this.makeLink(INTERNAL_LINK_TYPE.TON_CONNECT, {url: element.href}));
+      };
+
+      addAnchorListener<{}>({
+        name: 'tonconnect',
+        protocol: 'tc',
+        noPathnameParams: true,
+        noUriParams: true,
+        callback: onTonConnect
+      });
+
+      addAnchorListener<{}>({
+        name: 'ton-connect',
+        protocol: 'tg',
+        noPathnameParams: true,
+        noUriParams: true,
+        callback: onTonConnect
+      });
+
+      // * a TON address in a message (tg://sendgrams?to=<address>): the menu of what can be done with it
+      addAnchorListener<{uriParams: {to?: string}}>({
+        name: 'openTonAddress',
+        noPathnameParams: true,
+        callback: ({uriParams, element, event}) => {
+          const address = uriParams.to || element.textContent;
+          import('@components/wallet/addressMenu').then(({default: openTonAddressMenu}) => {
+            return openTonAddressMenu({address, element, event});
+          });
+        }
+      });
+
+      // ton://transfer/<address>?amount=…&text=…
+      addAnchorListener<{}>({
+        name: 'transfer',
+        protocol: 'ton',
+        noPathnameParams: true,
+        noUriParams: true,
+        callback: ({element}) => {
+          const link = this.makeLink(INTERNAL_LINK_TYPE.WALLET_SEND, {tonLink: element.href});
+          return this.processInternalLink(link);
+        }
+      });
+    }
 
     // tg://stars_topup?amount=100
     addAnchorListener<{
@@ -918,6 +1071,13 @@ export class InternalLinkProcessor {
           case 'send-gift/self':
             return showSendGiftPopup({peerId: rootScope.myId});
 
+          // the own QR code, as tdesktop and Android open it; `/share` points at its Share button (tdesktop), where
+          // Android presses it
+          case 'qr-code':
+            return showMyQrCodePopup();
+          case 'qr-code/share':
+            return showMyQrCodePopup(rootScope.myId, {highlightShare: true});
+
           // destinations outside Settings, which the section table cannot address
           case 'saved-messages':
             return appImManager.setPeer({peerId: appImManager.myId});
@@ -930,6 +1090,16 @@ export class InternalLinkProcessor {
             });
           case 'ton':
             return showStarsPopup({ton: true});
+
+          // tdesktop, Android and iOS open the change-email screen itself, which
+          // is what the Login Email row does — not the row to point at
+          case 'login_email':
+            return Promise.all([
+              this.managers.passwordManager.getState(),
+              import('@components/sidebarLeft/tabs/changeLoginEmail')
+            ]).then(([passwordState, {openChangeLoginEmailTab}]) => {
+              return openChangeLoginEmailTab(appSidebarLeft, passwordState);
+            });
 
           default:
             // Every section the settings search indexes is addressable — see
@@ -1013,10 +1183,38 @@ export class InternalLinkProcessor {
         return this.processInternalLink(link);
       }
     });
+
+    // t.me/contact/<token>?free=<code>
+    addAnchorListener<{pathnameParams: ['contact', string], uriParams: {free?: string}}>({
+      name: 'contact',
+      callback: ({pathnameParams, uriParams}) => {
+        // the path keeps the token percent-encoded; a broken escape leaves it as it came, a dead link
+        const token = tryDecodeURIComponent(pathnameParams[1] || '');
+
+        const link: InternalLink = {
+          _: INTERNAL_LINK_TYPE.CONTACT_TOKEN,
+          token,
+          free: uriParams.free
+        };
+
+        return this.processInternalLink(link);
+      }
+    });
+
+    // tg://contact?token=<token>&free=<code>
+    addAnchorListener<{uriParams: {token?: string, free?: string}}>({
+      name: 'contact',
+      protocol: 'tg',
+      callback: ({uriParams}) => {
+        const link = this.makeLink(INTERNAL_LINK_TYPE.CONTACT_TOKEN, {token: uriParams.token || '', free: uriParams.free});
+        return this.processInternalLink(link);
+      }
+    });
   }
 
   /** What `tg://chats/emoji-status` — and its `tg://settings` alias — opens. */
   private showEmojiStatusPicker() {
+    const managers = bindManagersToSession(this.managers);
     // iOS opens the picker itself, from where it always opens — for us
     // that is the status button in the chat list header.
     const statusBtn = appSidebarLeft.sidebarEl.querySelector<HTMLElement>('.sidebar-emoji-status');
@@ -1046,7 +1244,7 @@ export class InternalLinkProcessor {
 
       const {openEmojiStatusPicker} = await import('@components/sidebarLeft/emojiStatusPicker');
       openEmojiStatusPicker({
-        managers: this.managers,
+        managers,
         anchorElement: statusBtn.closest('.sidebar-header')
       });
     });
@@ -1080,11 +1278,77 @@ export class InternalLinkProcessor {
     } as any as InternalLinkTypeMap[T];
   }
 
-  public processMessageLink = (link: InternalLink.InternalLinkMessage) => {
+  /**
+   * A link's `?free=<code>`, spent on the user it names, as Android does: their chat opens whatever the answer, and a
+   * moment later says whether their message fee is gone for us. A link of one's own only opens the own chat.
+   */
+  private async importNoPaidMessagesToken(managers: AppManagers, user: User.user, token: string) {
+    const peerId = user.id.toPeerId(false);
+    if(user.pFlags.self) {
+      return appImManager.setInnerPeer({peerId});
+    }
+
+    // the account the link was opened in: once the tab has left it, the link goes no further
+    const session = getManagersSession(managers);
+    let error: ApiError;
+    try {
+      await managers.appUsersManager.importNoPaidMessagesToken(user.id, token);
+    } catch(err) {
+      error = err as ApiError;
+    }
+
+    if(isSessionLeaving(session)) return;
+    await appImManager.setInnerPeer({peerId});
+    // the toast speaks of the chat, so it comes once the chat is there
+    await pause(NO_PAID_TOKEN_TOAST_DELAY);
+    if(isSessionLeaving(session)) return;
+    if(error) {
+      toastNew({langPackKey: error.type?.startsWith('USER_') ? 'NoPaidMessagesToken.UserInvalid' : 'NoPaidMessagesToken.Invalid'});
+      return;
+    }
+
+    toastNew({
+      langPackKey: 'NoPaidMessagesToken.Imported',
+      langPackArguments: [await wrapPeerTitle({peerId, onlyFirstName: true})]
+    });
+  }
+
+  /**
+   * `t.me/<username>?free=<code>`: the code removes the message fee of the user it names; the rest of the link is not
+   * looked at. A name that is not a user's is "no account", as on Android.
+   */
+  private async useNoPaidMessagesToken(link: InternalLink.InternalLinkMessage) {
+    const managers = bindManagersToSession(this.managers);
+    let peer;
+    try {
+      peer = await managers.appUsersManager.resolveUsername(link.domain);
+    } catch(err) {
+      this.showUsernameResolveError(err as ApiError);
+      return;
+    }
+
+    if(peer?._ !== 'user') {
+      toastNew({langPackKey: 'NoUsernameFound'});
+      return;
+    }
+
+    await this.importNoPaidMessagesToken(managers, peer, link.free);
+  }
+
+  public processMessageLink = async(link: InternalLink.InternalLinkMessage) => {
+    const managers = bindManagersToSession(this.managers);
+    if(link.free) {
+      return this.useNoPaidMessagesToken(link);
+    }
+
+    if(link.game) {
+      return this.shareGame(link);
+    }
+
     if(link.startgroup !== undefined || link.startchannel !== undefined) {
       const requestedRights = parseBotAdminRights(link.admin);
       const scope = getBotAddToChatScope(link, requestedRights);
-      return this.managers.appUsersManager.resolveUsername(link.domain).then(async(peer) => {
+      return managers.appUsersManager.resolveUsername(link.domain).then(async(peer) => {
         if(peer._ === 'user' && peer.pFlags.bot) {
           await showAddBotToChat({
             botId: peer.id as BotId,
@@ -1114,23 +1378,80 @@ export class InternalLinkProcessor {
       stack: link.stack,
       threadId,
       mediaTimestamp: link.t && +link.t,
-      text: link.text
+      text: link.text,
+      wholeAlbum: link.single === undefined
     });
   };
 
+  /**
+   * `t.me/<bot>?game=<short_name>`: the game goes to a chat the user picks - a forum's topic, never
+   * Saved Messages - once they confirm it, and that chat opens (tdesktop's `ShowShareGameBox`). A name
+   * that is not a bot's opens as it would without the game.
+   */
+  private async shareGame(link: InternalLink.InternalLinkMessage): Promise<unknown> {
+    const managers = bindManagersToSession(this.managers);
+    const bot = await managers.appUsersManager.resolveUserByUsername(link.domain).catch(missUnlessSessionEnded);
+    if(!bot || !bot.pFlags.bot) {
+      return this.processMessageLink({...link, game: undefined});
+    }
+
+    let chosen: Awaited<ReturnType<typeof showSharingPicker2Popup>>;
+    try {
+      chosen = await showSharingPicker2Popup({
+        chatRightsActions: ['send_games'],
+        exceptSelf: true,
+        useTopics: true
+      });
+
+      await confirmationPopup({
+        descriptionLangKey: 'SendGameToText',
+        // * a channel's direct-message conversation is named by its other side, as the picker's row is
+        descriptionLangArgs: [await wrapPeerTitle({peerId: chosen.peerId, threadId: chosen.threadId ?? chosen.monoforumThreadId})],
+        button: {langKey: 'OK'}
+      });
+    } catch{
+      return;
+    }
+
+    // * confirmed for the account it was asked on: nothing is sent or opened once the tab is on another
+    if(isSessionLeaving(getManagersSession(managers))) {
+      return;
+    }
+
+    const {peerId, threadId, monoforumThreadId} = chosen;
+    managers.appGamesManager.shareGame({
+      peerId,
+      threadId,
+      monoforumThreadId,
+      botId: bot.id,
+      shortName: link.game
+    }).catch((err: ApiError) => {
+      // * no message stands for the game until the server sends it, so the chat cannot show that it
+      // * failed: it is said here, as tdesktop does; a slow mode wait has its own popup (appImManager)
+      if(err?.type === 'MIDDLEWARE' || err?.type?.startsWith('SLOWMODE_WAIT')) {
+        return;
+      }
+
+      toastNew({langPackKey: 'Error.AnError'});
+    });
+
+    return appImManager.setInnerPeer({peerId, threadId, monoforumThreadId});
+  }
+
   public processPrivatePostLink = async(link: InternalLink.InternalLinkPrivatePost) => {
+    const managers = bindManagersToSession(this.managers);
     const chatId = link.channel.toChatId();
     const userId = link.channel.toUserId();
 
     const {chat, isBotforum, user} = await namedPromises({
-      chat: this.managers.appChatsManager.getChat(chatId),
-      isBotforum: this.managers.appUsersManager.isBotforum(userId),
-      user: this.managers.appUsersManager.getUser(userId)
+      chat: managers.appChatsManager.getChat(chatId),
+      isBotforum: managers.appUsersManager.isBotforum(userId),
+      user: managers.appUsersManager.getUser(userId)
     });
 
     if(!chat && !isBotforum) {
       try {
-        await this.managers.appChatsManager.resolveChannel(chatId);
+        await managers.appChatsManager.resolveChannel(chatId);
       } catch(err) {
         toastNew({langPackKey: 'LinkNotFound'});
         throw err;
@@ -1146,7 +1467,8 @@ export class InternalLinkProcessor {
       threadId,
       pollOption: link.option,
       stack: link.stack,
-      mediaTimestamp: link.t && +link.t
+      mediaTimestamp: link.t && +link.t,
+      wholeAlbum: link.single === undefined
     });
   };
 
@@ -1196,29 +1518,54 @@ export class InternalLinkProcessor {
     });
   };
 
-  public processVoiceChatLink = async(link: InternalLink.InternalLinkVoiceChat) => {
-    const openPeerId = (peerId: PeerId) => {
-      if(appImManager.chat.peerId !== peerId) {
-        return appImManager.setInnerPeer({peerId});
+  /**
+   * A chat's video chat or live stream: t.me/<chat>?videochat (?voicechat, ?livestream), tg://resolve?domain=…&videochat,
+   * and tg://voicechat?chat_id=…&id=…, the address the "video chat" of a call's service message carries. The chat is
+   * opened first; a link then joins only the call running there, the one it names, never a new one, and only once
+   * asked (`joinCallFromLink`, as tdesktop's joinVoiceChatFromLink). Only the service message's own anchor joins as
+   * the chat's Join button does (tdesktop GroupCallClickHandler): the same address can come from anywhere.
+   */
+  public processVoiceChatLink = async(
+    link: InternalLink.InternalLinkVoiceChat,
+    options?: {fromServiceMessage?: boolean}
+  ) => {
+    let peerId: PeerId;
+    if(link.chat_id !== undefined) {
+      if(!IS_GROUP_CALL_SUPPORTED || !link.id) {
+        return;
       }
-    };
 
-    if(link.livestream !== undefined) {
-      const peer = await this.managers.appUsersManager.resolveUsername(link.domain);
-      const peerId = peer.id.toPeerId(true);
-      await openPeerId(peerId);
-      return appImManager.joinLiveStream(peerId);
-    }
+      peerId = link.chat_id.toPeerId(true);
+    } else if(link.domain) {
+      let peer: User | Chat;
+      try {
+        peer = await this.managers.appUsersManager.resolveUsername(link.domain);
+      } catch(err) {
+        this.showUsernameResolveError(err as ApiError);
+        return;
+      }
 
-    if(!IS_GROUP_CALL_SUPPORTED) {
+      // * a call is a chat's: a user's link is the user's (tdesktop shows the peer)
+      if(peer._ === 'user') {
+        return appImManager.openUsername({userName: link.domain});
+      }
+
+      peerId = peer.id.toPeerId(true);
+    } else {
       return;
     }
 
-    if(link.id) {
-      const peerId = link.chat_id.toPeerId(true);
-      await openPeerId(peerId);
+    if(appImManager.chat.peerId !== peerId) {
+      await appImManager.setInnerPeer({peerId});
+    }
+
+    if(options?.fromServiceMessage) {
       return appImManager.joinGroupCall(peerId, link.id);
     }
+
+    // * ?voicechat=<hash>: a speaker invite, which the join hands over (tdesktop PeerByLinkInfo::voicechatHash)
+    const inviteHash = link.livestream ?? link.videochat ?? link.voicechat;
+    return appImManager.joinCallFromLink(peerId, link.id, inviteHash || undefined);
   };
 
   // t.me/call/<slug> handler. Hand the slug to `appImManager.joinConference`,
@@ -1299,7 +1646,13 @@ export class InternalLinkProcessor {
   };
 
   public processUserPhoneNumberLink = (link: InternalLink.InternalLinkUserPhoneNumber) => {
-    return this.managers.appUsersManager.resolvePhone(link.phone).then((user) => {
+    const managers = bindManagersToSession(this.managers);
+    return managers.appUsersManager.resolvePhone(link.phone).then((user): Promise<unknown> => {
+      // `t.me/+<phone>?free=<code>`: the code removes the message fee of the user the number names
+      if(link.free) {
+        return this.importNoPaidMessagesToken(managers, user as User.user, link.free);
+      }
+
       return appImManager.setInnerPeer({
         peerId: user.id.toPeerId(false),
         text: link.text
@@ -1312,8 +1665,9 @@ export class InternalLinkProcessor {
   };
 
   public processInvoiceLink = (link: InternalLink.InternalLinkInvoice) => {
-    return this.managers.appPaymentsManager.getInputInvoiceBySlug(link.slug).then((inputInvoice) => {
-      return this.managers.appPaymentsManager.getPaymentForm(inputInvoice).then((paymentForm) => {
+    const managers = bindManagersToSession(this.managers);
+    return managers.appPaymentsManager.getInputInvoiceBySlug(link.slug).then((inputInvoice) => {
+      return managers.appPaymentsManager.getPaymentForm(inputInvoice).then((paymentForm) => {
         // const message: Message.message = {
         //   _: 'message',
         //   date: 0,
@@ -1390,7 +1744,8 @@ export class InternalLinkProcessor {
   };
 
   public processWebAppLink = async(link: InternalLink.InternalLinkWebApp) => {
-    const user = await this.managers.appUsersManager.resolveUserByUsername(link.domain).catch(() => undefined as User.user);
+    const managers = bindManagersToSession(this.managers);
+    const user = await managers.appUsersManager.resolveUserByUsername(link.domain).catch(() => undefined as User.user);
     if(!user) {
       toastNew({langPackKey: 'Alert.UserDoesntExists'});
       return;
@@ -1426,7 +1781,7 @@ export class InternalLinkProcessor {
 
     let messagesBotApp: MessagesBotApp;
     try {
-      messagesBotApp = await this.managers.appAttachMenuBotsManager.getBotApp(botId, link.appname);
+      messagesBotApp = await managers.appAttachMenuBotsManager.getBotApp(botId, link.appname);
     } catch(err) {
       if((err as ApiError).type === 'BOT_APP_INVALID') {
         toastNew({langPackKey: 'Alert.BotAppDoesntExist'});
@@ -1479,6 +1834,7 @@ export class InternalLinkProcessor {
   };
 
   public processStoryLink = async(link: InternalLink.InternalLinkStory) => {
+    const managers = bindManagersToSession(this.managers);
     const event = window.event;
     const bubble = findUpClassName(event.target as HTMLElement, 'bubble');
     if(bubble && bubble.classList.contains('story')) {
@@ -1488,7 +1844,7 @@ export class InternalLinkProcessor {
 
     let peer: User.user | Chat;
     try {
-      peer = await this.managers.appUsersManager.resolveUsername(link.domain);
+      peer = await managers.appUsersManager.resolveUsername(link.domain);
     } catch(err) {
       if((err as ApiError).type === 'USERNAME_NOT_OCCUPIED') {
         toastNew({langPackKey: 'NoUsernameFound'});
@@ -1503,7 +1859,7 @@ export class InternalLinkProcessor {
     // * `t.me/<name>/s/live` names the peer's current live stream, not a story id — open the peer's
     // * stories, as tdesktop does
     if(link.story === 'live') {
-      const peerStories = await this.managers.appStoriesManager.getPeerStories(peerId);
+      const peerStories = await managers.appStoriesManager.getPeerStories(peerId);
       if(!peerStories?.stories.length) {
         toastNew({langPackKey: 'NoStoryFound'});
         return;
@@ -1513,7 +1869,7 @@ export class InternalLinkProcessor {
       return;
     }
 
-    const storyItem = await this.managers.appStoriesManager.getStoryById(peerId, +link.story);
+    const storyItem = await managers.appStoriesManager.getStoryById(peerId, +link.story);
     if(!storyItem) {
       toastNew({langPackKey: 'NoStoryFound'});
       return;
@@ -1558,6 +1914,23 @@ export class InternalLinkProcessor {
     });
   };
 
+  public processWalletSendLink = (link: InternalLink.InternalLinkWalletSend) => {
+    return import('@components/wallet').then(({default: showWalletPopup}) => {
+      showWalletPopup({send: {
+        to: link.to,
+        amount: link.amount,
+        comment: link.text,
+        // * as Android reads a flag: present and not "0" or "false"
+        encrypted: !!link.encrypted && !/^(0|false)$/i.test(link.encrypted),
+        tonLink: link.tonLink
+      }});
+    });
+  };
+
+  public processTonConnectLink = (link: InternalLink.InternalLinkTonConnect) => {
+    return import('@components/wallet/tonConnect').then(({openTonConnectLink}) => openTonConnectLink(link.url));
+  };
+
   public processStarsTopupLink = async(link: InternalLink.InternalLinkStarsTopup) => {
     const middlewareHelper = getMiddleware();
     const balance = +(await prefetchStars(middlewareHelper.get()));
@@ -1594,13 +1967,14 @@ export class InternalLinkProcessor {
   };
 
   public processShareLink = async(link: InternalLink.InternalLinkShare) => {
+    const managers = bindManagersToSession(rootScope.managers);
     const {peerId, threadId, monoforumThreadId} = await showSharingPicker2Popup();
     // The shared text becomes a draft of the chosen chat — any chat, the way
     // tdesktop's `MainWidget::shareUrl` does it. `setInnerPeer({text})` is the
     // `?text=` deep-link path, which only prefills private chats.
     const text = [link.url, link.text].filter(Boolean).join('\n');
     if(text) {
-      await rootScope.managers.appDraftsManager.setDraft(peerId, threadId || monoforumThreadId, text);
+      await managers.appDraftsManager.setDraft(peerId, threadId || monoforumThreadId, text);
     }
 
     appImManager.setInnerPeer({peerId, threadId, monoforumThreadId});
@@ -1624,8 +1998,10 @@ export class InternalLinkProcessor {
       await pause(500);
     }
     appSidebarRight.toggleSidebar(true, true);
-    appSidebarRight.sharedMediaTab.setSearchTab('gifts');
-    appSidebarRight.sharedMediaTab.searchSuper.stargiftsActions?.setFilters({chosenCollection: Number(link.id)});
+    const sharedMediaTab = appSidebarRight.sharedMediaTab;
+    await sharedMediaTab.setSearchTab('gifts');
+    if(appSidebarRight.sharedMediaTab !== sharedMediaTab) return;
+    sharedMediaTab.searchSuper.stargiftsActions?.setFilters({chosenCollection: Number(link.id)});
   };
 
   public processStoryAlbumLink = async(link: InternalLink.InternalLinkStoryAlbum) => {
@@ -1648,9 +2024,55 @@ export class InternalLinkProcessor {
         await pause(500);
       }
       appSidebarRight.toggleSidebar(true, true);
-      appSidebarRight.sharedMediaTab.setSearchTab('stories');
-      appSidebarRight.sharedMediaTab.searchSuper.storiesSetAlbum(albumId);
+      const sharedMediaTab = appSidebarRight.sharedMediaTab;
+      await sharedMediaTab.setSearchTab('stories');
+      if(appSidebarRight.sharedMediaTab !== sharedMediaTab) return;
+      sharedMediaTab.searchSuper.storiesSetAlbum(albumId);
     }
+  };
+
+  /**
+   * Someone's "My QR code" link: the server makes its owner a contact and names them; a token that
+   * has expired, or a user who is gone, is a dead link (tdesktop's `resolveContactToken`). With
+   * `?free=<code>` the code is spent on them before their chat opens, as Android does.
+   */
+  public processContactTokenLink = async(link: InternalLink.InternalLinkContactToken) => {
+    const managers = bindManagersToSession(this.managers);
+    const user = link.token ?
+      await managers.appUsersManager.importContactToken(link.token).catch(missUnlessSessionEnded) :
+      undefined;
+    if(!user || user._ !== 'user' || user.pFlags.deleted) {
+      toastNew({langPackKey: 'ContactLinkInvalid'});
+      return;
+    }
+
+    if(link.free) {
+      return this.importNoPaidMessagesToken(managers, user, link.free);
+    }
+
+    return appImManager.setInnerPeer({peerId: user.id.toPeerId(false)});
+  };
+
+  /**
+   * A tg:// link this client does not know: the server is asked about it, and what it has to say is
+   * shown (tdesktop's `HandleUnknown`; its offer to update the app is for an installed one). When it
+   * has nothing to say, the link may still be another Telegram app's: it is offered to the system the
+   * way a plain link went before, on a press of Open: after the lookup the click that brought it here
+   * no longer counts as the user's, and the browser would block it.
+   */
+  public processUnknownDeepLink = async(element: HTMLAnchorElement) => {
+    const managers = bindManagersToSession(this.managers);
+    // tdesktop asks with what follows `tg://` up to the query
+    const path = element.href.replace(/^tg:(?:\/\/)?/i, '').split(/[?#]/)[0];
+    const info = await managers.apiManager.getDeepLinkInfo(path).catch(missUnlessSessionEnded);
+    if(info && info._ === 'help.deepLinkInfo') {
+      return confirmationPopup({
+        button: {langKey: 'OK', isCancel: true},
+        description: wrapRichText(info.message, {entities: info.entities})
+      }).catch(noop);
+    }
+
+    this.showOpenUrlAlert(element);
   };
 
   public processInstantViewLink = (link: InternalLink.InternalLinkInstantView) => {
@@ -1687,7 +2109,10 @@ export class InternalLinkProcessor {
       [INTERNAL_LINK_TYPE.STORY_ALBUM]: this.processStoryAlbumLink,
       [INTERNAL_LINK_TYPE.INSTANT_VIEW]: this.processInstantViewLink,
       [INTERNAL_LINK_TYPE.CONFERENCE_CALL]: this.processConferenceCallLink,
-      [INTERNAL_LINK_TYPE.ADD_AI_STYLE]: this.processAddAiStyleLink
+      [INTERNAL_LINK_TYPE.ADD_AI_STYLE]: this.processAddAiStyleLink,
+      [INTERNAL_LINK_TYPE.CONTACT_TOKEN]: this.processContactTokenLink,
+      [INTERNAL_LINK_TYPE.WALLET_SEND]: this.processWalletSendLink,
+      [INTERNAL_LINK_TYPE.TON_CONNECT]: this.processTonConnectLink
     };
 
     const processor = map[link._];
@@ -1700,6 +2125,10 @@ export class InternalLinkProcessor {
   }
 }
 
+// made once: a hot update keeps it and moves it onto the edited class (see @helpers/hotRegistry)
 const internalLinkProcessor = new InternalLinkProcessor();
 MOUNT_CLASS_TO && (MOUNT_CLASS_TO.internalLinkProcessor = internalLinkProcessor);
+registerHotReloadGuard({internalLinkProcessor});
 export default internalLinkProcessor;
+
+if(import.meta.hot) import.meta.hot.accept();

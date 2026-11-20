@@ -12,19 +12,30 @@ vi.hoisted(() => {
 });
 
 vi.mock('@helpers/liteMode', () => ({
-  default: {isAvailable: () => false}
+  default: {isAvailable: vi.fn(() => false)}
 }));
+// Vitest stubs stylesheet imports; browser coverage compiles and checks the real inline SCSS.
+vi.mock('@helpers/dom/textHighlight.scss?inline', () => ({default: '::highlight(tg-search) {}'}));
 
-import type {TextLineBox} from '@helpers/dom/textHighlight';
-import highlightText, {
-  computeFullRange,
+import liteMode from '@helpers/liteMode';
+import type {TextHighlight, TextHighlightOptions, TextLineBox} from '@helpers/dom/textHighlight';
+import createHighlight, {
+  computeFullRanges,
   computeLineBoxes,
   computeNarrowing,
   computeRanges,
   extractText,
   findQuoteSpan,
-  findSearchSpans
+  findSearchSpans,
+  reapplyTextHighlights
 } from '@helpers/dom/textHighlight';
+
+const highlights = new Set<TextHighlight>();
+const highlightText = (options: TextHighlightOptions) => {
+  const highlight = createHighlight(options);
+  highlights.add(highlight);
+  return highlight;
+};
 
 const html = (markup: string) => {
   const element = document.createElement('div');
@@ -33,10 +44,14 @@ const html = (markup: string) => {
   return element;
 };
 
-const registered = (name: string) => [...(CSS.highlights.get(name) as any as Set<Range>)];
+const registered = (name: string) => [...(CSS.highlights.get(name) as any as Set<Range> || [])];
+const highlightSheet = () => document.head.querySelector<HTMLStyleElement>('style[data-text-highlight]');
 
-afterEach(() => {
+afterEach(async() => {
+  highlights.forEach(highlight => highlight.dispose());
+  highlights.clear();
   document.body.replaceChildren();
+  await Promise.resolve();
 });
 
 describe('findSearchSpans', () => {
@@ -96,6 +111,17 @@ describe('findQuoteSpan', () => {
     expect(findQuoteSpan('a  b', 'a b')).toEqual([0, 4]);
   });
 
+  it('retries ignoring variation selectors, an emoji completed in one and not the other', () => {
+    expect(findQuoteSpan('a ❤ b', '❤\ufe0f b')).toEqual([2, 5]);
+  });
+
+  it('takes the nearer of an exact quote and one that differs by a variation selector', () => {
+    // * a paragraph completes its emoji, a code block after it does not: the offset says which was quoted
+    const text = '❤\ufe0f example\n❤ example';
+    expect(findQuoteSpan(text, '❤\ufe0f example', 11)).toEqual([11, 20]);
+    expect(findQuoteSpan(text, '❤\ufe0f example', 0)).toEqual([0, 10]);
+  });
+
   it('gives up when the text is not there', () => {
     expect(findQuoteSpan(text, 'four', 0)).toBeUndefined();
     expect(findQuoteSpan(text, '', 0)).toBeUndefined();
@@ -138,6 +164,12 @@ describe('computeRanges', () => {
     expect(range.toString()).toBe(' b');
   });
 
+  it('finds a quote in what a formula stands for, not in what it draws', () => {
+    const element = html('a <span data-inline-math="" data-source="x^2"><math><mi>x</mi><mn>2</mn></math></span> b');
+    const [range] = computeRanges(element, {type: 'quote', text: 'a x^2 b'});
+    expect(range.toString()).toBe('a x2 b');
+  });
+
   it('never reaches into skipped subtrees', () => {
     const element = html('12 <span class="time">12:00</span>');
     const ranges = computeRanges(element, {type: 'search', query: '12'}, '.time');
@@ -176,16 +208,34 @@ describe('computeLineBoxes', () => {
     const boxes = computeLineBoxes([rangeOf(rect(100, 51, 50, 19), rect(100, 93, 50, 19))], origin, 21);
     expect(boxes.map((b) => b.top)).toEqual([0, 42]);
   });
+
+  it('measures in the overlay\'s own pixels when an ancestor is scaled', () => {
+    // * the first test's text with the bubble at .8 of its size, as it zooms in when its chat opens
+    const scaled = rect(100, 50, 320, 240);
+    const at = (left: number, top: number, width: number, height: number) => rect(100 + left * .8, 50 + top * .8, width * .8, height * .8);
+    const boxes = computeLineBoxes([rangeOf(at(10, 1, 40, 19), at(50, 1, 60, 19), at(0, 22, 90, 19))], scaled, 21, {x: .8, y: .8});
+    expect(boxes.map((b) => [b.left, b.top, b.width, b.height].map((v) => +v.toFixed(3) + 0))).toEqual([
+      [10, 0, 100, 21],
+      [0, 21, 90, 21]
+    ]);
+  });
 });
 
-describe('computeFullRange', () => {
+describe('computeFullRanges', () => {
   it('spans all the searchable text, skipped subtrees at the ends excluded', () => {
     const element = html('<span>hello</span> <b>world</b><span class="time">12:00</span>');
-    const range = computeFullRange(element, '.time');
+    const ranges = computeFullRanges(element, '.time');
+    expect(ranges.length).toBe(1);
+    const [range] = ranges;
     expect(range.toString()).toBe('hello world');
     expect(range.startContainer).toBe(element.querySelector('span').firstChild);
     expect(range.endContainer).toBe(element.querySelector('b').firstChild);
-    expect(computeFullRange(html('<span class="time">12:00</span>'), '.time')).toBeUndefined();
+    expect(computeFullRanges(html('<span class="time">12:00</span>'), '.time')).toEqual([]);
+  });
+
+  it('leaves out what an inert part (a collapsed details) holds', () => {
+    const element = html('<p>before</p><div inert><p>hidden</p></div><p>after</p>');
+    expect(computeFullRanges(element).map((range) => range.toString())).toEqual(['before', 'after']);
   });
 });
 
@@ -269,6 +319,90 @@ describe('highlightText', () => {
     highlight.dispose();
   });
 
+  it('keeps CSS rules and empty registry entries absent when there are no CSS matches', () => {
+    expect(highlightSheet()).toBeNull();
+    const empty = highlightText({container: html('unmatched'), match: {type: 'search', query: 'absent'}});
+    const boxes = highlightText({container: html('boxed'), match: {type: 'quote', text: 'boxed'}, lineBoxes: true});
+    expect(empty.found).toBe(false);
+    expect(boxes.found).toBe(true);
+    expect(CSS.highlights.size).toBe(0);
+    expect(highlightSheet()).toBeNull();
+    empty.dispose();
+    boxes.dispose();
+  });
+
+  it('shares one stylesheet across search and quote ranges until the last owner disposes', async() => {
+    const search = highlightText({container: html('search'), match: {type: 'search', query: 'search'}});
+    const sheet = highlightSheet();
+    expect(sheet?.textContent).toContain('::highlight(tg-search)');
+    const quote = highlightText({container: html('quote'), match: {type: 'quote', text: 'quote'}});
+    expect(highlightSheet()).toBe(sheet);
+    expect(document.head.querySelectorAll('style[data-text-highlight]')).toHaveLength(1);
+    search.dispose();
+    await Promise.resolve();
+    expect(CSS.highlights.has('tg-search')).toBe(false);
+    expect(CSS.highlights.has('tg-quote')).toBe(true);
+    expect(highlightSheet()).toBe(sheet);
+    quote.dispose();
+    await Promise.resolve();
+    expect(CSS.highlights.size).toBe(0);
+    expect(highlightSheet()).toBeNull();
+  });
+
+  it('does not toggle the stylesheet while replacing a query handle in the same task', async() => {
+    const element = html('alpha beta');
+    const first = highlightText({container: element, match: {type: 'search', query: 'alpha'}});
+    const sheet = highlightSheet();
+    const remove = vi.spyOn(sheet, 'remove');
+    first.dispose();
+    const second = highlightText({container: element, match: {type: 'search', query: 'beta'}});
+    await Promise.resolve();
+    expect(highlightSheet()).toBe(sheet);
+    expect(remove).not.toHaveBeenCalled();
+    expect(registered('tg-search').map(range => range.toString())).toEqual(['beta']);
+    remove.mockRestore();
+    second.dispose();
+  });
+
+  it('keeps the sheet during matching re-renders and removes it when the last match disappears', async() => {
+    const element = html('matched text');
+    const highlight = highlightText({container: element, match: {type: 'search', query: 'text'}});
+    const sheet = highlightSheet();
+    const remove = vi.spyOn(sheet, 'remove');
+    element.textContent = 'new text';
+    await vi.advanceTimersByTimeAsync(10);
+    expect(highlightSheet()).toBe(sheet);
+    expect(remove).not.toHaveBeenCalled();
+    element.textContent = 'absent';
+    await vi.advanceTimersByTimeAsync(10);
+    expect(highlight.found).toBe(false);
+    expect(CSS.highlights.size).toBe(0);
+    expect(highlightSheet()).toBeNull();
+    expect(remove).toHaveBeenCalledOnce();
+    element.textContent = 'text restored';
+    await vi.advanceTimersByTimeAsync(10);
+    expect(highlight.found).toBe(true);
+    expect(registered('tg-search').map(range => range.toString())).toEqual(['text']);
+    expect(highlightSheet()).toBe(sheet);
+    remove.mockRestore();
+    highlight.dispose();
+  });
+
+  it('retains the stylesheet throughout fade-out and releases it on completion', async() => {
+    const animations = vi.spyOn(liteMode, 'isAvailable').mockReturnValue(true);
+    const element = html('fading text');
+    const highlight = highlightText({container: element, match: {type: 'quote', text: 'fading'}});
+    const sheet = highlightSheet();
+    highlight.fadeOut(50);
+    expect(highlightSheet()).toBe(sheet);
+    expect(registered('tg-quote')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(CSS.highlights.size).toBe(0);
+    expect(highlightSheet()).toBeNull();
+    expect(element.style.getPropertyValue('--text-highlight-opacity')).toBe('');
+    animations.mockRestore();
+  });
+
   it('paints line boxes through an overlay prepended to the container', () => {
     const element = html('<span>boxed text</span>');
     element.style.position = 'relative';
@@ -297,7 +431,27 @@ describe('highlightText', () => {
     highlight.dispose();
   });
 
-  it('collects a highlight whose container has left the document', () => {
+  it('finds its text again once a row moved to another list is reapplied', () => {
+    // * a row highlighted in a list built aside (a search group's draft), then put in the shown one
+    const draft = document.createElement('div');
+    const row = document.createElement('div');
+    row.innerHTML = '<span>moved text</span>';
+    draft.append(row);
+    const highlight = highlightText({container: row, match: {type: 'search', query: 'moved'}});
+    const texts = () => registered('tg-search').map((range) => range.toString());
+    expect(texts()).toEqual(['moved']);
+
+    // * the move collapses the live range, and the row's own observer sees nothing of it
+    const list = html('');
+    list.append(row);
+    expect(texts()).toEqual(['']);
+
+    reapplyTextHighlights(list);
+    expect(texts()).toEqual(['moved']);
+    highlight.dispose();
+  });
+
+  it('collects a highlight whose container has left the document', async() => {
     const element = html('gone soon');
     highlightText({container: element, match: {type: 'search', query: 'gone'}});
     expect(registered('tg-search').map((r) => r.toString())).toEqual(['gone']);
@@ -306,6 +460,9 @@ describe('highlightText', () => {
     vi.advanceTimersByTime(30e3); // * noticed as detached
     expect(registered('tg-search')).toHaveLength(1);
     vi.advanceTimersByTime(30e3); // * still detached after the grace → released
+    await Promise.resolve();
     expect(registered('tg-search')).toEqual([]);
+    expect(CSS.highlights.size).toBe(0);
+    expect(highlightSheet()).toBeNull();
   });
 });

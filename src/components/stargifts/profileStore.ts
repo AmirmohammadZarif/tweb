@@ -3,12 +3,16 @@ import {StarGiftCollection} from '@layer';
 import {batch, onMount} from 'solid-js';
 import {MyStarGift} from '@appManagers/appGiftsManager';
 import rootScope from '@lib/rootScope';
+import type {AppManagers} from '@lib/managers';
 import createListenerSetter from '@helpers/solid/createListenerSetter';
 import {updateStarGift} from '@appManagers/utils/gifts/updateStarGift';
 import {inputStarGiftEquals} from '@appManagers/utils/gifts/inputStarGiftEquals';
 import untrackActions from '@helpers/solid/untrackActions';
 import setBooleanFlag from '@helpers/object/setBooleanFlag';
 import {getCanManagePeerGifts} from '@components/stargifts/canManageGifts';
+import putInOrder from '@helpers/array/putInOrder';
+import createOptimisticSave from '@helpers/createOptimisticSave';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 export const ALL_COLLECTIONS_ID = -1
 
@@ -30,12 +34,18 @@ export interface StarGiftsProfileStore extends Required<StarGiftsFilters> {
   loaded: boolean
   canManageGifts: boolean
   hasCollections: boolean
+  /** whether a message comes for each new gift: a channel's, for who can manage them, else `undefined` */
+  chatNotificationsEnabled: boolean | undefined
 }
 
 export interface StarGiftsProfileActions {
   loadNext: (reload?: boolean) => Promise<void>
   setFilters: (filters: StarGiftsFilters) => void
   deleteCollection: (collectionId: number) => void
+  /** `ids`: every collection's, in the order they are to be shown; at once and saved, as `toggleChatNotifications` */
+  reorderCollections: (ids: number[]) => void
+  /** at once, put back as the server last took it if refused with no newer change behind (`onSaveFailed`) */
+  toggleChatNotifications: (enabled: boolean) => void
   handleSwipe: (xDiff: number, setCollectionOverride?: (collectionId: number) => void) => boolean
   updateCollection: (collection: StarGiftCollection, options?: {
     switch: boolean
@@ -48,6 +58,10 @@ export function createProfileGiftsStore(props: {
   peerId: PeerId
   initialFilters?: StarGiftsFilters
   onCountChange?: (count: number) => void
+  /** a change shown at once was refused, and is put back */
+  onSaveFailed?: () => void
+  // a screen's own, bound to its account session; the tab's by default
+  managers?: AppManagers
 }): [StarGiftsProfileStore, StarGiftsProfileActions] {
   const initialState: StarGiftsProfileStore = {
     collections: undefined,
@@ -55,6 +69,7 @@ export function createProfileGiftsStore(props: {
     loading: false,
     loaded: false,
     canManageGifts: props.peerId === rootScope.myId,
+    chatNotificationsEnabled: undefined,
 
     chosenCollection: ALL_COLLECTIONS_ID,
     sort: 'date',
@@ -74,6 +89,33 @@ export function createProfileGiftsStore(props: {
   let currentOffset = '';
   let nextReqId = 0
   let fetchedCanManageGifts = false;
+  // * a page the manager was asked for before a toggle may have been answered before it: the toggle has the last
+  // * word (one asked for after waits there for the toggles on their way)
+  let notificationsRevision = 0;
+
+  // * the manager sends each setting's writes in turn, whichever store asked, and reads it after them; a refusal
+  // * with no newer change behind it puts back what the server holds then
+  const managers = props.managers ?? bindManagersToSession(rootScope.managers);
+  const getCollectionId = (collection: StarGiftCollection) => collection.collection_id;
+  const saveCollectionsOrder = createOptimisticSave((ids: number[]) => {
+    return managers.appGiftsManager.reorderCollections(props.peerId, ids);
+  }, (ids) => {
+    // * not known either: left as dragged
+    if(ids) {
+      setStore('collections', putInOrder(unwrap(store.collections), ids, getCollectionId));
+    }
+
+    props.onSaveFailed?.();
+  }, async() => {
+    return (await managers.appGiftsManager.getCollections(props.peerId))?.map(getCollectionId);
+  });
+  const saveNotifications = createOptimisticSave((enabled: boolean) => {
+    return managers.appGiftsManager.toggleChatGiftNotifications(props.peerId, enabled);
+  }, (enabled) => {
+    // * `undefined`, not known: the checkbox goes until a page says it
+    setStore('chatNotificationsEnabled', enabled);
+    props.onSaveFailed?.();
+  }, () => managers.appGiftsManager.getChatGiftNotifications(props.peerId));
 
   const fetchCanManageGifts = () => getCanManagePeerGifts(props.peerId);
 
@@ -84,9 +126,10 @@ export function createProfileGiftsStore(props: {
     setStore('loading', true);
 
     const id = ++nextReqId
+    const notificationsRevisionAtStart = notificationsRevision
     const collectionId = store.chosenCollection === ALL_COLLECTIONS_ID ? undefined : store.chosenCollection
     const [res, canManageGifts] = await Promise.all([
-      rootScope.managers.appGiftsManager.getProfileGifts({
+      managers.appGiftsManager.getProfileGifts({
         peerId: props.peerId,
         offset: currentOffset,
         sort: store.sort,
@@ -116,6 +159,9 @@ export function createProfileGiftsStore(props: {
       setStore('loading', false)
       if(res.collections) {
         setStore('collections', res.collections)
+      }
+      if(res.chatNotificationsEnabled !== undefined && notificationsRevisionAtStart === notificationsRevision) {
+        setStore('chatNotificationsEnabled', res.chatNotificationsEnabled)
       }
     })
     if(
@@ -194,6 +240,17 @@ export function createProfileGiftsStore(props: {
       if(deletingChosenCollection) {
         reload()
       }
+    },
+    reorderCollections: (ids) => {
+      const collections = unwrap(store.collections);
+      setStore('collections', putInOrder(collections, ids, getCollectionId))
+      saveCollectionsOrder(ids, collections.map(getCollectionId))
+    },
+    toggleChatNotifications: (enabled) => {
+      const shown = store.chatNotificationsEnabled;
+      setStore('chatNotificationsEnabled', enabled)
+      ++notificationsRevision;
+      saveNotifications(enabled, shown)
     },
     updateCollection: (collection, options) => {
       collectionCache.delete(collection.collection_id)

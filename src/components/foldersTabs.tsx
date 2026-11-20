@@ -30,7 +30,7 @@ export default function FoldersTabs(props: {
       <Tabs.MenuTab
         ref={(ref) => ref.dataset.filterId = '' + item.filter.id}
       >
-        <span class="text-super">
+        <span class="text-super" dir="auto">
           {title()}
         </span>
         <Badge

@@ -24,6 +24,7 @@ import {MOUNT_CLASS_TO} from '@config/debug';
 import {redact, redactValue} from './redact';
 import type {CrmClientLogReason} from '@lib/crm/types';
 import type {LogEntry} from './logsBuffer';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 // Newest-N entries only. The buffer holds up to 4000; the server caps at 500
 // anyway (config('mobile.client_logs.max_entries')), so sending more is pure
@@ -66,6 +67,7 @@ function normalizeError(error: any): {message: string, stack?: string} {
  * when the report was throttled, deduped, or the CRM is unreachable/logged out.
  */
 export async function reportCrash(reason: CrmClientLogReason, error: any): Promise<number | undefined> {
+  const managers = bindManagersToSession(rootScope.managers);
   try {
     const now = Date.now();
     if(reportsSent >= MAX_REPORTS_PER_SESSION) return;
@@ -97,7 +99,7 @@ export async function reportCrash(reason: CrmClientLogReason, error: any): Promi
       prefix: redact(entry.prefix || '')
     }));
 
-    const result = await rootScope.managers.appCrmManager.postClientLogs({
+    const result = await managers.appCrmManager.postClientLogs({
       reason,
       message: redact(message).slice(0, 4096),
       stack: stack ? redact(stack).slice(0, 65535) : undefined,

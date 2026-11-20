@@ -1,4 +1,4 @@
-import {JSX, Show} from 'solid-js';
+import {Accessor, For, JSX, Show} from 'solid-js';
 import {Dynamic} from 'solid-js/web';
 import {AnimationList} from '@helpers/solid/animationList';
 import {CROSS_FADE_KEYFRAMES, getAnimatedOptions} from '@helpers/dom/crossfadeContent';
@@ -21,7 +21,7 @@ const ANIMATIONS: {[key in AnimationType]: Keyframe[] | ((element: Element) => K
 };
 
 export function SimpleAnimation(props: Pick<
-  Parameters<typeof AnimationList>[0], 'children' | 'keyframes' | 'mode' | 'appear'
+  Parameters<typeof AnimationList>[0], 'children' | 'keyframes' | 'mode' | 'appear' | 'onAfterExit'
 > & {
   noItemClass?: boolean,
   itemClass?: string
@@ -33,6 +33,7 @@ export function SimpleAnimation(props: Pick<
       mode={props.mode || 'replacement'}
       itemClass={classNames(!props.noItemClass && 'animated-item', props.itemClass)}
       appear={props.appear}
+      onAfterExit={props.onAfterExit}
     >
       {props.children}
     </AnimationList>
@@ -49,7 +50,8 @@ export default function Animated(props: {
   mode?: Parameters<typeof AnimationList>[0]['mode'],
   appear?: boolean,
   noItemClass?: boolean,
-  itemClass?: string
+  itemClass?: string,
+  onAfterExit?: Parameters<typeof AnimationList>[0]['onAfterExit']
 }) {
   return (
     <Dynamic
@@ -59,6 +61,7 @@ export default function Animated(props: {
       appear={props.appear}
       noItemClass={props.noItemClass}
       itemClass={props.itemClass}
+      onAfterExit={props.onAfterExit}
     >
       {props.children}
     </Dynamic>
@@ -88,6 +91,24 @@ export function GrowHeightReveal(props: {
           {props.children}
         </div>
       </Show>
+    </Animated>
+  );
+}
+
+// The list counterpart of GrowHeightReveal: an item added to `each` grows in and a
+// removed one shrinks out, each in its own `overflow: hidden` wrapper for the same
+// reason as above. Items already there on mount appear without animating.
+export function GrowHeightList<T>(props: {
+  each: readonly T[],
+  children: (item: T, index: Accessor<number>) => JSX.Element
+}) {
+  return (
+    <Animated type="grow-height" noItemClass mode="add-remove" appear={false}>
+      <For each={props.each}>{(item, index) => (
+        <div style={{overflow: 'hidden'}}>
+          {props.children(item, index)}
+        </div>
+      )}</For>
     </Animated>
   );
 }

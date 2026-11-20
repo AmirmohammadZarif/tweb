@@ -8,25 +8,27 @@ import CacheStorageController from '@lib/files/cacheStorage';
 import {useLockScreenHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
 
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
-import EncryptionKeyStore from '@lib/passcode/keyStore';
+import EncryptionKeyStore, {exportEncryptionKey} from '@lib/passcode/keyStore';
 import {createEncryptionArtifactsForPasscode, deriveEncryptionKey, hashPasscode} from '@lib/passcode/utils';
 
 export type PasscodeActions = ReturnType<typeof usePasscodeActions>;
 
 export function usePasscodeActions() {
   const {rootScope, apiManagerProxy} = useLockScreenHotReloadGuard();
+  // * the service worker is told what the tab and the worker are, when there is one (`serviceMessagePort?.`): the app
+  // * runs without it (none in the browser, ?noServiceWorker=1), and every step below has to go through all the same
 
 
   async function disableCacheStorages() {
     CacheStorageController.temporarilyToggle(false);
     await apiManagerProxy.invoke('toggleCacheStorage', false);
-    await apiManagerProxy.serviceMessagePort.invoke('toggleCacheStorage', false);
+    await apiManagerProxy.serviceMessagePort?.invoke('toggleCacheStorage', false);
   }
 
   async function enableCacheStorages() {
     CacheStorageController.temporarilyToggle(true);
     await apiManagerProxy.invoke('toggleCacheStorage', true);
-    await apiManagerProxy.serviceMessagePort.invoke('toggleCacheStorage', true);
+    await apiManagerProxy.serviceMessagePort?.invoke('toggleCacheStorage', true);
   }
 
   async function clearCacheStorages() {
@@ -35,7 +37,7 @@ export function usePasscodeActions() {
     CacheStorageController.resetOpenEncryptableCacheStorages();
     await Promise.all([
       apiManagerProxy.invoke('resetEncryptableCacheStorages', void 0),
-      apiManagerProxy.serviceMessagePort.invoke('resetEncryptableCacheStorages', void 0)
+      apiManagerProxy.serviceMessagePort?.invoke('resetEncryptableCacheStorages', void 0)
     ]);
   }
 
@@ -59,23 +61,26 @@ export function usePasscodeActions() {
     await disableCacheStorages();
     await clearCacheStorages();
 
-    const togglePayload = {
+    await apiManagerProxy.invoke('toggleUsingPasscode', {
       isUsingPasscode: true,
-      encryptionKey
-    };
-    await apiManagerProxy.invoke('toggleUsingPasscode', togglePayload);
-    await apiManagerProxy.serviceMessagePort.invoke('toggleUsingPasscode', {type: 'full', ...togglePayload});
-
-
-    rootScope.dispatchEvent('toggle_using_passcode', true);
+      encryptionKey: await exportEncryptionKey(encryptionKey)
+    });
 
     // The session storage should first get encrypted in the mtproto worker, then we can use start using the encrypted proxy here
     DeferredIsUsingPasscode.resolveDeferred(true);
     EncryptionKeyStore.save(encryptionKey);
 
-    await enableCacheStorages();
+    // * the worker answers once the accounts are encrypted and written: the plain copy of their keys goes now, never
+    // * before - and not after a step below either, which may not finish (the tab closed, the service worker failed),
+    // * leaving it in localStorage, where nothing removes it with the passcode on until the next start
+    // * (`AccountController.removeLegacyCopyBehindPasscode`)
+    await AccountController.updateStorageForLegacy(null);
 
-    await AccountController.updateStorageForLegacy(null); // remove access keys from unencrypted local storage
+    await apiManagerProxy.serviceMessagePort?.invoke('toggleUsingPasscode', {type: 'full', isUsingPasscode: true, encryptionKey});
+
+    rootScope.dispatchEvent('toggle_using_passcode', true);
+
+    await enableCacheStorages();
   }
 
   async function isMyPasscode(passcode: string) {
@@ -97,7 +102,7 @@ export function usePasscodeActions() {
     await clearCacheStorages();
 
     await apiManagerProxy.invoke('toggleUsingPasscode', {isUsingPasscode: false});
-    await apiManagerProxy.serviceMessagePort.invoke('toggleUsingPasscode', {type: 'full', isUsingPasscode: false});
+    await apiManagerProxy.serviceMessagePort?.invoke('toggleUsingPasscode', {type: 'full', isUsingPasscode: false});
 
     EncryptionKeyStore.save(null);
     DeferredIsUsingPasscode.resolveDeferred(false);
@@ -129,9 +134,9 @@ export function usePasscodeActions() {
 
     await apiManagerProxy.invoke('changePasscode', {
       toStore,
-      encryptionKey
+      encryptionKey: await exportEncryptionKey(encryptionKey)
     });
-    await apiManagerProxy.serviceMessagePort.invoke('saveEncryptionKey', encryptionKey);
+    await apiManagerProxy.serviceMessagePort?.invoke('saveEncryptionKey', encryptionKey);
 
     EncryptionKeyStore.save(encryptionKey);
 
@@ -153,9 +158,9 @@ export function usePasscodeActions() {
     passcode = ''; // forget;
 
     EncryptionKeyStore.save(encryptionKey);
-    await apiManagerProxy.invoke('saveEncryptionKey', encryptionKey);
+    await apiManagerProxy.invoke('saveEncryptionKey', await exportEncryptionKey(encryptionKey));
     // Make sure we resolve the DeferredIsUsingPasscode as there is no storage available in SW to get the value
-    await apiManagerProxy.serviceMessagePort.invoke('toggleUsingPasscode', {type: 'full', isUsingPasscode: true, encryptionKey});
+    await apiManagerProxy.serviceMessagePort?.invoke('toggleUsingPasscode', {type: 'full', isUsingPasscode: true, encryptionKey});
 
     apiManagerProxy.invokeVoid('toggleLockOthers', false);
   }

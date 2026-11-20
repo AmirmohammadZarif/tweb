@@ -6,9 +6,7 @@ import ListenerSetter from '@helpers/listenerSetter';
 import safeAssign from '@helpers/object/safeAssign';
 import themeController from '@helpers/themeController';
 import {AttachMenuBot, BotInfo, DataJSON, WebViewResult, Document, MessagesPreparedInlineMessage, Update} from '@layer';
-import appImManager from '@lib/appImManager';
 import {InternalLink, INTERNAL_LINK_TYPE} from '@lib/internalLink';
-import internalLinkProcessor from '@lib/internalLinkProcessor';
 import {AppManagers} from '@lib/managers';
 import getAttachMenuBotIcon from '@appManagers/utils/attachMenuBots/getAttachMenuBotIcon';
 import I18n, {LangPackKey} from '@lib/langPack';
@@ -19,7 +17,8 @@ import {TelegramWebViewEventMap, AnyFunction, TelegramWebViewSendEventMap} from 
 import ButtonTsx from '@components/buttonTsx';
 import {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import confirmationPopup from '@components/confirmationPopup';
-import showPeerPopup, {PopupPeerOptions} from '@components/popups/peer';
+import requestPhone from '@components/requestPhone';
+import showPeerPopup, {PopupPeerHandle, PopupPeerOptions} from '@components/popups/peer';
 import {showPickUser3Popup} from '@components/popups/pickUser';
 import selectRequestPeers from '@components/popups/requestPeer';
 import TelegramWebView from '@components/telegramWebView';
@@ -32,10 +31,8 @@ import {attachClassName} from '@helpers/solid/classname';
 import showWebAppEmojiStatusAccessPopup from '@components/popups/webAppEmojiStatusAccess';
 import {toastNew} from '@components/toast';
 import tsNow from '@helpers/tsNow';
-import showPremiumPopup from '@components/popups/premium';
 import {MyDocument} from '@appManagers/appDocsManager';
 import showWebAppLocationAccessPopup from '@components/popups/webAppLocationAccess';
-import appSidebarRight from '@components/sidebarRight';
 import {IS_SAFARI} from '@environment/userAgent';
 import {Transition} from '@vendor/solid-transition-group';
 import {PreloaderTsx} from '@components/putPreloader';
@@ -53,6 +50,8 @@ import {openBotPrivacyPolicy} from '@helpers/getBotPrivacyPolicy';
 import canReportBot from '@appManagers/utils/bots/canReportBot';
 import {showPeerReport} from '@components/popups/reportAd';
 import getWebViewTgLink from '@helpers/getWebViewTgLink';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 const SANDBOX_ATTRIBUTES = [
   'allow-scripts',
@@ -60,7 +59,9 @@ const SANDBOX_ATTRIBUTES = [
   'allow-popups',
   'allow-forms',
   'allow-modals',
-  'allow-storage-access-by-user-activation'
+  'allow-storage-access-by-user-activation',
+  // * a 3D game made as a mini app captures the mouse as one sent as a game does (GAME_SANDBOX_ATTRIBUTES)
+  'allow-pointer-lock'
 ].join(' ');
 
 const DEVICEMOTION_TIMEOUT = 500;
@@ -83,6 +84,8 @@ export default class WebApp {
   private attachMenuBot: AttachMenuBot;
   private botInfo: BotInfo.botInfo;
   private isCloseConfirmationNeeded: boolean;
+  // * the user's close waiting for their word: the app closing itself meanwhile takes it away with it
+  private closeConfirmation: PopupPeerHandle;
   private lastHeaderColor: TelegramWebViewEventMap['web_app_set_header_color'];
   private showSettingsButton: boolean;
   private readyResult: TelegramWebViewEventMap['iframe_ready'];
@@ -105,7 +108,9 @@ export default class WebApp {
 
   private fullscreenButtons: HTMLElement;
 
-  private forceHide: () => void;
+  // * `byApp`: the app closes itself (web_app_close, its data or message sent, ...), which asks nothing - as tdesktop's
+  // * requestClose: only a close the user asks for confirms, when the app wants it (web_app_setup_closing_behavior)
+  private forceHide: (byApp?: boolean) => void;
   private onBackStatus: (visible: boolean) => void;
 
   private managers: AppManagers;
@@ -122,7 +127,7 @@ export default class WebApp {
     safeAssign(this, options);
 
     this.listenerSetter = new ListenerSetter();
-    this.managers = rootScope.managers;
+    this.managers = bindManagersToSession(rootScope.managers);
 
     this.title.classList.add('web-app-title');
     this.header.classList.add('web-app-header');
@@ -163,7 +168,7 @@ export default class WebApp {
       const queryId = this.webViewResultUrl.query_id;
       this.listenerSetter.add(rootScope)('web_view_result_sent', (_queryId) => {
         if(queryId === _queryId) {
-          this.forceHide();
+          this.forceHide(true);
         }
       });
     }
@@ -188,7 +193,7 @@ export default class WebApp {
     }
 
     this.joinChatDecisionHandled = true;
-    this.forceHide();
+    this.forceHide(true);
   };
 
   // the origin the bot asked the mini app to stay on, when it asked at all — the bridge is bound to
@@ -380,7 +385,8 @@ export default class WebApp {
       button: {
         isDanger: true,
         langKey: 'BotWebViewCloseAnyway'
-      }
+      },
+      onPopup: (popup) => this.closeConfirmation = popup
     });
   };
 
@@ -401,9 +407,9 @@ export default class WebApp {
       text: 'BotWebViewOpenBot',
       onClick: () => {
         this.forceHide();
-        appImManager.setInnerPeer({peerId: botPeerId});
+        hotReloadGuard.appImManager.setInnerPeer({peerId: botPeerId});
       },
-      verify: () => this.webViewOptions.peerId !== botPeerId || appImManager.chat?.peerId !== botPeerId
+      verify: () => this.webViewOptions.peerId !== botPeerId || hotReloadGuard.appImManager.chat?.peerId !== botPeerId
     }, {
       icon: 'rotate_left',
       text: 'BotWebViewReloadPage',
@@ -441,7 +447,7 @@ export default class WebApp {
       text: 'BotPrivacyPolicy',
       onClick: () => openBotPrivacyPolicy(this.botInfo, () => {
         this.forceHide();
-        appImManager.setInnerPeer({peerId: botPeerId});
+        hotReloadGuard.appImManager.setInnerPeer({peerId: botPeerId});
         this.managers.appMessagesManager.sendText({peerId: botPeerId, text: '/privacy'});
       }),
       verify: async() => !!(await this.getBotInfo())
@@ -456,7 +462,7 @@ export default class WebApp {
       icon: 'plusround',
       text: 'WebApp.InstallBot',
       onClick: () => {
-        appImManager.toggleBotInAttachMenu(botId, true).then(async(attachMenuBot) => {
+        hotReloadGuard.appImManager.toggleBotInAttachMenu(botId, true).then(async(attachMenuBot) => {
           this.attachMenuBot = attachMenuBot;
         });
       },
@@ -466,7 +472,7 @@ export default class WebApp {
       className: 'danger',
       text: 'BotWebViewDeleteBot',
       onClick: () => {
-        appImManager.toggleBotInAttachMenu(botId, false).then(async(attachMenuBot) => {
+        hotReloadGuard.appImManager.toggleBotInAttachMenu(botId, false).then(async(attachMenuBot) => {
           this.attachMenuBot = attachMenuBot;
           this.forceHide();
         });
@@ -508,7 +514,9 @@ export default class WebApp {
       const textRgbColor = rgbaToRgb([...textColor, textOpacity], rgb);
       // const borderColor = rgbaToRgb([...rgb, 1 - 0.08], rgb || rgbaToRgb([255, 255, 255, 0.08], rgb));
       backgroundColor = hex;
-      this.title.style.color = `rgb(${textColor.join(',')})`;
+      const primaryTextColor = `rgb(${textColor.join(',')})`;
+      this.title.style.color = primaryTextColor;
+      this.header.style.setProperty('--primary-text-color', primaryTextColor);
       this.header.style.setProperty('--secondary-text-color', `rgb(${textRgbColor.join(', ')})`);
       this.header.style.setProperty('--light-secondary-text-color', `rgba(${textColor.join(', ')}, ${0.08})`);
       // this.header.style.setProperty('--border-color', `rgb(${borderColor.join(', ')})`);
@@ -516,6 +524,7 @@ export default class WebApp {
     } else {
       backgroundColor = this.getThemeParams()[color.color_key];
       this.title.style.color = '';
+      this.header.style.removeProperty('--primary-text-color');
       this.header.style.removeProperty('--secondary-text-color');
       this.header.style.removeProperty('--light-secondary-text-color');
       this.header.style.removeProperty('--border-color');
@@ -532,25 +541,26 @@ export default class WebApp {
     query,
     chat_types
   }: TelegramWebViewEventMap['web_app_switch_inline_query']) => {
-    const user = await this.managers.appUsersManager.getUser(this.webViewOptions.botId);
+    const managers = bindManagersToSession(this.managers);
+    const user = await managers.appUsersManager.getUser(this.webViewOptions.botId);
     if(user.bot_inline_placeholder === undefined) {
       return;
     }
 
-    this.forceHide();
+    this.forceHide(true);
 
-    const chat = appImManager.chat;
+    const chat = hotReloadGuard.appImManager.chat;
     let peerId = chat.peerId, threadId = chat.threadId;
     if(chat_types?.length) {
       const chosenPeerId = await showPickUser3Popup(chat_types, ['send_inline']);
       if(peerId !== chosenPeerId) {
         peerId = chosenPeerId;
         threadId = undefined;
-        await appImManager.setInnerPeer({peerId});
+        await hotReloadGuard.appImManager.setInnerPeer({peerId});
       }
     }
 
-    this.managers.appInlineBotsManager.switchInlineQuery(
+    managers.appInlineBotsManager.switchInlineQuery(
       peerId,
       threadId,
       this.webViewOptions.botId,
@@ -624,14 +634,16 @@ export default class WebApp {
     }
 
     this.destroyed = true;
+    this.closeConfirmation?.hide();
     this.telegramWebView?.destroy();
     this.listenerSetter.removeAll();
     clearTimeout(this.reloadTimeout);
     clearTimeout(this._deviceMotionTimeoutId);
     clearTimeout(this._deviceOrientationTimeoutId);
-    window.removeEventListener('devicemotion', this.handleDeviceMotion);
-    window.removeEventListener('deviceorientation', this.handleDeviceOrientation);
-    window.removeEventListener('deviceorientationabsolute', this.handleDeviceOrientation);
+    // * removed as they were added, in the capture phase: a listener removed without it stays
+    window.removeEventListener('devicemotion', this.handleDeviceMotion, true);
+    window.removeEventListener('deviceorientation', this.handleDeviceOrientation, true);
+    window.removeEventListener('deviceorientationabsolute', this.handleDeviceOrientation, true);
     this.footerCleanup?.();
   }
 
@@ -731,6 +743,7 @@ export default class WebApp {
             pattern = [65, 60, 40];
             break;
         }
+        break;
       case 'selection_change':
         pattern = [30];
         break;
@@ -742,7 +755,8 @@ export default class WebApp {
   };
 
   protected handleSetEmojiStatus = this.debouncePopupMethod(async(data) => {
-    const {telegramWebView, managers, webViewOptions} = this;
+    const {telegramWebView, webViewOptions} = this;
+    const managers = bindManagersToSession(this.managers);
     const doc = await managers.appEmojiManager.getCustomEmojiDocument(data.custom_emoji_id);
     if(!doc) {
       telegramWebView.dispatchWebViewEvent('emoji_status_failed', {error: 'SUGGESTED_EMOJI_INVALID'});
@@ -757,7 +771,7 @@ export default class WebApp {
       onFinish: async(result) => {
         if(result) {
           if(!(await managers.rootScope.getPremium())) {
-            showPremiumPopup({feature: 'emoji_status'});
+            hotReloadGuard.showPremiumPopup({feature: 'emoji_status'});
             telegramWebView.dispatchWebViewEvent('emoji_status_failed', {error: 'SERVER_ERROR'});
             return;
           }
@@ -783,7 +797,8 @@ export default class WebApp {
   }, 'emoji_status_failed', {error: 'USER_DECLINED'});
 
   protected handleEmojiStatusAccess = this.debouncePopupMethod(async() => {
-    const {telegramWebView, managers, webViewOptions} = this;
+    const {telegramWebView, webViewOptions} = this;
+    const managers = bindManagersToSession(this.managers);
     const peer = await managers.appProfileManager.getCachedFullUser(this.webViewOptions.botId);
     if(peer.pFlags.bot_can_manage_emoji_status) {
       telegramWebView.dispatchWebViewEvent('emoji_status_access_requested', {status: 'allowed'});
@@ -797,7 +812,7 @@ export default class WebApp {
       onFinish: async(result) => {
         if(result) {
           if(!(await managers.rootScope.getPremium())) {
-            showPremiumPopup({feature: 'emoji_status'});
+            hotReloadGuard.showPremiumPopup({feature: 'emoji_status'});
             telegramWebView.dispatchWebViewEvent('emoji_status_access_requested', {status: 'cancelled'});
             return;
           }
@@ -820,6 +835,7 @@ export default class WebApp {
   }, 'emoji_status_access_requested', {status: 'cancelled'});
 
   protected handleCheckLocation = async() => {
+    const managers = bindManagersToSession(this.managers);
     const {telegramWebView} = this;
     const browserPermission = await navigator.permissions.query({name: 'geolocation'});
     if(browserPermission.state === 'denied') {
@@ -827,7 +843,7 @@ export default class WebApp {
       return;
     }
 
-    const botPermission = await this.managers.appBotsManager.readBotInternalStorage(this.webViewOptions.botId, 'locationPermission');
+    const botPermission = await managers.appBotsManager.readBotInternalStorage(this.webViewOptions.botId, 'locationPermission');
 
     telegramWebView.dispatchWebViewEvent('location_checked', {
       available: true,
@@ -966,7 +982,7 @@ export default class WebApp {
   }
 
   protected setupDeviceMotion() {
-    window.removeEventListener('devicemotion', this.handleDeviceMotion);
+    window.removeEventListener('devicemotion', this.handleDeviceMotion, true);
     clearTimeout(this._deviceMotionTimeoutId);
 
     if(this._gyroscopeFreqMs !== -1 || this._accelerometerFreqMs !== -1) {
@@ -988,21 +1004,27 @@ export default class WebApp {
     if(this._fileDownloadPending) return;
     this._fileDownloadPending = true;
 
-    const {telegramWebView, managers, webViewOptions} = this;
+    const {telegramWebView, webViewOptions} = this;
+    const managers = bindManagersToSession(this.managers);
+    // * a refused request lets the next one through: left pending, every later one would go unanswered
+    const cancel = () => {
+      this._fileDownloadPending = false;
+      telegramWebView.dispatchWebViewEvent('file_download_requested', {status: 'cancelled'});
+    };
 
     try {
-      const allow = await managers.apiManager.invokeApiSingle('bots.checkDownloadFileParams', {
-        bot: await managers.appUsersManager.getUserInput(webViewOptions.botId),
-        file_name: event.file_name,
-        url: event.url
-      });
+      const allow = await managers.appBotsManager.checkDownloadFileParams(
+        webViewOptions.botId,
+        event.file_name,
+        event.url
+      );
 
       if(!allow) {
-        telegramWebView.dispatchWebViewEvent('file_download_requested', {status: 'cancelled'});
+        cancel();
         return;
       }
     } catch(e) {
-      telegramWebView.dispatchWebViewEvent('file_download_requested', {status: 'cancelled'});
+      cancel();
       return;
     }
 
@@ -1048,8 +1070,7 @@ export default class WebApp {
       ],
       onClose: () => {
         if(this._fileDownloadPending) {
-          this._fileDownloadPending = false;
-          telegramWebView.dispatchWebViewEvent('file_download_requested', {status: 'cancelled'});
+          cancel();
         }
       }
     });
@@ -1085,11 +1106,11 @@ export default class WebApp {
           return;
         }
 
-        this.forceHide();
+        this.forceHide(true);
         this.managers.appAttachMenuBotsManager.sendWebViewData(this.webViewOptions.botId, this.webViewOptions.buttonText, data);
       },
       web_app_close: () => {
-        this.forceHide();
+        this.forceHide(true);
       },
       web_app_open_link: ({url}) => {
         this.managers.apiManager.getAppConfig().then((config) => {
@@ -1100,7 +1121,7 @@ export default class WebApp {
         })
       },
       web_app_open_tg_link: ({path_full}) => {
-        appImManager.openUrl(getWebViewTgLink(path_full));
+        hotReloadGuard.appImManager.openUrl(getWebViewTgLink(path_full));
         // this.forceHide();
       },
       web_app_open_invoice: ({slug}) => {
@@ -1109,13 +1130,14 @@ export default class WebApp {
           slug
         };
 
-        internalLinkProcessor.processInvoiceLink(link).then((popupPayment) => {
-          popupPayment.addEventListener('finish', (result) => {
-            telegramWebView.dispatchWebViewEvent('invoice_closed', {
-              slug,
-              status: result
-            });
-          });
+        const onInvoiceClosed = (status: TelegramWebViewSendEventMap['invoice_closed']['status']) => {
+          telegramWebView.dispatchWebViewEvent('invoice_closed', {slug, status});
+        };
+
+        hotReloadGuard.internalLinkProcessor.processInvoiceLink(link).then((popupPayment) => {
+          popupPayment.addEventListener('finish', onInvoiceClosed);
+        }, () => { // * an invoice that does not open (a bad slug, a form the server refuses) is a failed one, as in tdesktop
+          onInvoiceClosed('failed');
         });
       },
       web_app_request_theme: this.sendTheme,
@@ -1131,8 +1153,9 @@ export default class WebApp {
       web_app_open_scan_qr_popup: () => telegramWebView.dispatchWebViewEvent('scan_qr_popup_closed', {}),
       web_app_read_text_from_clipboard: this.handleReadClipboard,
       web_app_request_write_access: this.debouncePopupMethod(async() => {
+        const managers = bindManagersToSession(this.managers);
         const botId = this.webViewOptions.botId;
-        const canSendMessage = await this.managers.appBotsManager.canSendMessage(botId);
+        const canSendMessage = await managers.appBotsManager.canSendMessage(botId);
         const status: TelegramWebViewSendEventMap['write_access_requested'] = {status: 'allowed'};
         if(!canSendMessage) {
           try {
@@ -1145,7 +1168,7 @@ export default class WebApp {
               }
             });
 
-            await this.managers.appBotsManager.allowSendMessage(botId);
+            await managers.appBotsManager.allowSendMessage(botId);
           } catch(err) {
             status.status = 'cancelled';
           }
@@ -1156,9 +1179,12 @@ export default class WebApp {
       web_app_request_phone: this.debouncePopupMethod(async() => {
         const status: TelegramWebViewSendEventMap['phone_requested'] = {status: 'sent'};
         try {
-          const botId = this.webViewOptions.botId;
-          await this.managers.appMessagesManager.unblockBot(botId);
-          await appImManager.requestPhone(botId.toPeerId(false));
+          // * a bot the user blocked is unblocked only once they agree to share the number, never by the app's asking
+          await requestPhone({
+            managers: this.managers,
+            peerId: this.webViewOptions.botId.toPeerId(false),
+            unblockBot: true
+          });
         } catch(err) {
           status.status = 'cancelled';
         }
@@ -1166,10 +1192,11 @@ export default class WebApp {
         telegramWebView.dispatchWebViewEvent('phone_requested', status);
       }, 'phone_requested', {status: 'cancelled'}),
       web_app_request_chat: this.debouncePopupMethod(async({req_id}: TelegramWebViewEventMap['web_app_request_chat']) => {
+        const managers = bindManagersToSession(this.managers);
         const botId = this.webViewOptions.botId;
         let sent = false;
         try {
-          const button = await this.managers.appAttachMenuBotsManager.getRequestedWebViewButton(botId, req_id);
+          const button = await managers.appAttachMenuBotsManager.getRequestedWebViewButton(botId, req_id);
           const buttonType = button?.type;
           if(buttonType?._ !== 'buttonTypeRequestPeer' || buttonType.peer_type._ === 'requestPeerTypeCreateBot') {
             throw new Error('REQUEST_CHAT_UNSUPPORTED');
@@ -1177,7 +1204,7 @@ export default class WebApp {
 
           const requestingPeerId = botId.toPeerId(false);
           const requestedPeerIds = await selectRequestPeers({button: buttonType, requestingPeerId});
-          await this.managers.appMessagesManager.sendBotRequestedPeer(
+          await managers.appMessagesManager.sendBotRequestedPeer(
             requestingPeerId,
             buttonType.button_id,
             requestedPeerIds,
@@ -1253,7 +1280,7 @@ export default class WebApp {
       web_app_stop_device_orientation: () => {
         this._deviceOrientationFreqMs = -1;
         const eventName = this._deviceOrientationAbsolute ? 'deviceorientationabsolute' : 'deviceorientation';
-        window.removeEventListener(eventName, this.handleDeviceOrientation);
+        window.removeEventListener(eventName, this.handleDeviceOrientation, true);
         this.telegramWebView.dispatchWebViewEvent('device_orientation_stopped', undefined);
         clearTimeout(this._deviceOrientationTimeoutId);
       },
@@ -1270,8 +1297,8 @@ export default class WebApp {
       web_app_open_location_settings: async() => {
         const botPermission = await this.managers.appBotsManager.readBotInternalStorage(this.webViewOptions.botId, 'locationPermission');
         if(botPermission == null) return;
-        appImManager.setInnerPeer({peerId: this.webViewOptions.botId.toPeerId()});
-        appSidebarRight.toggleSidebar(true);
+        hotReloadGuard.appImManager.setInnerPeer({peerId: this.webViewOptions.botId.toPeerId()});
+        hotReloadGuard.appSidebarRight.toggleSidebar(true);
       },
       web_app_request_file_download: this.handleFileDownload,
       web_app_device_storage_save_key: async({req_id, key, value}) => {
@@ -1332,19 +1359,20 @@ export default class WebApp {
               this.telegramWebView.dispatchWebViewEvent('prepared_message_failed', {error});
             } else {
               this.telegramWebView.dispatchWebViewEvent('prepared_message_sent', undefined);
-              this.forceHide();
+              this.forceHide(true);
             }
           }
         });
       }, 'prepared_message_failed', {error: 'USER_DECLINED'}),
       web_app_verify_age: async({passed, age}) => {
+        const managers = bindManagersToSession(this.managers);
         if(!passed) return;
-        const config = await this.managers.apiManager.getAppConfig();
+        const config = await managers.apiManager.getAppConfig();
 
         // * only the configured age-verification bot may attest age — otherwise any
         // * third-party Mini App could self-enable sensitive content
         const verifyAgeBotUsername = (config.verify_age_bot_username ?? 'TelegramAge').toLowerCase();
-        const usernames = await this.managers.appPeersManager.getPeerActiveUsernames(this.getPeerId());
+        const usernames = await managers.appPeersManager.getPeerActiveUsernames(this.getPeerId());
         if(!usernames.some((username) => username.toLowerCase() === verifyAgeBotUsername)) {
           return;
         }
@@ -1355,7 +1383,7 @@ export default class WebApp {
           return;
         }
 
-        await this.managers.appPrivacyManager.notifyAgeVerified();
+        await managers.appPrivacyManager.notifyAgeVerified();
       }
     });
 
@@ -1389,6 +1417,7 @@ export default class WebApp {
   }
 
   public async init(mountCallback: () => MaybePromise<void>) {
+    const managers = bindManagersToSession(this.managers);
     if(!this.attachMenuBot || !IS_WEB_APP_BROWSER_SUPPORTED) {
       const title = await this.getTitle(false);
       if(this.destroyed) {
@@ -1403,7 +1432,7 @@ export default class WebApp {
     /* if(this.webViewOptions.app) {
 
     } else  */try {
-      const attachMenuBot = this.attachMenuBot ?? await this.managers.appAttachMenuBotsManager.getAttachMenuBot(this.webViewOptions.botId);
+      const attachMenuBot = this.attachMenuBot ?? await managers.appAttachMenuBotsManager.getAttachMenuBot(this.webViewOptions.botId);
       if(this.destroyed) {
         return;
       }
@@ -1495,6 +1524,11 @@ export default class WebApp {
   }
 
   private prolongWebView() {
+    // * the first prolongation is 50s after the mount: the app may be closed by then, the account switched
+    if(this.destroyed) {
+      return;
+    }
+
     this.managers.appAttachMenuBotsManager.prolongWebView({
       queryId: (this.webViewResultUrl as WebViewResult.webViewResultUrl).query_id,
       ...this.webViewOptions
@@ -1516,7 +1550,7 @@ export default class WebApp {
       }
 
       if(err.type === 'QUERY_ID_INVALID') {
-        this.forceHide();
+        this.forceHide(true);
       } else {
         console.error('web app prolong error', err);
       }

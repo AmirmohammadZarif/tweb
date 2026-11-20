@@ -2,13 +2,15 @@ import {attachClickEvent} from '@helpers/dom/clickEvent';
 import AvatarListLoader from '@helpers/avatarListLoader';
 import {Photo} from '@layer';
 import appDownloadManager from '@lib/appDownloadManager';
-import appImManager from '@lib/appImManager';
 import rootScope from '@lib/rootScope';
 import AppMediaViewerBase from '@components/mediaViewer/base';
 import confirmationPopup from '@components/confirmationPopup';
 import {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import overlayAvatarVideoOnMover from '@components/mediaViewer/avatarVideo';
 import {i18n} from '@lib/langPack';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
+import {getPeerProfilePhotoActions, reportProfilePhoto, setMainProfilePhoto} from '@components/mediaViewer/profilePhotoActions';
 
 type AppMediaViewerAvatarTargetType = {element: HTMLElement, photoId: Photo.photo['id'], photo?: Photo.photo};
 export default class AppMediaViewerAvatar extends AppMediaViewerBase<'', 'delete', AppMediaViewerAvatarTargetType> {
@@ -17,6 +19,7 @@ export default class AppMediaViewerAvatar extends AppMediaViewerBase<'', 'delete
   private canDeletePromise: Promise<boolean>;
   private videoAvatarCleanup?: () => void;
   private fallbackPhotoId?: Photo.photo['id'];
+  private photoActions: ReturnType<typeof getPeerProfilePhotoActions>;
 
   constructor(peerId: PeerId, fallbackPhotoId?: Photo.photo['id']) {
     super(new AvatarListLoader({peerId, managers: rootScope.managers, fallbackPhotoId}), ['delete']);
@@ -36,17 +39,30 @@ export default class AppMediaViewerAvatar extends AppMediaViewerBase<'', 'delete
     this.buttons.delete.classList.add('hide');
     attachClickEvent(this.buttons.delete, this.onDeleteClick);
 
+    const btnMenuSetMain: ButtonMenuItemOptionsVerifiable = {
+      icon: 'user',
+      text: 'SetAsMain',
+      onClick: this.onSetMainClick,
+      verify: () => !!this.photoActions?.canSetMain
+    };
+    const btnMenuReport: ButtonMenuItemOptionsVerifiable = {
+      icon: 'flag',
+      text: 'ReportChat',
+      onClick: this.onReportClick,
+      verify: () => !!this.photoActions?.canReport
+    };
+
     this.setBtnMenuToggle([{
       icon: 'download',
       text: 'MediaViewer.Context.Download',
       onClick: this.onDownloadClick
-    }, this.btnMenuDelete = {
+    }, btnMenuSetMain, btnMenuReport, this.btnMenuDelete = {
       icon: 'delete',
       className: 'danger',
       text: 'Delete',
       onClick: this.onDeleteClick,
       verify: () => this.getCanDelete()
-    }]);
+    }], [btnMenuSetMain, btnMenuReport]);
 
     // * constructing html end
 
@@ -87,11 +103,12 @@ export default class AppMediaViewerAvatar extends AppMediaViewerBase<'', 'delete
   onDownloadClick = () => {
     appDownloadManager.downloadToDisc({
       media: this.target.photo,
-      queueId: appImManager.chat.bubbles.lazyLoadQueue.queueId
+      queueId: hotReloadGuard.appImManager.chat.bubbles.lazyLoadQueue.queueId
     });
   };
 
   onDeleteClick = async() => {
+    const managers = bindManagersToSession(this.managers);
     const peerId = this.peerId;
     const photoId = this.target.photoId;
     try {
@@ -108,15 +125,29 @@ export default class AppMediaViewerAvatar extends AppMediaViewerBase<'', 'delete
     }
 
     if(peerId === rootScope.myId) {
-      await this.managers.appProfileManager.deletePhotos([photoId as string]);
+      await managers.appProfileManager.deletePhotos([photoId as string]);
     } else if(peerId.isUser()) { // own bot, see computeCanDelete
-      await this.managers.appProfileManager.clearBotProfilePhoto(peerId.toUserId());
+      await managers.appProfileManager.clearBotProfilePhoto(peerId.toUserId());
     } else {
-      await this.managers.appChatsManager.editPhoto(peerId.toChatId());
+      await managers.appChatsManager.editPhoto(peerId.toChatId());
     }
 
     this.target = {element: this.content.media} as any;
     this.close();
+  };
+
+  // * the slide their menu was opened on (`getMenuTarget`)
+  onSetMainClick = async() => {
+    const target = this.getMenuTarget();
+    if(!target) return;
+    if(await setMainProfilePhoto(this.managers, this.peerId, target.photoId) && this.target === target) {
+      this.close();
+    }
+  };
+
+  onReportClick = () => {
+    const target = this.getMenuTarget();
+    if(target) reportProfilePhoto(this.peerId, target.photoId);
   };
 
   public async openMedia({
@@ -141,7 +172,16 @@ export default class AppMediaViewerAvatar extends AppMediaViewerBase<'', 'delete
       this.getCanDelete()
     ]);
 
+    if(this.isAskedTooLate()) return;
     this.buttons.delete.classList.toggle('hide', !canDelete);
+    this.photoActions = getPeerProfilePhotoActions({
+      peerId: this.peerId,
+      photoId: photo.id,
+      // * a chat's photo goes away, as it changes, by the right to change its info
+      canChangeInfo: canDelete,
+      fallbackPhotoId: this.fallbackPhotoId
+    });
+    this.updateMoreMenu();
 
     const ret = super._openMedia({
       media: photo,
@@ -182,27 +222,9 @@ export default class AppMediaViewerAvatar extends AppMediaViewerBase<'', 'delete
     });
   }
 
-  // The date line reads "<X of Y / Public Photo> • <date>". The base sets the
-  // date text; this prepends the avatar-specific prefix + a large-dot separator.
+  // The date line reads "<X of Y / Public Photo> • <date>"; re-applied on navigation and once the count loads.
   private applyDateExtra() {
-    const dateEl = this.author?.date;
-    if(!dateEl) return;
-
-    // Re-applied on navigation and once the count loads — drop the old prefix.
-    dateEl.querySelector('.media-viewer-date-extra')?.remove();
-    dateEl.querySelector('.media-viewer-date-dot')?.remove();
-
-    const content = this.getDateExtraContent();
-    if(!content) return;
-
-    const extra = document.createElement('span');
-    extra.classList.add('media-viewer-date-extra');
-    extra.append(content);
-
-    const dot = document.createElement('span');
-    dot.classList.add('media-viewer-date-dot');
-
-    dateEl.prepend(extra, dot);
+    this.setDateExtra(this.getDateExtraContent());
   }
 
   private getDateExtraContent(): HTMLElement | undefined {

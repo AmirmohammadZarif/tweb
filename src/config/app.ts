@@ -6,7 +6,7 @@
  */
 
 import type {TrueDcId} from '@types';
-import langPackLocalVersion from '@/langPackLocalVersion';
+import {BASE_DC_ID} from '@lib/accounts/authKeyFingerprint';
 
 export const MAIN_DOMAINS = ['web.telegram.org', 'webk.telegram.org', 'web.andropay.xyz'];
 export const DEFAULT_BACKGROUND_SLUG = 'pattern';
@@ -27,11 +27,10 @@ const App = {
   versionFull: import.meta.env.VITE_VERSION_FULL,
   build: +import.meta.env.VITE_BUILD,
   langPackVersion: +import.meta.env.VITE_LANG_PACK_VERSION,
-  langPackLocalVersion: langPackLocalVersion,
   langPack: 'webk',
   langPackCode: 'en',
   domains: MAIN_DOMAINS,
-  baseDcId: 2 as TrueDcId,
+  baseDcId: BASE_DC_ID as TrueDcId,
   isMainDomain: MAIN_DOMAINS.includes(location.hostname),
   suffix: 'K',
   threads,
@@ -39,6 +38,11 @@ const App = {
   cryptoWorkers: threads,
   interclientBroadcastChannel: 'tgweb'
 };
+
+// * "Telegram WebK 2.2 (681)" - how the app names itself, in the main menu and under Settings
+export function getAppVersionText() {
+  return `Telegram Web${App.suffix} ${App.version} (${App.build})`;
+}
 
 if(App.isMainDomain) { // use Webogram credentials then
   App.id = 2496;

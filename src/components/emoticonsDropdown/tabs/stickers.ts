@@ -4,16 +4,13 @@ import findUpClassName from '@helpers/dom/findUpClassName';
 import mediaSizes from '@helpers/mediaSizes';
 import {Document, MessagesAllStickers, StickerSet} from '@layer';
 import {MyDocument} from '@appManagers/appDocsManager';
-import {AppManagers} from '@lib/managers';
+import {ReadingManagers} from '@lib/managers';
 import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
 import rootScope, {BroadcastEvents} from '@lib/rootScope';
 import {putPreloader} from '@components/putPreloader';
 import showStickersPopup from '@components/popups/stickers';
 import findAndSplice from '@helpers/array/findAndSplice';
-import {attachClickEvent, simulateClickEvent} from '@helpers/dom/clickEvent';
-import noop from '@helpers/noop';
-import ButtonIcon from '@components/buttonIcon';
-import confirmationPopup from '@components/confirmationPopup';
+import {simulateClickEvent} from '@helpers/dom/clickEvent';
 import VisibilityIntersector, {OnVisibilityChangeItem} from '@components/visibilityIntersector';
 import findUpAsChild from '@helpers/dom/findUpAsChild';
 import forEachReverse from '@helpers/array/forEachReverse';
@@ -34,42 +31,85 @@ import {
 } from '@components/emoticonsDropdown/groupSetSection';
 import Icon from '@components/icon';
 import {getStickerSetInputById} from '@lib/appManagers/utils/stickers/getStickerSetInput';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
+import createStickersSearch, {StickersSearch} from '@components/emoticonsDropdown/stickersSearch';
+import appendClearRecentButton from '@components/emoticonsDropdown/clearRecentButton';
 
 type StickersTabItem = {element: HTMLElement, document: Document.document};
-export default class StickersTab extends EmoticonsTabC<StickersTabCategory<StickersTabItem>, Document.document[]> {
+// * `query` is a typed search's: the server is searched for it as well, unlike for a group
+type StickersSearchResult = {stickers: MyDocument[], query?: string};
+export default class StickersTab extends EmoticonsTabC<StickersTabCategory<StickersTabItem>, StickersSearchResult> {
   private stickerRenderer: SuperStickerRenderer;
   private groupSetController: GroupSetController;
   private groupSetHidden: boolean;
+  // * the server's search for the query on the screen: one typed on leaves it at once
+  private stickersSearch: StickersSearch;
 
-  constructor(managers: AppManagers) {
+  constructor(managers: ReadingManagers) {
     super({
       managers,
-      searchFetcher: async(value) => {
-        if(!value) return [];
-        return this.managers.appStickersManager.searchStickers(value);
+      searchFetcher: (value) => {
+        // * a cleared query is answered at once, which ends the search before it (and the first call
+        // comes from within super(), before `this` may be read)
+        if(!value) return {stickers: []};
+        // * neither the wait before its first page nor its later pages go on for a query left behind,
+        // whatever the new one's own lookup takes
+        this.stickersSearch?.destroy();
+        this.stickersSearch = undefined;
+        return this.managers.appStickersManager.searchStickers(value).then((stickers) => ({stickers, query: value}));
       },
-      groupFetcher: async(group) => {
-        if(!group) return [];
+      groupFetcher: (group) => {
+        if(!group) return {stickers: []};
 
-        if(group._ === 'emojiGroupPremium') {
-          return this.managers.appStickersManager.getPremiumStickers();
-        }
-
-        return this.managers.appStickersManager.getStickersByEmoticon({emoticon: group.emoticons, includeServerStickers: true});
+        const promise = group._ === 'emojiGroupPremium' ?
+          this.managers.appStickersManager.getPremiumStickers() :
+          this.managers.appStickersManager.getStickersByEmoticon({emoticon: group.emoticons, includeServerStickers: true});
+        return promise.then((stickers) => ({stickers}));
       },
-      processSearchResult: async({data: stickers, searching, grouping}) => {
-        if(!stickers || (!searching && !grouping)) {
+      processSearchResult: async({data, searching, grouping}) => {
+        if(!data || (!searching && !grouping)) {
           return;
         }
 
-        if(!stickers.length) {
+        // * the user's own stickers come first, the server's after them, page by page
+        const search = data.query && createStickersSearch(bindManagersToSession(this.managers), data.query, data.stickers);
+        this.stickersSearch = search || undefined;
+        const category = this.createCategory({styles: EmoticonsTabStyles.Stickers});
+        let cleaned = false, onCleaned: () => void;
+        onCleanup(() => {
+          cleaned = true;
+          onCleaned?.();
+          search?.destroy();
+          if(this.stickersSearch === search) {
+            this.stickersSearch = undefined;
+          }
+          category.middlewareHelper.destroy();
+          this.clearCategoryItems(category, true);
+        });
+
+        const stickers = search ? await search.first(data.stickers) : data.stickers;
+        if(cleaned) {
+          return;
+        }
+
+        // * a query typed on meanwhile ended this search before the server answered: what is on the
+        // screen stays until that query's results replace it
+        if(search && this.stickersSearch !== search) {
+          return new Promise<HTMLElement>((resolve) => onCleaned = () => resolve(undefined));
+        }
+
+        const notFound = () => {
           const span = i18n('NoStickersFound');
           span.classList.add('emoticons-not-found');
           return span;
+        };
+
+        // * a server page that did not come is no answer: it is asked for again below
+        if(!stickers.length && !search?.failed()) {
+          return notFound();
         }
 
         const container = this.categoriesContainer.cloneNode(false) as HTMLElement;
-        const category = this.createCategory({styles: EmoticonsTabStyles.Stickers});
         const promise = StickersTab.categoryAppendStickers(
           this,
           this.stickerRenderer,
@@ -79,12 +119,29 @@ export default class StickersTab extends EmoticonsTabC<StickersTabCategory<Stick
         );
         container.append(category.elements.container);
 
-        let cleaned = false;
-        onCleanup(() => {
-          cleaned = true;
-          category.middlewareHelper.destroy();
-          this.clearCategoryItems(category, true);
-        });
+        if(search) {
+          const sentinel = document.createElement('div');
+          container.append(sentinel);
+          search.paginate(sentinel, this.scrollable.container, (stickers) => {
+            if(cleaned) {
+              return;
+            }
+
+            return StickersTab.categoryAppendStickers(
+              this,
+              this.stickerRenderer,
+              category.items.length + stickers.length,
+              category,
+              stickers,
+              true
+            );
+          }, () => {
+            // * the first page came only on a retry, and with nothing in it
+            if(!cleaned && !category.items.length) {
+              container.replaceChildren(notFound());
+            }
+          });
+        }
 
         await promise;
 
@@ -320,18 +377,12 @@ export default class StickersTab extends EmoticonsTabC<StickersTabCategory<Stick
     });
     recentCategory.limit = 20;
 
-    const clearButton = ButtonIcon('close', {noRipple: true});
-    recentCategory.elements.title.append(clearButton);
-    attachClickEvent(clearButton, () => {
-      confirmationPopup({
-        titleLangKey: 'ClearRecentStickersAlertTitle',
-        descriptionLangKey: 'ClearRecentStickersAlertMessage',
-        button: {
-          langKey: 'Clear'
-        }
-      }).then(() => {
-        this.managers.appStickersManager.clearRecentStickers();
-      }, noop);
+    appendClearRecentButton({
+      category: recentCategory,
+      managers: this.managers,
+      titleLangKey: 'ClearRecentStickersAlertTitle',
+      descriptionLangKey: 'ClearRecentStickersAlertMessage',
+      clear: (managers) => managers.appStickersManager.clearRecentStickers()
     });
 
     const promises = [
@@ -368,7 +419,7 @@ export default class StickersTab extends EmoticonsTabC<StickersTabCategory<Stick
 
       this.repositionGroupSet();
 
-      rootScope.addEventListener('stickers_installed', (set) => {
+      this.listenerSetter.add(rootScope)('stickers_installed', (set) => {
         if(!this.categories[set.id]) {
           StickersTab.renderStickerSet(this, this.stickerRenderer, set, true);
           this.repositionGroupSet();
@@ -394,7 +445,7 @@ export default class StickersTab extends EmoticonsTabC<StickersTabCategory<Stick
     };
 
     const onStickerUpdatedPostponed = this.postponedEvent(onStickerUpdated);
-    rootScope.addEventListener('sticker_updated', (data) => {
+    this.listenerSetter.add(rootScope)('sticker_updated', (data) => {
       // using a sticker reshuffles the recent row, which must not happen under the cursor —
       // that waits for the panel to hide; faving and removing are the user's own doing right
       // there in the panel, so they land at once
@@ -402,14 +453,14 @@ export default class StickersTab extends EmoticonsTabC<StickersTabCategory<Stick
       (postpone ? onStickerUpdatedPostponed : onStickerUpdated)(data);
     });
 
-    rootScope.addEventListener('stickers_deleted', ({id}) => {
+    this.listenerSetter.add(rootScope)('stickers_deleted', ({id}) => {
       const category = this.categories[id];
       this.deleteCategory(category);
       // uninstalling may turn a deduped group set into one worth showing on its own
       this.groupSetController?.update();
     });
 
-    rootScope.addEventListener('stickers_top', this.postponedEvent((id) => {
+    this.listenerSetter.add(rootScope)('stickers_top', this.postponedEvent((id) => {
       const category = this.categories[id];
       if(category) {
         this.positionCategory(category, true);
@@ -419,7 +470,7 @@ export default class StickersTab extends EmoticonsTabC<StickersTabCategory<Stick
       }
     }));
 
-    rootScope.addEventListener('stickers_order', this.postponedEvent(({type, order}) => {
+    this.listenerSetter.add(rootScope)('stickers_order', this.postponedEvent(({type, order}) => {
       if(type !== 'stickers') {
         return;
       }
@@ -440,24 +491,25 @@ export default class StickersTab extends EmoticonsTabC<StickersTabCategory<Stick
     };
 
     const onStickersUpdatedPostponed = this.postponedEvent(onStickersUpdated);
-    rootScope.addEventListener('stickers_updated', (data) => {
+    this.listenerSetter.add(rootScope)('stickers_updated', (data) => {
       const category = this.categories[data.type === 'faved' ? 'faved' : 'recent'];
       const {limit} = category || {};
       const length = limit ? Math.min(limit, data.stickers.length) : data.stickers.length;
       // a list that got shorter means something was taken out of it — clearing the recent
-      // stickers, un-faving one — and the user has to see that happen; a list of the same
-      // length is the reorder that follows using a sticker, which waits for the panel to hide
+      // stickers, un-faving one — and the user has to see that happen, as a change of theirs
+      // that the server did not take going back; a list of the same length is the reorder that
+      // follows using a sticker, which waits for the panel to hide
       const shrunk = category && length < category.items.length;
-      (shrunk ? onStickersUpdated : onStickersUpdatedPostponed)(data);
+      (shrunk || data.reverted ? onStickersUpdated : onStickersUpdatedPostponed)(data);
     });
 
-    rootScope.addEventListener('app_config', () => {
+    this.listenerSetter.add(rootScope)('app_config', () => {
       this.managers.apiManager.getLimit('favedStickers').then((limit) => {
         this.setFavedLimit(limit);
       });
     });
 
-    mediaSizes.addEventListener('resize', this.resizeCategories);
+    this.listenerSetter.add(mediaSizes)('resize', this.resizeCategories);
 
     this.attachHelpers({
       verifyRecent: (target) => !!findUpAsChild(target, this.categories['recent'].elements.items)
@@ -544,16 +596,22 @@ export default class StickersTab extends EmoticonsTabC<StickersTabCategory<Stick
   }
 
   public destroy() {
-    this.stickerRenderer.destroy();
+    // * made by init(): a tab never opened has none
+    this.stickerRenderer?.destroy();
     super.destroy();
   }
 
+  /**
+   * `mount` puts the stickers in whether or not the category is observed as visible: a search's results,
+   * which are not observed, take their later pages that way
+   */
   public static categoryAppendStickers(
     tab: EmoticonsTabC<any>,
     stickerRenderer: SuperStickerRenderer,
     count: number,
     category: StickersTabCategory<StickersTabItem>,
-    promise: MaybePromise<MyDocument[]>
+    promise: MaybePromise<MyDocument[]>,
+    mount?: boolean
   ) {
     const {container} = category.elements;
 
@@ -564,7 +622,7 @@ export default class StickersTab extends EmoticonsTabC<StickersTabCategory<Stick
       promise,
       apiManagerProxy.isPremiumFeaturesHidden()
     ]).then(([documents, isPremiumFeaturesHidden]) => {
-      const isVisible = tab.isCategoryVisible(category);
+      const isVisible = mount || tab.isCategoryVisible(category);
 
       const elements = documents.map((document) => {
         if(isPremiumFeaturesHidden && getStickerEffectThumb(document)) {

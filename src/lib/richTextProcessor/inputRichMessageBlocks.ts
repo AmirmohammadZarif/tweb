@@ -11,6 +11,7 @@ export function inputRichText(text: RichText): RichText {
     case 'textAutoEmail':
     case 'textAutoPhone':
     case 'textBankCard':
+    case 'textTonAddress':
     case 'textDiff':
       return inputRichText(text.text);
     case 'textConcat':
@@ -100,6 +101,7 @@ export function inputPageBlock(block: PageBlock): PageBlock {
         caption: inputPageCaption(block.caption)
       };
     case 'pageBlockAudio':
+    case 'pageBlockDocument':
       return {...block, caption: inputPageCaption(block.caption)};
     case 'pageBlockCollage':
     case 'pageBlockSlideshow':

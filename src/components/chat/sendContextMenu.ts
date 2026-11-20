@@ -6,9 +6,28 @@ import {getMiddleware, Middleware, MiddlewareHelper} from '@helpers/middleware';
 import {Reaction} from '@layer';
 import rootScope from '@lib/rootScope';
 import {ButtonMenuItemOptionsVerifiable, ButtonMenuSync} from '@components/buttonMenu';
-import showPremiumPopup from '@components/popups/premium';
 import ChatContextMenu from '@components/chat/contextMenu';
 import {ChatReactionsMenu} from '@components/chat/reactionsMenu';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
+import type {ButtonMenuDirection} from '@components/buttonMenuToggle';
+import {getOverlayRoot} from '@helpers/appWindow';
+import {positionMenuTrigger} from '@helpers/positionMenu';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
+import verifyMenuItem from '@helpers/verifyMenuItem';
+import I18n from '@lib/langPack';
+
+/**
+ * A send button's menu lives in the overlay root like every other menu, placed against the button:
+ * inside the composer or a popup it would be cut off by whatever clips them. Not being inside them, it
+ * does not go away with them either, so it closes when `middleware` (its owner's) is cleaned
+ */
+export function mountSendMenu(element: HTMLElement, trigger: HTMLElement, direction: ButtonMenuDirection, middleware: Middleware) {
+  getOverlayRoot().append(element);
+  positionMenuTrigger(trigger, element, direction, {bottom: 8});
+  middleware.onClean(() => {
+    if(element.classList.contains('active')) contextMenuController.close();
+  });
+}
 
 export default class SendMenu {
   private type: 'schedule' | 'reminder';
@@ -19,16 +38,21 @@ export default class SendMenu {
     onSilentClick: () => void,
     onScheduleClick: () => void,
     onSendWhenOnlineClick?: () => void,
-    onRef: (element: HTMLElement) => void,
     middleware: Middleware,
-    openSide: string,
+    openSide: ButtonMenuDirection,
     onContextElement: HTMLElement,
     onOpen?: () => boolean,
     onToggle?: (open: boolean) => void,
     canSendWhenOnline?: () => boolean | Promise<boolean>,
     withEffects?: () => boolean,
+    // * no room past the menu's end: the effects bar keeps over the menu, with no bubble at the button
+    effectsWithinMenu?: () => boolean,
     effect?: () => DocId,
-    onEffect?: (effect: DocId) => void
+    onEffect?: (effect: DocId) => void,
+    /** what the AI editor does to what is sent, when a request of it is saved for that */
+    aiSendStyleLabel?: () => string,
+    onSendWithoutAiStyleClick?: () => void,
+    onRemoveAiStyleClick?: () => void
   }) {
     this.middlewareHelper = options.middleware.create();
     this.createMenu();
@@ -40,6 +64,20 @@ export default class SendMenu {
   }
 
   private createButtons(): ButtonMenuItemOptionsVerifiable[] {
+    // * named by what it turns off, as the menu opens
+    const turnOffAiSendStyle: ButtonMenuItemOptionsVerifiable = {
+      icon: 'edit_stars',
+      text: 'AiEditor.ApplyOnSend.TurnOff',
+      textArgs: [''],
+      onClick: this.options.onRemoveAiStyleClick,
+      verify: () => {
+        const label = this.options.aiSendStyleLabel?.();
+        if(!label) return false;
+        (I18n.weakMap.get(turnOffAiSendStyle.textElement) as I18n.IntlElement)?.update({args: [label]});
+        return true;
+      }
+    };
+
     return [{
       icon: 'mute',
       text: 'Chat.Send.WithoutSound',
@@ -61,6 +99,11 @@ export default class SendMenu {
       onClick: this.options.onSendWhenOnlineClick,
       verify: async() => this.type === 'schedule' && (await this.options.canSendWhenOnline?.()) && !this.isPaid
     }, {
+      icon: 'send2',
+      text: 'AiEditor.ApplyOnSend.SendAsIs',
+      onClick: this.options.onSendWithoutAiStyleClick,
+      verify: () => !!this.options.aiSendStyleLabel?.()
+    }, turnOffAiSendStyle, {
       icon: 'crossround',
       text: 'Effect.Remove',
       danger: true,
@@ -71,10 +114,10 @@ export default class SendMenu {
 
   private createMenu() {
     this.middlewareHelper.clean();
-    const middleware = this.middlewareHelper.get();
+    const menuMiddleware = this.middlewareHelper.get();
 
     const listenerSetter = new ListenerSetter();
-    middleware.onClean(() => {
+    menuMiddleware.onClean(() => {
       listenerSetter.removeAll();
     });
 
@@ -82,18 +125,18 @@ export default class SendMenu {
     const buttons = this.createButtons();
     const element = ButtonMenuSync({buttons, listenerSetter});
     element.classList.add('menu-send', this.options.openSide);
-    this.options.onRef(element);
 
     attachContextMenuListener({
       element: this.options.onContextElement,
       callback: async(e) => {
+        const managers = bindManagersToSession(rootScope.managers);
         if(this.options.onOpen && !this.options.onOpen()) {
           return;
         }
 
         cancelEvent(e);
         await Promise.all(buttons.map(async(button) => {
-          const result = await button.verify();
+          const result = await verifyMenuItem(button);
           button.element.classList.toggle('hide', !result);
         }));
 
@@ -104,7 +147,7 @@ export default class SendMenu {
         let reactionsMenu: ChatReactionsMenu;
         if(this.options.withEffects?.()) {
           reactionsMenu = new ChatReactionsMenu({
-            managers: rootScope.managers,
+            managers,
             type: reactionsMenuPosition,
             middleware,
             onFinish: async(reaction) => {
@@ -116,15 +159,14 @@ export default class SendMenu {
 
               const stickerDocId = (reaction as Reaction.reactionCustomEmoji).document_id;
               if(!rootScope.premium && !reactionsMenu.freeCustomEmoji.has(stickerDocId)) {
-                showPremiumPopup({feature: 'premium_stickers'});
+                hotReloadGuard.showPremiumPopup({feature: 'premium_stickers'});
                 return;
               }
 
-              const availableEffects = await rootScope.managers.appReactionsManager.getAvailableEffects();
+              const availableEffects = await managers.appReactionsManager.getAvailableEffects();
               const availableEffect = availableEffects.find((effect) => effect.effect_sticker_id === stickerDocId);
               this.options.onEffect(availableEffect.id);
             },
-            getOpenPosition: (hasMenu) => ChatContextMenu.getReactionsOpenPosition(reactionsMenu, hasMenu),
             isEffects: true
           });
 
@@ -133,6 +175,15 @@ export default class SendMenu {
           // const menuPadding = ChatContextMenu.getReactionsMenuPadding(reactionsMenuPosition);
         }
 
+        // * the owner went away while the menu was being built
+        if(!menuMiddleware()) {
+          middlewareHelper.destroy();
+          return;
+        }
+
+        const trigger = this.options.onContextElement;
+        element.classList.toggle('effects-within-menu', !!this.options.effectsWithinMenu?.());
+        mountSendMenu(element, trigger, this.options.openSide, menuMiddleware);
         const reactionsCallbacks = reactionsMenu && ChatContextMenu.appendReactionsMenu({element: element, reactionsMenu, reactionsMenuPosition});
 
         this.options.onToggle?.(true);
@@ -140,11 +191,12 @@ export default class SendMenu {
           this.options.onToggle?.(false);
           reactionsCallbacks?.onClose();
           middlewareHelper.destroy();
-          this.createMenu();
+          // * not when it closes because its owner is being destroyed
+          if(menuMiddleware()) this.createMenu();
           setTimeout(() => {
             element.remove();
           }, 400);
-        });
+        }, trigger);
 
         reactionsCallbacks?.onAfterInit();
       },

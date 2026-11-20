@@ -1,5 +1,6 @@
 import {openEditor, settleNativeSelection, setEditorDocument as setDocument} from './fixtures/chatInputEditorTest';
-import {devices, expect, test, type Page} from '@playwright/test';
+import {devices, expect, type Page} from '@playwright/test';
+import {test} from './workerContext';
 import type {JSONContent} from '@tiptap/core';
 import {CHAT_INPUT_EDITOR_TEST_MEDIA_URL} from '@components/chat/inputEditor/testData';
 import type {ChatInputEditorBrowserHarness, TextblockDescriptor} from './fixtures/chatInputEditor';
@@ -212,6 +213,28 @@ test('moves a body caret to the summary when Details is collapsed', async({page}
   expect(selection.parentOffset).toBe('Summary'.length);
   expect(await page.locator('[data-rich-message-details]').getAttribute('data-editor-open'))
   .toBe('false');
+});
+
+// a space bar held down: spaces past the line's end wrap with the caret instead of hanging out of the field, where
+// Firefox scrolled the page's hidden overflow, and the whole interface with it, to show the caret (in the app: this
+// page has no such overflow, so here it is the caret out of the field that tells, in Chromium and WebKit)
+test('keeps the caret of a run of spaces inside the field, the page unscrolled', async({page}) => {
+  await setDocument(page, {type: 'doc', content: [paragraph('hello')]});
+  await setCaret(page, await blocks(page), 'hello', 'end');
+  for(let i = 0; i < 4; ++i) await page.keyboard.insertText(' '.repeat(100));
+  await settleNativeSelection(page);
+
+  const state = await page.evaluate(() => {
+    const editor = document.getElementById('editor');
+    const caret = getSelection().getRangeAt(0).getBoundingClientRect();
+    const box = editor.getBoundingClientRect();
+    const scrolled = [...document.querySelectorAll('*')].filter((element) => element.scrollLeft).map((element) => element.tagName);
+    return {caretRight: caret.right, boxRight: box.right, scrolled, scrollX: window.scrollX, text: editor.textContent.length};
+  });
+  expect(state.text).toBe(405);
+  expect(state.caretRight).toBeLessThanOrEqual(state.boxRight + 1);
+  expect(state.scrolled).toEqual([]);
+  expect(state.scrollX).toBe(0);
 });
 
 test('undo and redo map both content and caret through a browser typing transaction', async({page}) => {
@@ -1087,4 +1110,25 @@ for(const key of ['Delete', 'Backspace'] as const) for(const source of ['keyboar
   expect(await page.evaluate(() => window.chatInputEditorHarness.document())).toEqual(after);
   expect(await page.evaluate(() => window.chatInputEditorHarness.undo())).toBe(true);
   expect(await page.evaluate(() => window.chatInputEditorHarness.document())).toEqual(before);
+});
+
+// Nothing for a line break to separate: in an empty composer it only grew the field by an empty row.
+test('an empty composer takes no line break, whichever key makes one', async({page}) => {
+  await openEditor(page);
+  const editor = page.locator('#editor');
+  await editor.click();
+  await settleNativeSelection(page);
+  const breaks = editor.locator('br:not(.ProseMirror-trailingBreak)');
+  for(const key of ['Enter', 'Shift+Enter', 'ControlOrMeta+Enter']) {
+    await page.keyboard.press(key);
+    await settleNativeSelection(page);
+    expect(await blocks(page), key).toHaveLength(1);
+    await expect(breaks, key).toHaveCount(0);
+  }
+
+  // with text in it the same key breaks the line as before
+  await page.keyboard.type('line');
+  await page.keyboard.press('Enter');
+  await settleNativeSelection(page);
+  expect((await blocks(page)).map(({text}) => text)).toEqual(['line', '']);
 });

@@ -31,6 +31,7 @@ export interface MTAppConfig {
   ringtone_size_max?:                        number;
   ringtone_saved_count_max?:                 number;
   premium_purchase_blocked?:                 boolean;
+  web_widgets_disabled?:                     boolean;
   channels_limit_default?:                   number;
   channels_limit_premium?:                   number;
   saved_gifs_limit_default?:                 number;
@@ -64,6 +65,10 @@ export interface MTAppConfig {
   reactions_in_chat_max?:                    number;
   default_emoji_statuses_stickerset_id?:     string;
   premium_promo_order?:                      PremiumPromoFeatureType[];
+  business_promo_order?:                     PremiumPromoFeatureType[];
+  business_chat_links_limit?:                number;
+  intro_title_length_limit?:                 number;
+  intro_description_length_limit?:           number;
   premium_bot_username?:                     string;
   premium_invoice_slug?:                     string;
   premium_playmarket_direct_currency_list?:  string[];
@@ -93,6 +98,7 @@ export interface MTAppConfig {
   stories_stealth_cooldown_period?:          number;
   stories_stealth_future_period?:            number;
   stories_stealth_past_period?:              number;
+  story_viewers_expire_period?:              number;
   giveaway_add_peers_max?:                   number;
   giveaway_boosts_per_premium?:              number;
   giveaway_countries_max?:                   number;
@@ -111,6 +117,7 @@ export interface MTAppConfig {
   saved_dialogs_pinned_limit_default?:       number;
   saved_dialogs_pinned_limit_premium?:       number;
   boosts_per_sent_gift?:                     number;
+  boosts_channel_level_max?:                 number;
   cachedTime?:                               number;
   hash?:                                     number;
   pm_read_date_expire_period?:               number;
@@ -149,6 +156,12 @@ export interface MTAppConfig {
   verify_age_country?:                       string;
   ton_usd_rate?:                             number;
   ton_topup_url?:                            string;
+  ton_blockchain_explorer_url?:              string;
+  wallet_available?:                         boolean;
+  wallet_transfer_min_nanos?:                number;
+  wallet_gasless_min_nanos?:                 number;
+  wallet_gasless_daily_transfers?:           number;
+  old_wallet_bot_username?:                  string;
   ton_stargift_resale_amount_max?:            number;
   ton_stargift_resale_amount_min?:            number;
   ton_stargift_resale_commission_permille?:   number;

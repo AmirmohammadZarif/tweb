@@ -160,10 +160,14 @@ from becoming a link while still admitting the relative hrefs upstream allowed;
   authored quotes, offsets and history.
 - A list is rich-only, as in the official clients: entities have no list, and
   what the field shows as one must not leave as `1. ` text. The typed marker
-  still makes one in the collapsed field. The other way round, Telegram text
-  never becomes a list — a plain draft or a plain message being edited keeps
-  its `1. ` lines as text, and so does every plain field. A rich list sent
-  without formatting is written out with the same markers.
+  still makes one in the collapsed field where a rich message goes out as it
+  is; without Premium (`rich_message_posting` `premium`) the collapsed field
+  runs on the plain schema, as a caption does, and only the expanded editor —
+  or a rich draft already in the field — makes lists and the formatting only a
+  rich message carries (`RichMessageInput`'s `canSendRich`). The other way
+  round, Telegram text never becomes a list — a plain draft or a plain message
+  being edited keeps its `1. ` lines as text, and so does every plain field. A
+  rich list sent without formatting is written out with the same markers.
 - Tables have an explicit title/wrapper and preserve rectangular selections.
   Block movement respects container schemas and list numbering. A compact
   table is the table's `compact` attribute, sent as `pageBlockTable.compact`.
@@ -191,6 +195,17 @@ from becoming a link while still admitting the relative hrefs upstream allowed;
 - Media upload completion updates the existing node and maps selection;
   it must not add an unrelated history step or orphan an undoable upload.
   Local preview URLs remain owned while history/HMR can restore them.
+- A selection in a rich message copies the blocks it takes (`richMessageCopy`,
+  `sliceRichQuoteBlocks`) beside their flat text and entities, and the field
+  pastes those blocks: a heading stays a heading, without the bold the
+  browser's copy of a drawn heading carries in its `font-weight`. Any page can
+  write them, so only texts a rich message carries go in (`mapRichQuoteTexts`
+  with `normalizeRichQuoteFragment`: no pictures, no blocks of unknown kind);
+  a field that cannot hold them all (a plain one) pastes the flat text.
+- A mark that runs over several inline nodes becomes one wrapper round them
+  (`wrapMarkRuns`), never neighbouring equal ones. The server merges those, and
+  a custom emoji alone in the first of them is lost: an edited
+  `[textBold(emoji), textBold(text)]` comes back as `textBold(text)`.
 - Shared `inputRichMessageBlocks` normalizes server blocks for both editor
   loading and manager operations. `concatRichText` never mutates its inputs.
 - Ordered-list rules and RichText content detection live in

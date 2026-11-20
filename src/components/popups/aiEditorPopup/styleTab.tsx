@@ -2,13 +2,13 @@ import fieldSectionStyles from '@/scss/modulePartials/fieldSectionCaption.module
 import {IconTsx} from '@components/iconTsx';
 import Scrollable from '@components/scrollable2';
 import {Skeleton} from '@components/skeleton';
-import Space from '@components/space';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import {HeightTransition} from '@helpers/solid/heightTransition';
 import {I18nTsx} from '@helpers/solid/i18n';
 import {useEdgeAutoScroll} from '@helpers/solid/useEdgeAutoScroll';
 import classNames from '@helpers/string/classNames';
 import useElementSize from '@hooks/useElementSize';
+import {useObserveResize} from '@hooks/useObserveResize';
 import {useScrollPosition} from '@hooks/useScrollPosition';
 import {AiComposeTone} from '@layer';
 import {useHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
@@ -17,7 +17,7 @@ import {createStore, reconcile, SetStoreFunction, unwrap} from 'solid-js/store';
 import {TransitionGroup} from 'solid-transition-group';
 import {usePopupContext} from '../indexTsx';
 import styles from './bodyContent.module.scss';
-import {AiEditorPopupContext} from './context';
+import {AiEditorPopupContext, takeSavedSendStyle, useAiEditorRequest} from './context';
 import showCreateTonePopup from './createTonePopup';
 import {CreatorLink} from './creatorLink';
 import {useMaxSavedTones} from './limits';
@@ -31,6 +31,8 @@ import {
   useAiComposerPromptInput,
   useAiComposerPromptMaxLength
 } from './composerParts';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
+import getAiComposeToneKey from '@appManagers/utils/aiTones/getAiComposeToneKey';
 
 
 export const StyleTab = () => {
@@ -48,9 +50,12 @@ export const StyleTab = () => {
 
   const hasArrows = !IS_TOUCH_SUPPORTED;
 
-  const [emojify, setEmojify] = createSignal(false);
+  const savedSendStyle = takeSavedSendStyle(context, (style) => !style.translateTo && !style.proofRead);
+  let toneToSelect = !savedSendStyle?.customPrompt ? savedSendStyle?.toneNameOrId : undefined;
+
+  const [emojify, setEmojify] = createSignal(!!savedSendStyle?.emojify);
   const [promptPending, setPromptPending] = createSignal(false);
-  const [promptSelected, setPromptSelected] = createSignal(false);
+  const [promptSelected, setPromptSelected] = createSignal(!!savedSendStyle?.customPrompt);
   const [tonesListEl, setTonesListEl] = createSignal<HTMLDivElement>();
   const [selectedTone, setSelectedTone] = createSignal<AiComposeTone>();
 
@@ -75,9 +80,37 @@ export const StyleTab = () => {
   const maxSavedTones = useMaxSavedTones();
 
   const scrollableSize = hasArrows ? useElementSize(tonesListEl) : {width: 0, height: 0};
-  const scrollLeft = hasArrows ? useScrollPosition(tonesListEl, 'x') : () => 0;
-  const isScrolledLeft = () => scrollLeft() <= 1;
-  const isScrolledRight = () => !tonesListEl() || tonesListEl().scrollWidth - scrollLeft() - scrollableSize.width <= 1;
+  // * the distance from the row's inline start: the right edge in RTL
+  const scrollFromStart = hasArrows ? useScrollPosition(tonesListEl, 'x') : () => 0;
+  const isScrolledToStart = () => scrollFromStart() <= 1;
+  const isScrolledToEnd = () => !tonesListEl() || tonesListEl().scrollWidth - scrollFromStart() - scrollableSize.width <= 1;
+
+  // * styles that do not all fit widen, from the narrowest they get (`--tone-min-width`), so that the last one in sight
+  // * is cut in half at the row's end: that shows the row goes on. Those that fit stretch over it by themselves
+  const fitTones = () => {
+    const list = tonesListEl();
+    if(!list) return;
+    const style = getComputedStyle(list);
+    const minWidth = parseFloat(style.getPropertyValue('--tone-min-width'));
+    const gap = parseFloat(style.columnGap) || 0;
+    const width = list.clientWidth - parseFloat(style.paddingInlineStart);
+    const count = [...list.children].filter((child) => !child.classList.contains(styles.exit)).length;
+    if(count * minWidth + (count - 1) * gap <= width) {
+      list.style.removeProperty('--tone-width');
+      return;
+    }
+
+    const whole = Math.max(1, Math.floor((width - minWidth / 2) / (minWidth + gap)));
+    list.style.setProperty('--tone-width', (width - whole * gap) / (whole + .5) + 'px');
+  };
+  useObserveResize(tonesListEl, fitTones);
+  createEffect(() => {
+    const list = tonesListEl();
+    if(!list) return;
+    const observer = new MutationObserver(fitTones);
+    observer.observe(list, {childList: true});
+    onCleanup(() => observer.disconnect());
+  });
 
   const selectedToneAuthorId = createMemo(() => {
     const tone = selectedTone();
@@ -99,6 +132,12 @@ export const StyleTab = () => {
 
     // keeps the original reference to the mutable tones, will basically keep the same data when switching between tabs
     context.initialTones = unwrap(tones);
+
+    if(toneToSelect) {
+      const id = toneToSelect;
+      toneToSelect = undefined;
+      setSelectedTone(tones.find((tone) => getAiComposeToneKey(tone) === id));
+    }
   });
 
   const savedTones = () => tones.filter(tone => tone._ === 'aiComposeTone').length;
@@ -147,6 +186,11 @@ export const StyleTab = () => {
     onSubmit: generateWithPrompt
   });
 
+  if(savedSendStyle?.customPrompt) {
+    setPromptText(savedSendStyle.customPrompt);
+    generateWithPrompt();
+  }
+
   createEffect(() => {
     if(!promptSelected() || hasResult()) return;
     const action = {
@@ -162,14 +206,23 @@ export const StyleTab = () => {
     const localSelectedTone = selectedTone();
     if(!localSelectedTone) return undefined;
 
-    if(localSelectedTone._ === 'aiComposeTone') {
-      // Make sure the request refires when tone data changes
-      track(() => ({...localSelectedTone}));
-      return localSelectedTone.id.toString();
-    }
-
-    return localSelectedTone.tone;
+    // Make sure the request refires when tone data changes
+    if(localSelectedTone._ === 'aiComposeTone') track(() => ({...localSelectedTone}));
+    return getAiComposeToneKey(localSelectedTone);
   };
+
+  // * what is asked with a prompt is the prompt applied last, not one being typed, nor nothing while it is asked again
+  const [lastPrompt, setLastPrompt] = createSignal<string>();
+  createComputed(() => {
+    const prompt = appliedPrompt();
+    if(prompt) setLastPrompt(prompt);
+  });
+  useAiEditorRequest(context, () => ({
+    text: originalText,
+    customPrompt: promptSelected() ? lastPrompt() : undefined,
+    toneNameOrId: selectedToneSlugOrId(),
+    emojify: emojify()
+  }));
 
   const getToneContextMenu = (tone: AiComposeTone) => {
     if(tone._ !== 'aiComposeTone') return undefined;
@@ -190,8 +243,9 @@ export const StyleTab = () => {
 
   return (
     <div>
-      <div class={styles.sectionWrapper}>
-        <div class={styles.section}>
+      <AiComposerSection>
+        {/* the styles to choose from head the section of the text they are tried on */}
+        <div class={styles.sectionWrapper}>
           <Scrollable class={styles.tonesList} ref={setTonesListEl} axis='x' relative>
             <TransitionGroup name='fade-2' moveClass='t-move' onBeforeExit={(el) => el.classList.add(styles.exit)}>
               <Tone
@@ -233,70 +287,72 @@ export const StyleTab = () => {
               </Show>
             </TransitionGroup>
           </Scrollable>
-        </div>
-        {hasArrows && (
-          <>
-            <IconTsx
-              class={classNames(styles.sectionArrow, styles.sectionArrowLeft)}
-              classList={{
-                [styles.hidden]: isScrolledLeft()
-              }}
-              icon='arrowhead'
-            />
-            <IconTsx
-              class={classNames(styles.sectionArrow, styles.sectionArrowRight)}
-              classList={{
-                [styles.hidden]: isScrolledRight()
-              }}
-              icon='arrowhead'
-            />
-          </>
-        )}
-      </div>
-      <Space amount='1rem' />
-      <AiComposerSection>
-        <TransitionGroup
-          name='fade-2'
-          moveClass='t-move-std'
-          onBeforeExit={el => {
-            if(!(el instanceof HTMLElement)) return;
-            el.classList.add(styles.exit);
-          }}
-        >
-          <Show when={promptSelected()}>
-            <div class={styles.promptField}>
-              <AiComposerPromptField
-                instanceRef={setPromptInputField}
-                label='AiEditor.PromptPlaceholder'
-                maxLength={maxPromptLength()}
-                onRawInput={onPromptInput}
-                value={promptText()}
+          {hasArrows && (
+            <>
+              <IconTsx
+                class={classNames(styles.sectionArrow, styles.sectionArrowStart)}
+                classList={{
+                  [styles.hidden]: isScrolledToStart()
+                }}
+                icon='arrowhead'
               />
-            </div>
-          </Show>
-          {/* Don't care about isAppearing here, original content is always initially uncollapsed */}
-          <Original
-            isAppearing={false}
-            text={originalText}
-            onEmojify={!emojify() && !selectedTone() && !promptSelected() ?
-              () => setEmojify(true) :
-              undefined}
-          />
-          <Show when={emojify() || selectedTone() || appliedPrompt()}>
-            <Divider />
-            <Result
-              emojify={emojify()}
-              onEmojify={() => setEmojify(!emojify())}
-              onPendingChange={setPromptPending}
-              composeMessageWithAiArgs={{
-                text: originalText,
-                customPrompt: appliedPrompt(),
-                toneNameOrId: selectedToneSlugOrId(),
-                emojify: emojify()
-              }}
+              <IconTsx
+                class={classNames(styles.sectionArrow, styles.sectionArrowEnd)}
+                classList={{
+                  [styles.hidden]: isScrolledToEnd()
+                }}
+                icon='arrowhead'
+              />
+            </>
+          )}
+        </div>
+        {/* what leaves takes its place at the top of this part, not over the styles */}
+        <div class={styles.tonesRest}>
+          <TransitionGroup
+            name='fade-2'
+            moveClass='t-move-std'
+            onBeforeExit={el => {
+              if(!(el instanceof HTMLElement)) return;
+              el.classList.add(styles.exit);
+            }}
+          >
+            <Show when={promptSelected()}>
+              <div class={styles.promptField}>
+                <AiComposerPromptField
+                  instanceRef={setPromptInputField}
+                  label='AiEditor.PromptPlaceholder'
+                  maxLength={maxPromptLength()}
+                  onRawInput={onPromptInput}
+                  value={promptText()}
+                />
+              </div>
+            </Show>
+            {/* the styles end under the prompt they are written with, moving down as it comes */}
+            <div class={styles.tonesBorder} />
+            {/* Don't care about isAppearing here, original content is always initially uncollapsed */}
+            <Original
+              isAppearing={false}
+              text={originalText}
+              onEmojify={!emojify() && !selectedTone() && !promptSelected() ?
+                () => setEmojify(true) :
+                undefined}
             />
-          </Show>
-        </TransitionGroup>
+            <Show when={emojify() || selectedTone() || appliedPrompt()}>
+              <Divider />
+              <Result
+                emojify={emojify()}
+                onEmojify={() => setEmojify(!emojify())}
+                onPendingChange={setPromptPending}
+                composeMessageWithAiArgs={{
+                  text: originalText,
+                  customPrompt: appliedPrompt(),
+                  toneNameOrId: selectedToneSlugOrId(),
+                  emojify: emojify()
+                }}
+              />
+            </Show>
+          </TransitionGroup>
+        </div>
       </AiComposerSection>
       <HeightTransition>
         <Show when={selectedToneAuthorId()}>
@@ -380,6 +436,7 @@ const useShareTone = ({tone}: UseShareToneArgs) => {
   return () => {
     showSharingPickerPopup({
       onSelect: async([peer]) => {
+        const managers = bindManagersToSession(rootScope.managers);
         if(!peer) return;
 
         const preparedPaymentResult = await PaidMessagesInterceptor.prepareStarsForPayment({
@@ -390,7 +447,7 @@ const useShareTone = ({tone}: UseShareToneArgs) => {
         if(preparedPaymentResult === PaidMessagesInterceptor.PaymentRejectedSymbol) throw new Error();
 
         const link = 'https://t.me/addstyle/' + tone.slug;
-        rootScope.managers.appMessagesManager.sendText({
+        managers.appMessagesManager.sendText({
           peerId: peer.peerId,
           threadId: peer.threadId,
           replyToMonoforumPeerId: peer.monoforumThreadId,
@@ -416,9 +473,10 @@ const useDeleteTone = ({
   const {rootScope, toastNew, confirmationPopup} = useHotReloadGuard();
 
   return async() => {
+    const managers = bindManagersToSession(rootScope.managers);
     try {
       if(isSaved) {
-        await rootScope.managers.aiTonesManager.removeSavedTone(tone.id);
+        await managers.aiTonesManager.removeSavedTone(tone.id);
       } else {
         try {
           await confirmationPopup({
@@ -429,7 +487,7 @@ const useDeleteTone = ({
         } catch{
           return;
         }
-        await rootScope.managers.aiTonesManager.deleteTone(tone.id.toString());
+        await managers.aiTonesManager.deleteTone(tone.id.toString());
       }
 
       setTones(prev => prev.filter(t => t._ !== 'aiComposeTone' || t.id !== tone.id))

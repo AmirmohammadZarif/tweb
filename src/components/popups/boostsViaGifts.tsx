@@ -4,18 +4,17 @@ import I18n, {FormatterArguments, LangPackKey, _i18n, i18n, join} from '@lib/lan
 import CheckboxField from '@components/checkboxField';
 import Section from '@components/section';
 import RangeStepsSelector from '@components/rangeStepsSelector';
-import {Accessor, For, JSX, createEffect, createMemo, createSignal, onCleanup, onMount, untrack} from 'solid-js';
+import {Accessor, For, JSX, createEffect, createMemo, createSignal, onCleanup, untrack} from 'solid-js';
 import tsNow from '@helpers/tsNow';
 import showDatePickerPopup from '@components/popups/datePicker';
 import {formatFullSentTime, formatMonthsDuration} from '@helpers/date';
-import renderImageFromUrl from '@helpers/dom/renderImageFromUrl';
+import Star3D from '@components/star3D';
 import Icon from '@components/icon';
 import {AvatarNew} from '@components/avatarNew';
 import Button from '@components/button';
 import PeerTitle from '@components/peerTitle';
 import {InputInvoice, InputStorePaymentPurpose, PremiumGiftCodeOption, PrepaidGiveaway, StarsGiveawayOption, StarsGiveawayWinnersOption} from '@layer';
 import cancelEvent from '@helpers/dom/cancelEvent';
-import showPremiumPopup from '@components/popups/premium';
 import PremiumOptionsForm from '@components/premium/premiumOptionsForm';
 import showPickUserPopup from '@components/popups/pickUser';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
@@ -35,7 +34,7 @@ import {CPrepaidGiveaway} from '@components/sidebarRight/tabs/boosts';
 import classNames from '@helpers/string/classNames';
 import RowTsx from '@components/rowTsx';
 import CheckboxFieldTsx from '@components/checkboxFieldTsx';
-import {StarsStackedStars} from '@components/popups/stars';
+import {StarsStackedStars} from '@components/stars/starsAmount';
 import numberThousandSplitter, {numberThousandSplitterForStars} from '@helpers/number/numberThousandSplitter';
 import paymentsWrapCurrencyAmount from '@helpers/paymentsWrapCurrencyAmount';
 import flatten from '@helpers/array/flatten';
@@ -75,12 +74,15 @@ import {getMiddleware} from '@helpers/middleware';
 import rootScope from '@lib/rootScope';
 import ListenerSetter from '@helpers/listenerSetter';
 import MediaHeader from '@components/mediaHeader';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 export default async function showBoostsViaGiftsPopup(
   peerId: PeerId,
   prepaidGiveaway?: PrepaidGiveaway,
   onCreated?: () => void
 ) {
+  const managers = bindManagersToSession(rootScope.managers);
   const middlewareHelper = getMiddleware();
   const middleware = middlewareHelper.get();
   const listenerSetter = new ListenerSetter();
@@ -192,7 +194,6 @@ export default async function showBoostsViaGiftsPopup(
     };
 
     const createNextIcon = () => Icon('next', 'popup-boosts-specific-next');
-    let img: HTMLImageElement;
 
     let prepaidRowContainer: JSX.Element, giveawayTypeRows: JSX.Element;
     if(prepaidGiveaway) {
@@ -285,7 +286,7 @@ export default async function showBoostsViaGiftsPopup(
     }
 
     const premiumPromoAnchor = anchorCallback(() => {
-      showPremiumPopup();
+      hotReloadGuard.showPremiumPopup();
     });
 
     let lastOptionIndex: number;
@@ -606,7 +607,8 @@ export default async function showBoostsViaGiftsPopup(
     const ret = (
       <>
         <MediaHeader marginTop marginBottom>
-          <div class="popup-boosts-star-container"><img alt="" class="popup-boosts-star" ref={img} /></div>
+          {/* 24 px of room above and below the star */}
+          <MediaHeader.Sticker size={168} element={() => <Star3D kind={stars() ? 'stars' : 'premium'} size={120} />} />
           <MediaHeader.Title size={20}>{i18n('BoostsViaGifts.Title')}</MediaHeader.Title>
           <MediaHeader.Subtitle>{i18n(isPrepaid() && prepaidGiveaway._ === 'prepaidGiveaway' ? 'BoostingGetMoreBoosts' : 'BoostingGetMoreBoosts2')}</MediaHeader.Subtitle>
         </MediaHeader>
@@ -627,11 +629,6 @@ export default async function showBoostsViaGiftsPopup(
         {!specific() && notSpecific2}
       </>
     );
-
-    // after mount: `decode()` on an image still being moved into the tree rejects as "broken"
-    onMount(() => {
-      renderImageFromUrl(img, `assets/img/premiumboostsstar${window.devicePixelRatio > 1 ? '@2x' : ''}.png`);
-    });
 
     const createGiveawayStoreInput = async(): Promise<InputStorePaymentPurpose> => {
       const peers = await Promise.all(peerIds().map((peerId) => rootScope.managers.appPeersManager.getInputPeerById(peerId)));
@@ -666,25 +663,27 @@ export default async function showBoostsViaGiftsPopup(
     };
 
     const createSpecificStoreInput = async(): Promise<InputStorePaymentPurpose> => {
+      const managers = bindManagersToSession(rootScope.managers);
       const {amount, currency} = option();
-      const users = await Promise.all(specificPeerIds().map((peerId) => rootScope.managers.appUsersManager.getUserInput(peerId.toUserId())));
+      const users = await Promise.all(specificPeerIds().map((peerId) => managers.appUsersManager.getUserInput(peerId.toUserId())));
       return {
         _: 'inputStorePaymentPremiumGiftCode',
         amount,
         currency,
-        boost_peer: await rootScope.managers.appPeersManager.getInputPeerById(peerId),
+        boost_peer: await managers.appPeersManager.getInputPeerById(peerId),
         users
       };
     };
 
     const continueWithPrepaid = async(purpose: InputStorePaymentPurpose) => {
+      const managers = bindManagersToSession(rootScope.managers);
       await confirmationPopup({
         titleLangKey: 'BoostingStartGiveawayConfirmTitle',
         descriptionLangKey: 'BoostingStartGiveawayConfirmText',
         button: {langKey: 'Start'}
       });
 
-      return rootScope.managers.appPaymentsManager.launchPrepaidGiveaway(
+      return managers.appPaymentsManager.launchPrepaidGiveaway(
         peerId,
         prepaidGiveaway.id,
         purpose
@@ -773,7 +772,7 @@ export default async function showBoostsViaGiftsPopup(
     });
 
     return (
-      <PopupElement class="popup-boosts" closable show={show()}>
+      <PopupElement managers={managers} class="popup-boosts" closable show={show()}>
         <Content />
       </PopupElement>
     );

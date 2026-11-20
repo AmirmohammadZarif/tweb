@@ -1,5 +1,6 @@
 import tsNow from '@helpers/tsNow';
-import {ChatInviteImporter, ExportedChatInvite} from '@layer';
+import lastItem from '@helpers/array/lastItem';
+import {ChatInviteImporter, ExportedChatInvite, MessagesExportedChatInvites} from '@layer';
 import {AppManagers} from '@lib/managers';
 import {i18n, LangPackKey} from '@lib/langPack';
 import lottieLoader from '@lib/lottie/lottieLoader';
@@ -88,25 +89,37 @@ export function getImportersLoader({
   chatId,
   managers,
   link,
-  requested
+  requested,
+  onCount
 }: {
   chatId: ChatId,
   managers: AppManagers,
   link?: string,
-  requested?: boolean
+  requested?: boolean,
+  /** the server's total, from each page loaded without a search query */
+  onCount?: (count: number) => void
 }) {
   const importers: ChatInviteImporter[] = [];
   const importersMap: Map<PeerId, ChatInviteImporter> = new Map();
   let lastQuery = '';
+  // * what changes while a page is on its way puts it behind: one request answered, the server's count in
+  // * it; all of them answered at once (`reset`) or another query, the whole page
+  let revision = 0, resetRevision = 0;
+  const reset = () => {
+    resetRevision = ++revision;
+    importers.length = 0;
+    importersMap.clear();
+  };
+
   const load: AppSelectPeers['getMoreCustom'] = async(q) => {
     if(lastQuery !== q) {
-      importers.length = 0;
-      importersMap.clear();
+      reset();
       lastQuery = q;
     }
 
     const limit = 50;
     const lastImporter = importers[importers.length - 1];
+    const startRevision = revision;
     const result = await managers.appChatInvitesManager.getChatInviteImporters({
       chatId,
       limit,
@@ -117,7 +130,15 @@ export function getImportersLoader({
       q
     });
 
+    if(resetRevision > startRevision) {
+      // * not the end: the next page is asked for anew, from the start
+      return {result: [], isEnd: false};
+    }
+
     importers.push(...result.importers);
+    if(!q && revision === startRevision) {
+      onCount?.(result.count);
+    }
 
     return {
       result: result.importers.map((importer) => {
@@ -130,7 +151,12 @@ export function getImportersLoader({
   };
 
   const deleteImporter = (peerId: PeerId) => {
-    importers.splice(importers.findIndex((importer) => importer.user_id.toPeerId(false) === peerId), 1);
+    ++revision;
+    const index = importers.findIndex((importer) => importer.user_id.toPeerId(false) === peerId);
+    if(index !== -1) {
+      importers.splice(index, 1);
+    }
+
     importersMap.delete(peerId);
   };
 
@@ -138,15 +164,103 @@ export function getImportersLoader({
     importers,
     importersMap,
     load,
-    deleteImporter
+    deleteImporter,
+    reset
+  };
+}
+
+/** how many of an admin's links, active or revoked, a page holds */
+const INVITES_PAGE_LIMIT = 50;
+
+/**
+ * Pages through an admin's invite links past the first page of each list, active and revoked, as the server orders
+ * them: each page from the last link of the one before. A link the tab has shown (`remember`) - the main one, one
+ * created, edited, revoked or deleted meanwhile - is never drawn twice.
+ */
+export function getChatInvitesLoader({
+  chatId,
+  adminId,
+  managers
+}: {
+  chatId: ChatId,
+  adminId?: UserId,
+  managers: AppManagers
+}) {
+  // * the active links, then the revoked ones
+  type List = {offset?: ChatInvite, isEnd: boolean, revision: number};
+  const lists: List[] = [{isEnd: false, revision: 0}, {isEnd: false, revision: 0}];
+  const knownLinks: Set<string> = new Set();
+
+  const remember = (link: string) => {
+    if(link) {
+      knownLinks.add(link);
+    }
+  };
+
+  /** moves a list past a page the server gave, the first one included, and returns its links not shown yet */
+  const takePage = (revoked: boolean, page: MessagesExportedChatInvites) => {
+    const list = lists[+revoked];
+    const invites = page.invites.filter((invite): invite is ChatInvite => invite._ === 'chatInviteExported');
+    const last = lastItem(invites);
+    // * a short page is the end, and so is one that does not move past the one before
+    list.isEnd = page.invites.length < INVITES_PAGE_LIMIT || !last || last.link === list.offset?.link;
+    list.offset = last ?? list.offset;
+    return invites.filter((invite) => {
+      if(knownLinks.has(invite.link)) {
+        return false;
+      }
+
+      knownLinks.add(invite.link);
+      return true;
+    });
+  };
+
+  /** the next page of a list, asked for one at a time: its links not shown yet - none once the list has ended */
+  const loadMore = async(revoked: boolean): Promise<ChatInvite[]> => {
+    const list = lists[+revoked];
+    if(list.isEnd) {
+      return;
+    }
+
+    const {offset, revision} = list;
+    const page = await managers.appChatInvitesManager.getExportedChatInvites({
+      chatId,
+      adminId,
+      revoked,
+      limit: INVITES_PAGE_LIMIT,
+      offsetDate: offset?.date,
+      offsetLink: offset?.link
+    });
+
+    // * the list was ended while the page was on its way
+    if(list.revision !== revision) {
+      return;
+    }
+
+    return takePage(revoked, page);
+  };
+
+  /** every revoked link is deleted: none is left to ask for, and a page on its way is dropped */
+  const endRevoked = () => {
+    const list = lists[1];
+    ++list.revision;
+    list.isEnd = true;
+  };
+
+  return {
+    remember,
+    takePage,
+    loadMore,
+    endRevoked,
+    isEnd: (revoked: boolean) => lists[+revoked].isEnd
   };
 }
 
 export function getChatInviteLinksInitArgs(chatId: ChatId, adminId?: UserId) {
   return {
     animationData: !adminId && lottieLoader.loadAnimationFromURLManually('UtyanLinks'),
-    invites: rootScope.managers.appChatInvitesManager.getExportedChatInvites({chatId, adminId}),
-    invitesRevoked: rootScope.managers.appChatInvitesManager.getExportedChatInvites({chatId, adminId, revoked: true}),
+    invites: rootScope.managers.appChatInvitesManager.getExportedChatInvites({chatId, adminId, limit: INVITES_PAGE_LIMIT}),
+    invitesRevoked: rootScope.managers.appChatInvitesManager.getExportedChatInvites({chatId, adminId, revoked: true, limit: INVITES_PAGE_LIMIT}),
     adminsInvites: !adminId && hasRights(apiManagerProxy.getChat(chatId), 'change_type') && rootScope.managers.appChatInvitesManager.getAdminsWithInvites(chatId),
     chatFull: rootScope.managers.appProfileManager.getChatFull(chatId)
   };

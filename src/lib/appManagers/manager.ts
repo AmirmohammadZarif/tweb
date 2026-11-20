@@ -46,6 +46,7 @@ import type AppUsernamesManager from '@appManagers/appUsernamesManager';
 import type AppChatInvitesManager from '@appManagers/appChatInvitesManager';
 import type AppStoriesManager from '@appManagers/appStoriesManager';
 import type AppBotsManager from '@appManagers/appBotsManager';
+import type AppWidgetsManager from '@appManagers/appWidgetsManager';
 import type AppBoostsManager from '@appManagers/appBoostsManager';
 import type AppStatisticsManager from '@appManagers/appStatisticsManager';
 import type AppBusinessManager from '@appManagers/appBusinessManager';
@@ -63,6 +64,7 @@ import type AppSupportMetricsManager from '@appManagers/appSupportMetricsManager
 import type AppQuickRepliesManager from '@appManagers/appQuickRepliesManager';
 import type AppCrmManager from '@appManagers/appCrmManager';
 import type {AiTonesManager} from '@lib/appManagers/aiTonesManager';
+import type AppWalletManager from '@appManagers/appWalletManager';
 import {logger, LogTypes} from '@lib/logger';
 
 export class AppManager {
@@ -117,6 +119,7 @@ export class AppManager {
   protected appChatInvitesManager: AppChatInvitesManager;
   protected appStoriesManager: AppStoriesManager;
   protected appBotsManager: AppBotsManager;
+  protected appWidgetsManager: AppWidgetsManager;
   protected appBoostsManager: AppBoostsManager;
   protected appStatisticsManager: AppStatisticsManager;
   protected appBusinessManager: AppBusinessManager;
@@ -132,6 +135,7 @@ export class AppManager {
   protected appQuickRepliesManager: AppQuickRepliesManager;
   protected appCrmManager: AppCrmManager;
   protected aiTonesManager: AiTonesManager;
+  protected appWalletManager: AppWalletManager;
 
   protected name: string;
   public log: ReturnType<typeof logger>;

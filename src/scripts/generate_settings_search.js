@@ -21,10 +21,13 @@
 const fs = require('fs');
 const path = require('path');
 const babel = require('@babel/core');
+// the app's own, its types stripped by Node
+const escapeRegExp = require('../helpers/string/escapeRegExp.ts').default;
 
 const ROOT = path.join(__dirname, '..', '..');
 const SRC = path.join(ROOT, 'src');
 const TABS_FILE = path.join(SRC, 'components/solidJsTabs/tabs.ts');
+const OPENERS_FILE = path.join(SRC, 'lib/settingsSearch/openers.ts');
 const LINKS_FILE = path.join(SRC, 'scripts/in/settings-links.csv');
 const OUT_FILE = path.join(SRC, 'lib/settingsSearch/generated.ts');
 const ROOT_TAB = 'AppSettingsTab';
@@ -53,7 +56,8 @@ const DENY_KEY_SHAPE = /(Info\d*$|Caption|Desc$|Description|Help$|Notice|Hint$|S
 // Too generic to ever be a useful hit on its own.
 const STOP_KEYS = new Set([
   'On', 'Off', 'Delete', 'Clear', 'Save', 'Done', 'Cancel', 'OK', 'Ok', 'Edit', 'Add', 'Close',
-  'Loading', 'Terminate', 'Continue', 'Next', 'Back', 'Yes', 'No', 'Search'
+  'Loading', 'Terminate', 'Continue', 'Next', 'Back', 'Yes', 'No', 'Search', 'Create', 'Copy', 'Share',
+  'Rename'
 ]);
 
 // A section's icon comes from the row that opens it. Edit Profile has no such
@@ -72,7 +76,7 @@ const SECTION_ICONS = {
  */
 const PROCESSOR_PATHS = new Set([
   '', 'edit/birthday', 'edit/add-account', 'emoji-status', 'saved-messages', 'ton',
-  'my-profile/posts/all-stories', 'my-profile/archived-posts'
+  'my-profile/posts/all-stories', 'my-profile/archived-posts', 'qr-code', 'qr-code/share'
 ]);
 
 // Paths whose Web K column names the row but not the tab behind it (the text is
@@ -85,8 +89,7 @@ const LINK_OVERRIDES = {
   'profile-photo': 'AppEditProfileTab',
   'privacy/forwards': 'AppPrivacyForwardMessagesTab',
   'privacy/voice': 'AppPrivacyVoicesTab',
-  'privacy/messages': 'AppPrivacyMessagesTab',
-  'privacy/passcode/change': 'AppPasscodeLockTab'
+  'privacy/messages': 'AppPrivacyMessagesTab'
 };
 
 /**
@@ -152,6 +155,18 @@ const walkNode = (node, visit) => {
     const value = node[key];
     if(Array.isArray(value)) value.forEach((v) => walkNode(v, visit));
     else if(value && typeof value.type === 'string') walkNode(value, visit);
+  }
+};
+
+/**
+ * A tab constructor in code: the imported name, or the same tab read off the registry (`hotReloadGuard.tabs.X`),
+ * which is how code below the app's top level reaches the tabs.
+ */
+const tabNameOf = (node, knownTabs) => {
+  if(node?.type === 'Identifier') return knownTabs.has(node.name) ? node.name : undefined;
+  if(node?.type === 'MemberExpression' && !node.computed && node.property.type === 'Identifier' &&
+    node.object.type === 'MemberExpression' && node.object.property.name === 'tabs' && knownTabs.has(node.property.name)) {
+    return node.property.name;
   }
 };
 
@@ -267,8 +282,6 @@ const isLangKey = (value) => {
 const MAX_TEMPLATE_KEYS = 40;
 const MIN_TEMPLATE_LENGTH = 8;
 
-const escapeForRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
 /**
  * The keys a title expression can produce. A literal names one; a template names
  * every existing key of its shape (`LiteMode.Key.${key}.Title`), which is how
@@ -300,7 +313,7 @@ const langKeysFromExpression = (node, fileLiterals) => {
       // an interpolated part is one step of the key, never the whole tail, and it
       // has to be a value the file actually has — a commented-out row must not
       // bring its strings into the index
-      const pattern = new RegExp('^' + statics.map(escapeForRegExp).join('([^.]*)') + '$');
+      const pattern = new RegExp('^' + statics.map(escapeRegExp).join('([^.]*)') + '$');
       const matched = [...LANG_KEYS.keys()].filter((key) => {
         const match = pattern.exec(key);
         return match && match.slice(1).every((part) => fileLiterals.has(part)) && isLangKey(key);
@@ -473,6 +486,11 @@ const analyzeFile = (file, knownTabs) => {
   };
 
   babel.traverse(ast, {
+    // in the order the file uses them: an import lists names in whatever order it was written
+    ImportDeclaration(p) {
+      p.skip();
+    },
+
     Identifier(p) {
       if(knownTabs.has(p.node.name)) referenced.add(p.node.name);
     },
@@ -485,7 +503,10 @@ const analyzeFile = (file, knownTabs) => {
       // `sliceTabsUntilTab(AppSettingsTab)` walks back up the stack and `getTab`
       // only looks one up — neither opens anything.
       if(calleeName === 'sliceTabsUntilTab' || calleeName === 'closeTabsUntilTab' || calleeName === 'getTab') {
-        for(const a of p.node.arguments) if(a.type === 'Identifier') backRefs.add(a.name);
+        for(const a of p.node.arguments) {
+          const name = tabNameOf(a, knownTabs);
+          if(name) backRefs.add(name);
+        }
         return;
       }
 
@@ -766,8 +787,37 @@ const parseCsv = (text) => {
 const LINK_PATH_SKIP = new Set(['chat list', 'chat lis', 'hamburger', 'settings', 'three dots', 'pencil']);
 const normalizeText = (text) => text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
+/**
+ * `NON_NAVIGABLE_SECTIONS` of openers.ts — the wizard steps the search drops at runtime, everything
+ * under them with them. A link resolved into one would be dropped too, so it stays on the screen
+ * that opens the step (`privacy/passcode/change` on the passcode's screen, not its entry step).
+ */
+const collectNonNavigable = () => {
+  const ids = new Set();
+  babel.traverse(parseFile(OPENERS_FILE), {
+    VariableDeclarator(p) {
+      if(p.node.id.name !== 'NON_NAVIGABLE_SECTIONS') return;
+      walkNode(p.node.init, (n) => {
+        if(n.type === 'StringLiteral') ids.add(n.value);
+      });
+    }
+  });
+  return ids;
+};
+
 const collectLinks = ({sections, entries}) => {
   if(!fs.existsSync(LINKS_FILE)) return [];
+
+  const nonNavigable = collectNonNavigable();
+  const parentOf = new Map(sections.map((section) => [section.id, section.parentId]));
+  const isReachable = (sectionId) => {
+    for(let current = sectionId; current; current = parentOf.get(current)) {
+      if(nonNavigable.has(current)) return false;
+    }
+    return true;
+  };
+  sections = sections.filter((section) => isReachable(section.id));
+  entries = entries.filter((entry) => isReachable(entry.sectionId));
 
   // English text -> the keys that render it
   const byText = new Map();

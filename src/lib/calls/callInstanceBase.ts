@@ -5,13 +5,18 @@ import WeakRefSet from '@helpers/weakRefSet';
 import {logger} from '@lib/logger';
 import getAudioConstraints from '@lib/calls/helpers/getAudioConstraints';
 import getScreenConstraints from '@lib/calls/helpers/getScreenConstraints';
-import getStream from '@lib/calls/helpers/getStream';
+import getCallStream from '@lib/calls/helpers/getCallStream';
 import getStreamCached from '@lib/calls/helpers/getStreamCached';
 import getVideoConstraints from '@lib/calls/helpers/getVideoConstraints';
 import stopTrack from '@lib/calls/helpers/stopTrack';
 import LocalConferenceDescription from '@lib/calls/localConferenceDescription';
 import StreamManager, {StreamItem} from '@lib/calls/streamManager';
 import shouldMirrorVideoTrack from '@lib/calls/helpers/shouldMirrorVideoTrack';
+import {CallHold, holdCall} from '@lib/calls/callAccount';
+import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
+import type {ActiveAccountNumber} from '@lib/accounts/types';
+import type {AppManagers} from '@lib/managers';
+import rootScope from '@lib/rootScope';
 import {appSettings} from '@stores/appSettings';
 
 export type TryAddTrackOptions = {
@@ -35,6 +40,12 @@ export function getOutputAudioElementKey(source: string | number) {
 }
 
 export default abstract class CallInstanceBase<E extends EventListenerListeners> extends EventListenerBase<E> {
+  // * the account the call belongs to: the tab may show another one meanwhile (see callAccount)
+  public accountNumber: ActiveAccountNumber;
+  public managers: AppManagers;
+  public myId: PeerId;
+  protected heldCall: CallHold;
+
   protected log: ReturnType<typeof logger>;
   protected outputDeviceId: string;
 
@@ -186,10 +197,25 @@ export default abstract class CallInstanceBase<E extends EventListenerListeners>
   }
 
   public abstract get streamManager(): StreamManager;
+
+  /** The microphone track the call sends, muted or not. */
+  public getInputAudioTrack(): MediaStreamTrack | undefined {
+    return this.streamManager?.inputStream?.getAudioTracks()[0];
+  }
+
   public abstract get description(): LocalConferenceDescription;
   public abstract toggleMuted(): Promise<void>;
 
+  // * for a subclass, once its options are assigned: a call made without an account is the tab's
+  protected bindAccount() {
+    this.accountNumber ??= getCurrentAccount();
+    this.myId ??= rootScope.myId;
+    this.heldCall = holdCall(this.accountNumber);
+  }
+
   public cleanup() {
+    this.heldCall?.release();
+
     // Invalidate getUserMedia / setSinkId work that can still resolve after
     // the call has already released its registered streams and elements.
     for(const kind of ['audio', 'video', 'output'] as const) {
@@ -204,8 +230,8 @@ export default abstract class CallInstanceBase<E extends EventListenerListeners>
     this.player.remove();
     this.elements.clear();
 
-    // can have no connectionInstance but streamManager with input stream
-    this.streamManager.stop();
+    // can have no connectionInstance but streamManager with input stream - or neither, never joined
+    this.streamManager?.stop();
 
     super.cleanup();
   }
@@ -666,7 +692,7 @@ export default abstract class CallInstanceBase<E extends EventListenerListeners>
     const generation = this.beginMediaDeviceChange(kind);
     let newStream: MediaStream;
     try {
-      newStream = await getStream(opts.constraints);
+      newStream = await getCallStream(opts.constraints);
     } catch(err) {
       if(!this.isMediaDeviceChangeCurrent(kind, generation)) return false;
       this.log?.[opts.acquisitionFailureLogLevel ?? 'error']?.(`${label} getUserMedia failed`, err);

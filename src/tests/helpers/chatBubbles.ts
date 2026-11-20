@@ -41,7 +41,7 @@ vi.mock('@stores/contentSettings', () => ({
     sensitiveCanChange: () => false,
     needAgeVerification: () => false,
     ageVerified: () => false,
-    ignoreRestrictionReasons: (): string[] => []
+    ignoredRestrictionReasons: () => new Set<string>()
   })
 }));
 vi.mock('@stores/stars', () => ({default: () => () => 0}));
@@ -52,6 +52,17 @@ vi.mock('@stores/stars', () => ({default: () => () => 0}));
  * `beforeAll` that calls this one.
  */
 export const LOAD_CHAT_BUBBLES_TIMEOUT = 60_000;
+
+/**
+ * A bare bubble of a message, as `ChatBubbles` reads a message back from its element
+ */
+export function makeMessageBubble(peerId: PeerId, mid: number) {
+  const bubble = document.createElement('div');
+  bubble.classList.add('bubble');
+  bubble.dataset.mid = '' + mid;
+  bubble.dataset.peerId = '' + peerId;
+  return bubble;
+}
 
 export async function loadChatBubbles() {
   stubBrowserGlobals();

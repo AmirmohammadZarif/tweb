@@ -1,6 +1,6 @@
 import {createMemo, For, onCleanup, onMount} from 'solid-js';
 import {MyStarGift} from '@appManagers/appGiftsManager';
-import {StarsStar} from '@components/popups/stars';
+import {StarsStar} from '@components/stars/starsAmount';
 import {AvatarNewTsx} from '@components/avatarNew';
 import getPeerId from '@appManagers/utils/peers/getPeerId';
 import I18n, {i18n} from '@lib/langPack';
@@ -8,6 +8,7 @@ import buttonKeyDown from '@helpers/solid/buttonKeyDown';
 import LazyLoadQueue from '@components/lazyLoadQueue';
 import SuperStickerRenderer from '@components/emoticonsDropdown/tabs/SuperStickerRenderer';
 import rootScope from '@lib/rootScope';
+import type {ReadingManagers} from '@lib/managers';
 
 import styles from '@components/stargifts/stargiftsGrid.module.scss';
 import classNames from '@helpers/string/classNames';
@@ -19,7 +20,6 @@ import formatNumber from '@helpers/number/formatNumber';
 import {changeBrightness, getRgbColorFromTelegramColor, rgbaToHexa, rgbIntToHex} from '@helpers/color';
 import createContextMenu from '@helpers/dom/createContextMenu';
 import {showSharingPicker2Popup} from '@components/popups/pickUser';
-import appImManager from '@lib/appImManager';
 import {StarGift, StarGiftCollection} from '@layer';
 import {copyTextToClipboard} from '@helpers/clipboard';
 import {toastNew} from '@components/toast';
@@ -33,6 +33,8 @@ import {openStarGiftWear} from '@components/popups/starGiftWear';
 import createSubmenuTrigger from '@components/createSubmenuTrigger';
 import {ButtonMenuItemOptions, ButtonMenuItemOptionsVerifiable, ButtonMenuSync} from '@components/buttonMenu';
 import CheckboxField from '@components/checkboxField';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 function StarGiftGridItem(props: {
   item: MyStarGift,
@@ -64,9 +66,10 @@ function StarGiftGridItem(props: {
           text: 'ShareFile',
           verify: () => raw._ === 'starGiftUnique',
           onClick: () => {
+            const managers = bindManagersToSession(rootScope.managers);
             showSharingPicker2Popup().then(({peerId, threadId, monoforumThreadId}) => {
-              rootScope.managers.appMessagesManager.sendText({peerId, threadId, replyToMonoforumPeerId: monoforumThreadId, text: 'https://t.me/nft/' + (raw as StarGift.starGiftUnique).slug});
-              appImManager.setInnerPeer({peerId, threadId, monoforumThreadId});
+              managers.appMessagesManager.sendText({peerId, threadId, replyToMonoforumPeerId: monoforumThreadId, text: 'https://t.me/nft/' + (raw as StarGift.starGiftUnique).slug});
+              hotReloadGuard.appImManager.setInnerPeer({peerId, threadId, monoforumThreadId});
             });
           }
         },
@@ -138,20 +141,16 @@ function StarGiftGridItem(props: {
           icon: isWearing ? 'crownoff' : 'crown',
           text: isWearing ? 'StarGiftWearStopFull' : 'StarGiftWearFull',
           verify: () => isEditableUniqueGift,
-          onClick: async() => {
+          onClick: () => {
+            const managers = bindManagersToSession(rootScope.managers);
             if(isWearing) {
               if(profilePeerId === rootScope.myId) {
-                rootScope.managers.appUsersManager.updateEmojiStatus({_: 'emojiStatusEmpty'});
+                managers.appUsersManager.updateEmojiStatus({_: 'emojiStatusEmpty'});
               } else {
-                rootScope.managers.apiManager.invokeApiSingleProcess({
-                  method: 'channels.updateEmojiStatus',
-                  params: {
-                    channel: await rootScope.managers.appChatsManager.getChannelInput(profilePeerId.toChatId()),
-                    emoji_status: {_: 'emojiStatusEmpty'}
-                  }
-                }).then((updates) => {
-                  rootScope.managers.apiUpdatesManager.processUpdateMessage(updates);
-                }).catch(() => {
+                managers.appChatsManager.updateEmojiStatus(
+                  profilePeerId.toChatId(),
+                  {_: 'emojiStatusEmpty'}
+                ).catch(() => {
                   toastNew({langPackKey: 'Error.AnError'});
                 });
               }
@@ -246,7 +245,7 @@ function StarGiftGridItem(props: {
 
       {props.item.resellOnlyTon && props.view !== 'transfer' && (
         <div class={/* @once */ styles.tonIcon}>
-          <IconTsx icon="ton" />
+          <IconTsx icon="gram_filled" />
         </div>
       )}
 
@@ -265,7 +264,7 @@ function StarGiftGridItem(props: {
             <Sparkles mode='button' isDiv />
           )} */}
           <StarsStar />
-          <span>{
+          <span dir="ltr">{
             props.item.isResale && props.item.raw.resell_min_stars ?
               `${numberThousandSplitterForStars(props.item.raw.resell_min_stars)}+` :
               numberThousandSplitterForStars(props.item.raw.stars)
@@ -358,6 +357,40 @@ function StarGiftGridItem(props: {
   );
 }
 
+/**
+ * The stickers of a grid of gifts, drawn as they come into the scrolled view (and still unless `autoplay`), and gone
+ * with the owner. `scrollParent` must be in the document: make it in `onMount`, or after the scroller's own ref.
+ */
+export function createStarGiftsRenderer(options: {
+  managers?: ReadingManagers,
+  scrollParent: HTMLElement,
+  autoplay?: boolean,
+  playOnHover?: boolean
+}) {
+  const lazyLoadQueue = new LazyLoadQueue();
+  const renderer = new SuperStickerRenderer({
+    regularLazyLoadQueue: lazyLoadQueue,
+    group: 'none',
+    managers: options.managers ?? rootScope.managers,
+    intersectionObserverInit: {root: options.scrollParent},
+    visibleRenderOptions: {
+      loop: false,
+      play: options.autoplay ?? true,
+      width: 120,
+      height: 120
+    },
+    withLock: false,
+    playOnHover: options.playOnHover
+  });
+
+  onCleanup(() => {
+    renderer.destroy();
+    lazyLoadQueue.clear();
+  });
+
+  return renderer;
+}
+
 export function StarGiftsGrid(props: {
   class?: string
   items: MyStarGift[],
@@ -370,25 +403,10 @@ export function StarGiftsGrid(props: {
   profileCollections?: StarGiftCollection[]
   scrollParent: HTMLElement
 }) {
-  const lazyLoadQueue = new LazyLoadQueue();
-  const stickerRenderer = new SuperStickerRenderer({
-    regularLazyLoadQueue: lazyLoadQueue,
-    group: 'none',
-    managers: rootScope.managers,
-    intersectionObserverInit: {root: props.scrollParent},
-    visibleRenderOptions: {
-      loop: false,
-      play: props.autoplay ?? true,
-      width: 120,
-      height: 120
-    },
-    withLock: false,
+  const stickerRenderer = createStarGiftsRenderer({
+    scrollParent: props.scrollParent,
+    autoplay: props.autoplay,
     playOnHover: true
-  });
-
-  onCleanup(() => {
-    stickerRenderer.destroy();
-    lazyLoadQueue.clear();
   });
 
   return (

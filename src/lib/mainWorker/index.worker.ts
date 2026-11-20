@@ -9,21 +9,21 @@ import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 import appManagersManager from '@appManagers/appManagersManager';
 import listenMessagePort from '@helpers/listenMessagePort';
 import {logger} from '@lib/logger';
-import {getLogEntries, setLogBufferEnabled} from '@lib/debug/logsBuffer';
+import {clearLogBuffer, getLogEntries, setLogBufferEnabled} from '@lib/debug/logsBuffer';
 import {readThreadMemory} from '@lib/debug/memoryStats';
 import {getMemoryWriterStats} from '@lib/files/memoryWriter';
 import toggleStorages from '@helpers/toggleStorages';
 import appTabsManager from '@appManagers/appTabsManager';
 import callbackify from '@helpers/callbackify';
 import Modes from '@config/modes';
-import {IS_POPUP_SANDBOX} from '@config/debug';
+import {IS_SANDBOX_PAGE} from '@config/debug';
 import {IS_WORKER} from '@helpers/context';
 import {ActiveAccountNumber} from '@lib/accounts/types';
 import commonStateStorage from '@lib/commonStateStorage';
 import {setRelayConfig} from '@lib/mtproto/relay';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 import AppStorage from '@lib/storage';
-import EncryptionKeyStore from '@lib/passcode/keyStore';
+import EncryptionKeyStore, {exportEncryptionKey, importEncryptionKey} from '@lib/passcode/keyStore';
 import sessionStorage from '@lib/sessionStorage';
 import CacheStorageController from '@lib/files/cacheStorage';
 import {ApiManager} from '@appManagers/apiManager';
@@ -33,6 +33,7 @@ import {createBroadcastChannelWrapper} from '@lib/broadcastChannelWrapper';
 import {MainBroadcastChannelEvents, unversionedMainBroadcastChannelName} from '@config/broadcastChannel';
 import objectUrlRegistry from '@lib/mainWorker/objectUrlRegistry';
 import SharedObjectUrlCache, {getSharedObjectURLCacheStats, resetSharedObjectURLCaches} from '@lib/mainWorker/sharedObjectUrlCache';
+import TabIntervals from '@lib/mainWorker/tabIntervals';
 
 
 const log = logger('MTPROTO');
@@ -52,6 +53,9 @@ const backgroundObjectURLCache = new SharedObjectUrlCache<string>({
   }
 });
 const mainBroadcastChannel = createBroadcastChannelWrapper<MainBroadcastChannelEvents>(unversionedMainBroadcastChannelName);
+const tabIntervals = new TabIntervals((intervalId, source) => {
+  port.invokeVoid('intervalCallback', intervalId, source);
+});
 
 let isLocked = true;
 
@@ -63,10 +67,10 @@ port.addMultipleEventsListeners({
   environment: (environment) => {
     setEnvironment(environment);
 
-    // Probes the base DC every 10 s until a WebSocket opens. The popup sandbox runs on fixtures
-    // with no session (this worker's URL carries the page's `?popups=1`): nothing there may reach
-    // Telegram, and nothing needs a transport.
-    if(import.meta.env.VITE_MTPROTO_AUTO && Modes.multipleTransports && !IS_POPUP_SANDBOX) {
+    // Probes the base DC every 10 s until a WebSocket opens. A sandbox runs on fixtures with no
+    // session (this worker's URL carries the page's `?popups=1` / `?widgets=1`): nothing there may
+    // reach Telegram, and nothing needs a transport.
+    if(import.meta.env.VITE_MTPROTO_AUTO && Modes.multipleTransports && !IS_SANDBOX_PAGE) {
       transportController.waitForWebSocket();
     }
   },
@@ -76,6 +80,8 @@ port.addMultipleEventsListeners({
   },
 
   getLogs: () => getLogEntries(),
+
+  clearLogs: () => clearLogBuffer(),
 
   getMemoryStats: async() => {
     const urls = objectUrlRegistry.getStats();
@@ -169,6 +175,14 @@ port.addMultipleEventsListeners({
     appStateManager.newVersion = newVersion;
     appStateManager.oldVersion = oldVersion;
 
+    // * a tab that knows of a new version the account's updates started without (the tab that started them could
+    // * not read the state, or came first with nothing new): the version's message comes now
+    if(newVersion) {
+      callbackify(appManagersManager.getManagersByAccount(), (managers) => {
+        managers[accountNumber]?.apiUpdatesManager.deliverChangelog();
+      });
+    }
+
     // * preserve self user
     if(userId && resetStorages.has('users')) {
       resetStorages.set('users', [userId]);
@@ -208,6 +222,13 @@ port.addMultipleEventsListeners({
     return toggleStorages(enabled, clearWrite);
   },
 
+  // * the snapshots travel the same port ahead of the reply, so they are in place when it resolves
+  mirrorAll: ({accountNumber}, source) => {
+    return callbackify(appManagersManager.getManagersByAccount(), (managers) => {
+      mirrorAccountTo(managers[accountNumber], source);
+    });
+  },
+
   event: (payload, source) => {
     log('will redirect event', payload, source);
     port.invokeExceptSource('event', payload, source);
@@ -242,16 +263,12 @@ port.addMultipleEventsListeners({
     backgroundObjectURLCache.delete(owner, url);
   },
 
-  setInterval: (timeout) => {
-    const intervalId = setInterval(() => {
-      port.invokeVoid('intervalCallback', intervalId);
-    }, timeout) as any as number;
-
-    return intervalId;
+  setInterval: (timeout, source) => {
+    return tabIntervals.set(timeout, source);
   },
 
-  clearInterval: (intervalId) => {
-    clearInterval(intervalId);
+  clearInterval: (intervalId, source) => {
+    tabIntervals.clear(intervalId, source);
   },
 
   terminate: () => {
@@ -259,11 +276,12 @@ port.addMultipleEventsListeners({
   },
 
   toggleUsingPasscode: async(payload, source) => {
+    const encryptionKey = payload.isUsingPasscode ? await importEncryptionKey(payload.encryptionKey) : undefined;
     DeferredIsUsingPasscode.resolveDeferred(payload.isUsingPasscode);
     // * when disabling, the old key stays until everything is decrypted - a store nobody has opened
     // * yet still has to be read with it
     if(payload.isUsingPasscode) {
-      EncryptionKeyStore.save(payload.encryptionKey);
+      EncryptionKeyStore.save(encryptionKey);
     }
 
     await Promise.all([
@@ -284,7 +302,8 @@ port.addMultipleEventsListeners({
     isLocked = false;
   },
 
-  changePasscode: async({toStore, encryptionKey}, source) => {
+  changePasscode: async({toStore, encryptionKey: encryptionKeyBytes}, source) => {
+    const encryptionKey = await importEncryptionKey(encryptionKeyBytes);
     await commonStateStorage.set({passcode: toStore});
 
     // * the storages have to be read while the old key is still around, the ones that were never
@@ -300,14 +319,14 @@ port.addMultipleEventsListeners({
       sessionStorage.reEncryptEncryptable()
     ]);
 
-    await port.invokeExceptSourceAsync('saveEncryptionKey', encryptionKey, source);
+    await port.invokeExceptSourceAsync('saveEncryptionKey', encryptionKeyBytes, source);
   },
 
   isLocked: async(_, source) => {
     const isUsingPasscode = await DeferredIsUsingPasscode.isUsingPasscode();
     if(isUsingPasscode) {
       if(!isLocked) {
-        await port.invoke('saveEncryptionKey', await EncryptionKeyStore.get(), undefined, source);
+        await port.invoke('saveEncryptionKey', await exportEncryptionKey(await EncryptionKeyStore.get()), undefined, source);
       }
       return isLocked;
     }
@@ -321,7 +340,7 @@ port.addMultipleEventsListeners({
   },
 
   saveEncryptionKey: async(payload, source) => {
-    EncryptionKeyStore.save(payload);
+    EncryptionKeyStore.save(await importEncryptionKey(payload));
     isLocked = false;
     await port.invokeExceptSourceAsync('saveEncryptionKey', payload, source);
   },
@@ -423,17 +442,25 @@ const onTabConnect = (source: MessageEventSource) => {
   } else {
     callbackify(appManagersManager.getManagersByAccount(), (managers) => {
       for(const key in managers) {
-        const accountNumber = key as any as ActiveAccountNumber
-        managers[accountNumber].thumbsStorage.mirrorAll(source);
-        managers[accountNumber].appPeersManager.mirrorAllPeers(source);
-        managers[accountNumber].appMessagesManager.mirrorAllMessages(source);
+        mirrorAccountTo(managers[key as any as ActiveAccountNumber], source);
       }
     });
   }
 };
 
+// * snapshots of one account's mirrors for one tab: on connect, and when the tab switches to that account
+function mirrorAccountTo(
+  managers: Awaited<ReturnType<typeof appManagersManager.getManagersByAccount>>[ActiveAccountNumber],
+  source: MessageEventSource
+) {
+  managers.thumbsStorage.mirrorAll(source);
+  managers.appPeersManager.mirrorAllPeers(source);
+  managers.appMessagesManager.mirrorAllMessages(source);
+}
+
 const onTabDisconnect = (source: MessageEventSource) => {
   objectUrlRegistry.releaseSource(source);
+  tabIntervals.releaseSource(source);
   appTabsManager.deleteTab(source);
   autoLockControls.removeTab(source);
 };

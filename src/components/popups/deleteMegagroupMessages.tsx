@@ -55,11 +55,12 @@ export type PopupDeleteMegagroupMessagesOptions = ({
 
 import {getMiddleware} from '@helpers/middleware';
 import ListenerSetter from '@helpers/listenerSetter';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 export default async function showDeleteMegagroupMessagesPopup(options: PopupDeleteMegagroupMessagesOptions) {
   const reaction = 'reaction' in options ? options.reaction : undefined;
   const messages = 'messages' in options ? options.messages : [];
-  const managers = rootScope.managers;
+  const managers = bindManagersToSession(rootScope.managers);
   const middlewareHelper = getMiddleware();
   const middleware = middlewareHelper.get();
   const listenerSetter = new ListenerSetter();
@@ -390,18 +391,16 @@ function updateReactionTitle() {
           </Section>
         </Show>
         {hasBanAction && <>
-          <Section
+          <div
             class={`${className}-permissions`}
-            name="UserRestrictionsCanDoUsers"
-            nameArgs={[banning().length]}
-            noShadow
             style={{
-              // 'max-height': collapsed() ? '0px' : ((chatPermissionsContainer.childElementCount - 1) * 48) + 40 + 'px'
               'max-height': collapsed() ? '0px' : '712px'
             }}
           >
-            {chatPermissionsContainer}
-          </Section>
+            <Section name="UserRestrictionsCanDoUsers" nameArgs={[banning().length]} noShadow>
+              {chatPermissionsContainer}
+            </Section>
+          </div>
           <Section
             classList={{hide: !banning().length}}
           >
@@ -437,7 +436,7 @@ function updateReactionTitle() {
     });
 
     return (
-      <PopupElement class={className} closable show={show()}>
+      <PopupElement managers={managers} class={className} closable show={show()}>
         <PopupElement.Header>
           {avatarsContainer}
           <PopupElement.Title>{title()}</PopupElement.Title>

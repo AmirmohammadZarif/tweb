@@ -3,9 +3,9 @@ import loadFonts from '@helpers/dom/loadFonts';
 import {doubleRaf} from '@helpers/schedulers';
 import isNativeVoiceRecorderSupported from '@helpers/voiceRecorder/isNativeSupported';
 import rootScope from '@lib/rootScope';
-import {showCrmLoginIfNeeded} from '@components/popups/crmLogin';
 
 import {disposeActiveAuthFlow} from '@/pages/mountAuthFlow';
+import {onStartImportFailed} from '@/pages/deactivatedScreen';
 
 let bootstrapped = false;
 
@@ -37,14 +37,14 @@ export async function bootstrapIm(): Promise<void> {
     Promise.resolve(null) :
     import('@vendor/recorder.min.js' as any);
 
-  const [{default: appDialogsManager}, recorder] = await Promise.all([
-    import('@lib/appDialogsManager'),
+  const [appDialogsManager, recorder] = await Promise.all([
+    importAppTopLevel(),
     recorderImport,
     loadFonts(),
     'requestVideoFrameCallback' in HTMLVideoElement.prototype ?
       Promise.resolve() :
       import('@helpers/dom/requestVideoFrameCallbackPolyfill')
-  ]);
+  ]).catch(onStartImportFailed);
 
   if(recorder) {
     (window as any).Recorder = recorder.default;
@@ -65,14 +65,43 @@ export async function bootstrapIm(): Promise<void> {
   // expired). Fire-and-forget: we don't block the IM boot on it. Also wire up
   // the global crm_auth_required listener here — it's the single place that runs
   // once after the user is signed into Telegram.
+  // * the popup's module comes in with the chunk of the top level the app loads anyway - imported here, it
+  // * would put the popups into the boot graph ahead of it
+  const showCrmLoginIfNeeded = () => {
+    import('@components/popups/crmLogin').then(({showCrmLoginIfNeeded}) => showCrmLoginIfNeeded());
+  };
   showCrmLoginIfNeeded();
   rootScope.addEventListener('crm_auth_required', showCrmLoginIfNeeded);
 
   // Tear down the auth UI 1s after IM appears — same delay the legacy
   // `pageIm.onFirstMount` used so the cross-fade looks right.
-  setTimeout(() => {
-    disposeActiveAuthFlow();
-  }, 1000);
+  disposeActiveAuthFlow(1000);
+}
+
+let topLevel: Promise<typeof import('@lib/appDialogsManager')['default']>;
+let topLevelFailed = false;
+
+/**
+ * The app's top level, and what <SolidJSHotReloadGuardProvider> hands down of it registered (src/index.ts lets the
+ * provider fill it so before the app is up). Once, every caller waiting for the same load - and again after one that
+ * failed. Never two graphs at once: two that enter the app's import cycle together race for its evaluation order (a
+ * class can then be evaluated before the one it extends). So one graph (pages/appTopLevel), fetched at once - and
+ * after a failure, which that graph keeps, its two parts one after the other
+ */
+export function importAppTopLevel() {
+  return topLevel ??= (async() => {
+    if(!topLevelFailed) {
+      return (await import('@/pages/appTopLevel')).default;
+    }
+
+    const {default: appDialogsManager} = await import('@lib/appDialogsManager');
+    await import('@lib/solidjs/hotReloadGuardValue');
+    return appDialogsManager;
+  })().catch((err) => {
+    topLevel = undefined;
+    topLevelFailed = true;
+    throw err;
+  });
 }
 
 export default bootstrapIm;

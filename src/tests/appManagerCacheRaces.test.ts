@@ -176,6 +176,10 @@ function makeRichMessagesHarness() {
       resetPeerTranslationsByChannelCutoff: vi.fn(() => new Set<number>()),
       clearSummaries: vi.fn()
     },
+    appWidgetsManager: {
+      deleteWidgetStorage: vi.fn(),
+      deleteWidgetStorageByChannelCutoff: vi.fn()
+    },
     getMessageByPeer: vi.fn(),
     saveApiResult
   });
@@ -1865,7 +1869,7 @@ describe('manager cache race guards', () => {
 
       expect(dialogsResult.dialogs).toEqual([cutoffMarkerDialog, currentDialog]);
       expect(saveDialog).toHaveBeenCalledTimes(2);
-      expect(saveDialog).toHaveBeenCalledWith({dialog: cutoffMarkerDialog});
+      expect(saveDialog).toHaveBeenCalledWith({dialog: cutoffMarkerDialog, keepPlace: true});
 
       saveDialog.mockClear();
       const cutoffMarkerTopic = {
@@ -1899,7 +1903,7 @@ describe('manager cache race guards', () => {
         11
       ]);
       expect(saveDialog).toHaveBeenCalledTimes(2);
-      expect(saveDialog).toHaveBeenCalledWith({dialog: cutoffMarkerTopic});
+      expect(saveDialog).toHaveBeenCalledWith({dialog: cutoffMarkerTopic, keepPlace: true});
     });
 
     test('monoforum list and by-id snapshots retry before saving and accept fresh metadata-only tops', async() => {
@@ -1995,8 +1999,12 @@ describe('manager cache race guards', () => {
         dialogsStorage: {
           isVirtualFilter: () => false,
           getOffsetDate: () => 0,
+          getDialogsPaginationOffsets: (): undefined => undefined,
+          setDialogsPaginationOffsets: vi.fn(),
           getFolderDialogs: (): any[] => []
         },
+        appNotificationsManager: {getSettingsClock: () => 0},
+        appDraftsManager: {getDraftsClock: () => 0},
         appPeersManager: {getInputPeerById: () => ({_: 'inputPeerEmpty'})},
         saveApiResult
       });
@@ -2045,12 +2053,16 @@ describe('manager cache race guards', () => {
         dialogsStorage: {
           isVirtualFilter: () => true,
           getOffsetDate: () => 0,
+          getDialogsPaginationOffsets: (): undefined => undefined,
+          setDialogsPaginationOffsets: vi.fn(),
           getFolderDialogs: (): any[] => [],
           getForumTopicsPaginationOffsets: () => ({date: 0, id: 0, topic: 0}),
           processTopics,
           saveDialog: vi.fn(),
           updateForumTopicsPaginationOffsets
         },
+        appNotificationsManager: {getSettingsClock: () => 0},
+        appDraftsManager: {getDraftsClock: () => 0},
         appPeersManager: {
           getInputPeerById: () => ({_: 'inputPeerEmpty'}),
           isChannel: () => true
@@ -2136,6 +2148,7 @@ describe('manager cache race guards', () => {
             ++cutoffGeneration;
           }
         },
+        appNotificationsManager: {getSettingsClock: () => 0},
         saveFullPeerResult
       });
 
@@ -2168,7 +2181,7 @@ describe('manager cache race guards', () => {
       expect(applyChannelAvailableMinId).toHaveBeenCalledTimes(1);
       expect(applyChannelAvailableMinId).toHaveBeenCalledWith(channelId, 0, true);
       expect(saveFullPeerResult).toHaveBeenCalledTimes(1);
-      expect(saveFullPeerResult).toHaveBeenCalledWith(channelPeerId, expect.objectContaining({full_chat: currentFull}));
+      expect(saveFullPeerResult).toHaveBeenCalledWith(channelPeerId, expect.objectContaining({full_chat: currentFull}), 0);
     });
 
     test('late API results are filtered by the channel cutoff', async() => {

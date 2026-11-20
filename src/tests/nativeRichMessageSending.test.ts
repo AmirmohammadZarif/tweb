@@ -1,18 +1,15 @@
 import {describe, expect, test, vi} from 'vitest';
 import '@helpers/peerIdPolyfill';
 import deferredPromise from '@helpers/cancellablePromise';
+import tsNow from '@helpers/tsNow';
 import {AppMessagesManager, RichMessagePayload} from '@appManagers/appMessagesManager';
+import {inputPeer, makeMessagesManager, makeUpdates, peerId} from '@/tests/helpers/messageSending';
 import {AppDraftsManager} from '@appManagers/appDraftsManager';
+import {makeDraftSyncManager} from '@/tests/helpers/draftSync';
 import {tiptapToRichMessage} from '@components/chat/inputEditor/richMessage';
 import {createChatInputEditorTestData} from '@components/chat/inputEditor/testData';
-import {DraftMessage, InputPeer, InputRichMessage, Message, PageBlock, PageCaption, RichMessage, Updates, WebPage} from '@layer';
+import {DraftMessage, InputRichMessage, Message, PageBlock, PageCaption, RichMessage, WebPage} from '@layer';
 
-const peerId = (42 as UserId).toPeerId(false);
-const inputPeer: InputPeer.inputPeerUser = {
-  _: 'inputPeerUser',
-  user_id: 42,
-  access_hash: '1'
-};
 const emptyText = {_: 'textEmpty'} as const;
 const emptyCaption: PageCaption = {_: 'pageCaption', text: emptyText, credit: emptyText};
 
@@ -38,17 +35,6 @@ function makeRichMessage(): RichMessagePayload {
   };
 
   return {input, output};
-}
-
-function makeUpdates(): Updates.updates {
-  return {
-    _: 'updates',
-    updates: [],
-    users: [],
-    chats: [],
-    date: 0,
-    seq: 0
-  };
 }
 
 function makeReferencedRichMessage(): RichMessagePayload {
@@ -89,59 +75,6 @@ function makeReferencedRichMessage(): RichMessagePayload {
       documents: []
     }
   };
-}
-
-function makeMessagesManager() {
-  const manager = new AppMessagesManager();
-  const invokeApi = vi.fn().mockResolvedValue(makeUpdates());
-  const invokeApiAfter = vi.fn().mockResolvedValue(makeUpdates());
-  const optimisticMessages: Message.message[] = [];
-
-  Object.assign(manager as any, {
-    apiManager: {
-      getAppConfig: vi.fn().mockResolvedValue({}),
-      invokeApi,
-      invokeApiAfter
-    },
-    apiUpdatesManager: {
-      processLocalUpdate: vi.fn(),
-      processPaidMessageUpdate: vi.fn(),
-      processUpdateMessage: vi.fn()
-    },
-    appPeersManager: {
-      getInputPeerById: () => inputPeer,
-      getPeerMigratedTo: (): PeerId | undefined => undefined,
-      isChannel: () => false,
-      isAnyGroup: () => false
-    },
-    appUsersManager: {isBot: () => false},
-    repayRequestHandler: {tryRegisterRequest: vi.fn()},
-    appProfileManager: {isEphemeralBotCommand: vi.fn().mockReturnValue(false)},
-    rootScope: {dispatchEvent: vi.fn(), premium: true}
-  });
-
-  vi.spyOn(manager, 'checkSendOptions').mockResolvedValue({
-    config: {message_length_max: 4},
-    appConfig: {emojies_send_dice: ['🎲']}
-  } as any);
-  vi.spyOn(manager, 'generateOutgoingMessage').mockImplementation(() => ({
-    _: 'message',
-    id: -1,
-    mid: -1,
-    peerId,
-    pFlags: {},
-    message: '',
-    random_id: '1',
-    promise: deferredPromise<void>()
-  } as any));
-  vi.spyOn(manager, 'beforeMessageSending').mockImplementation((message) => {
-    optimisticMessages.push(message);
-    void message.send();
-    return undefined;
-  });
-  vi.spyOn(manager as any, 'onMessagesSendError').mockImplementation(() => {});
-
-  return {invokeApi, invokeApiAfter, manager, optimisticMessages};
 }
 
 describe('native rich-message manager plumbing', () => {
@@ -711,8 +644,6 @@ describe('native rich-message manager plumbing', () => {
   });
 
   test('saves an empty-string draft through inputRichMessage', async() => {
-    const manager = new AppDraftsManager();
-    const invokeApi = vi.fn().mockResolvedValue(true);
     const richMessage = makeRichMessage();
     const localDraft: DraftMessage.draftMessage = {
       _: 'draftMessage',
@@ -724,20 +655,14 @@ describe('native rich-message manager plumbing', () => {
     const resolveInputRichMessage = vi.fn((input: InputRichMessage) => input);
     const assertRichMessage = vi.fn().mockResolvedValue(undefined);
     const invokeWithRichMessageReferenceRetry = vi.fn((_input, invoke) => invoke());
-
-    Object.assign(manager as any, {
-      apiManager: {invokeApi},
+    const {manager, invokeApi} = makeDraftSyncManager({
       appMessagesManager: {
         assertRichMessage,
         resolveInputRichMessage,
         invokeWithRichMessageReferenceRetry
       },
-      appPeersManager: {getInputPeerById: () => inputPeer},
-      dialogsStorage: {getDialogOnly: () => ({top_message: 1})},
-      drafts: {},
-      timeManager: {getServerTimeOffset: () => 0, getServerTime: () => Math.floor(Date.now() / 1000)}
+      appPeersManager: {getInputPeerById: () => inputPeer}
     });
-    vi.spyOn(manager, 'saveDraft').mockImplementation(({draft}) => draft as any);
 
     await manager.syncDraft({
       peerId,
@@ -963,12 +888,20 @@ describe('native rich-message manager plumbing', () => {
       });
       expect(manager.getDraft(peerId)).toBe(localDraft);
 
-      vi.advanceTimersByTime(2001);
+      // * older than the save however late it comes; one dated after the save is newer
+      vi.advanceTimersByTime(60e3);
       updateDraftMessage!({
         peer: inputPeer,
         draft: staleDraft
       });
-      expect(manager.getDraft(peerId)).toBe(staleDraft);
+      expect(manager.getDraft(peerId)).toBe(localDraft);
+
+      const newerDraft: DraftMessage.draftMessage = {...staleDraft, date: tsNow(true), message: 'newer'};
+      updateDraftMessage!({
+        peer: inputPeer,
+        draft: newerDraft
+      });
+      expect(manager.getDraft(peerId)).toBe(newerDraft);
     } finally {
       vi.useRealTimers();
     }

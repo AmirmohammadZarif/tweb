@@ -13,9 +13,7 @@ import formatDuration, {DurationType} from '@helpers/formatDuration';
 import {createCurrentTime} from '@helpers/solid/createCurrentTime';
 
 import styles from '@components/chat/bubbles/starGiftOffer.module.scss';
-import {MyDocument} from '@appManagers/appDocsManager';
-import {StarGiftBackdrop} from '@components/stargifts/stargiftBackdrop';
-import {StickerTsx} from '@components/wrappers/sticker';
+import {StarGiftPreview} from '@components/stargifts/starGiftPreview';
 import Icon from '@components/icon';
 import ReplyMarkupLayout from '@components/chat/bubbleParts/replyMarkupLayout';
 import Chat from '@components/chat/chat';
@@ -24,6 +22,7 @@ import wrapPeerTitle from '@components/wrappers/peerTitle';
 import rootScope from '@lib/rootScope';
 import {transferStarGiftConfirmationPopup} from '@components/popups/transferStarGift';
 import showStarGiftInfoPopup from '../../popups/starGiftInfo';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 function wrapExpiresIn(duration: number) {
   const formatted = formatDuration(duration, 2);
@@ -57,21 +56,12 @@ export function StarGiftOfferBubble(props: {
       }}
       onKeyDown={buttonKeyDown}
     >
-      <div class={/* @once */ styles.giftWrap}>
-        <StarGiftBackdrop
-          backdrop={props.gift.collectibleAttributes.backdrop}
-          patternEmoji={props.gift.collectibleAttributes.pattern.document as MyDocument}
-          small
-          canvasClass={/* @once */ styles.giftBackdropCanvas}
-        />
-        <StickerTsx
-          sticker={props.gift.collectibleAttributes.model.document as MyDocument}
-          width={48}
-          height={48}
-          autoStyle
-          extraOptions={{play: true}}
-        />
-      </div>
+      <StarGiftPreview
+        gift={props.gift}
+        class={/* @once */ styles.giftWrap}
+        canvasClass={/* @once */ styles.giftBackdropCanvas}
+        stickerSize={48}
+      />
 
       <div class={/* @once */ styles.title}>
         {props.title}
@@ -109,6 +99,7 @@ export function StarGiftOfferReplyMarkup(props: {
   chat: Chat
 }) {
   const onRejectClick = async() => {
+    const managers = bindManagersToSession(rootScope.managers);
     await confirmationPopup({
       titleLangKey: 'StarGiftOffer.RejectOfferTitle',
       descriptionLangKey: 'StarGiftOffer.RejectOfferText',
@@ -119,7 +110,7 @@ export function StarGiftOfferReplyMarkup(props: {
       }
     });
 
-    await rootScope.managers.appGiftsManager.resolveGiftOffer(props.message.id, 'reject');
+    await managers.appGiftsManager.resolveGiftOffer(props.message.id, 'reject');
   };
   const onAcceptClick = () => {
     transferStarGiftConfirmationPopup({

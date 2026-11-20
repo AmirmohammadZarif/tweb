@@ -10,10 +10,13 @@ import getPeerTitle from '@components/wrappers/getPeerTitle';
 import generateTitleIcons from '@components/generateTitleIcons';
 import {wrapTopicIcon} from '@components/wrappers/messageActionTextNewUnsafe';
 import lottieLoader from '@lib/lottie/lottieLoader';
-import type {AsAllChatsType} from '@lib/appDialogsManager';
+import type {AsAllChatsType} from '@components/dialogElement';
 import IS_EMOJI_SUPPORTED from '@environment/emojiSupport';
 import buildURLHash from '@helpers/buildURLHash';
 import Modes from '@config/modes';
+import {hotListen} from '@helpers/hotModule';
+import type {ActiveAccountNumber} from '@lib/accounts/types';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 export type PeerTitleOptions = {
   peerId?: PeerId,
@@ -25,6 +28,8 @@ export type PeerTitleOptions = {
   limitSymbols?: number,
   withIcons?: boolean,
   withPremiumIcon?: boolean,
+  /** with `withIcons`: no emoji status or premium star, whatever the middleware */
+  noPremiumIcon?: boolean,
   clickableEmojiStatus?: boolean,
   threadId?: number,
   meAsNotes?: boolean,
@@ -35,12 +40,14 @@ export type PeerTitleOptions = {
    * A name that opens its peer on click (a sender's in a message): an `<a href="#<peerId>">`, as a
    * mention of the peer in a message is — the route opens the peer. Read once, by the constructor.
    */
-  link?: boolean
+  link?: boolean,
+  /** The account the peer is of, when the tab may show another one meanwhile (a call's). */
+  accountNumber?: ActiveAccountNumber
 };
 
 const weakMap: WeakMap<HTMLElement, PeerTitle> = new WeakMap();
 
-rootScope.addEventListener('peer_title_edit', ({peerId, threadId}) => {
+hotListen(import.meta.hot, rootScope, 'peer_title_edit', ({peerId, threadId}) => {
   let query = `.peer-title[data-peer-id="${peerId}"]`;
   if(threadId) {
     query += `[data-thread-id="${threadId}"]`;
@@ -53,7 +60,7 @@ rootScope.addEventListener('peer_title_edit', ({peerId, threadId}) => {
   });
 });
 
-rootScope.addEventListener('botforum_pending_topic_created', ({peerId, tempId, newId}) => {
+hotListen(import.meta.hot, rootScope, 'botforum_pending_topic_created', ({peerId, tempId, newId}) => {
   if(!newId) return;
 
   const query = `.peer-title[data-peer-id="${peerId}"][data-thread-id="${tempId}"]`;
@@ -93,7 +100,11 @@ export default class PeerTitle {
     this.options = {};
 
     if(options) {
-      this.ready = this.update(options);
+      // * settles whatever the render comes to: a bubble's render waits for it with the rest of its
+      // * loads, and a rejection would end that wait for all of them at once
+      this.ready = this.update(options).catch((err) => {
+        console.error('peer title render failed', err);
+      });
     }
 
     weakMap.set(this.element, this);
@@ -124,6 +135,7 @@ export default class PeerTitle {
   }
 
   public async update(options?: PeerTitleOptions) {
+    const managers = bindManagersToSession(rootScope.managers);
     this.setOptions(options);
 
     let fromName = this.options.fromName;
@@ -180,10 +192,10 @@ export default class PeerTitle {
     } else {
       if(threadId) {
         const [topic, isForum, isBotforum, isMonoforum] = await Promise.all([
-          rootScope.managers.dialogsStorage.getForumTopic(peerId, threadId),
-          rootScope.managers.appPeersManager.isForum(peerId),
-          rootScope.managers.appPeersManager.isBotforum(peerId),
-          rootScope.managers.appPeersManager.isMonoforum(peerId)
+          managers.dialogsStorage.getForumTopic(peerId, threadId),
+          managers.appPeersManager.isForum(peerId),
+          managers.appPeersManager.isBotforum(peerId),
+          managers.appPeersManager.isMonoforum(peerId)
         ]);
 
         // * fix monoforum
@@ -191,7 +203,7 @@ export default class PeerTitle {
           peerId = threadId;
           threadId = undefined;
         } else if(!topic && (isForum || isBotforum)) {
-          rootScope.managers.dialogsStorage.getForumTopicById(peerId, threadId).then((forumTopic) => {
+          managers.dialogsStorage.getForumTopicById(peerId, threadId).then((forumTopic) => {
             if(!forumTopic && this.options.threadId === threadId) {
               this.options.threadId = undefined;
               this.update({threadId: undefined});
@@ -213,7 +225,7 @@ export default class PeerTitle {
       }
 
       const getTopicIconPromise = threadId && this.options.withIcons ?
-        rootScope.managers.dialogsStorage.getForumTopic(peerId, threadId).then((topic) => wrapTopicIcon({...(this.options.wrapOptions ?? {}), topic})) :
+        managers.dialogsStorage.getForumTopic(peerId, threadId).then((topic) => wrapTopicIcon({...(this.options.wrapOptions ?? {}), topic})) :
         undefined;
 
       const [title, icons, topicIcon] = await Promise.all([
@@ -222,7 +234,7 @@ export default class PeerTitle {
           peerId,
           threadId
         }),
-        (this.options.withIcons && generateTitleIcons({peerId, clickableEmojiStatus: this.options.clickableEmojiStatus, wrapOptions: {...this.options.wrapOptions, textColor: this.options.iconsColor || this.options.wrapOptions?.textColor}})) ||
+        (this.options.withIcons && generateTitleIcons({peerId, clickableEmojiStatus: this.options.clickableEmojiStatus, noPremiumIcon: this.options.noPremiumIcon, wrapOptions: {...this.options.wrapOptions, textColor: this.options.iconsColor || this.options.wrapOptions?.textColor}})) ||
           (this.options.withPremiumIcon && generateTitleIcons({peerId, wrapOptions: {...this.options.wrapOptions, textColor: this.options.iconsColor || this.options.wrapOptions?.textColor}, noVerifiedIcon: true, noFakeIcon: true})),
         getTopicIconPromise
       ]);
@@ -262,6 +274,16 @@ export default class PeerTitle {
   }
 }
 
+/**
+ * A `PeerTitle` built during a render: the render waits for its `ready` (`loadPromises`), so what it is drawn
+ * into is laid out with the name already in it
+ */
+export function createPeerTitleElement(options: PeerTitleOptions, loadPromises?: Promise<any>[]) {
+  const peerTitle = new PeerTitle(options);
+  loadPromises?.push(peerTitle.ready);
+  return peerTitle.element;
+}
+
 export function changeTitleEmojiColor(element: HTMLElement, color: string) {
   const elements = element.querySelectorAll<HTMLElement>('.emoji-status-text-color');
   elements.forEach((emojiStatus) => {
@@ -271,3 +293,6 @@ export function changeTitleEmojiColor(element: HTMLElement, color: string) {
     }
   })
 }
+
+// a method edited here takes effect on the titles on screen, without a reload (see @helpers/hotRegistry)
+if(import.meta.hot) import.meta.hot.accept();

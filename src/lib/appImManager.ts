@@ -1,12 +1,14 @@
-import {shouldPreserveKeyboardFocus} from '@helpers/dom/isKeyboardControl';
+import {keepsKeyFromComposer, shouldPreserveKeyboardFocus} from '@helpers/dom/isKeyboardControl';
 import isTargetAnInput from '@helpers/dom/isTargetAnInput';
+import {isWebPageUrl} from '@lib/richTextProcessor/matchUrlProtocol';
 import type {GroupCallId, MyGroupCall} from '@appManagers/appGroupCallsManager';
 import type {ApiLimitType} from '@appManagers/apiManagerMethods';
 import type GroupCallInstance from '@lib/calls/groupCallInstance';
 import type CallInstance from '@lib/calls/callInstance';
 import animationIntersector from '@components/animationIntersector';
-import appSidebarLeft, {LEFT_COLUMN_ACTIVE_CLASSNAME} from '@components/sidebarLeft';
-import appSidebarRight, {RIGHT_COLUMN_ACTIVE_CLASSNAME} from '@components/sidebarRight';
+import appSidebarLeft from '@components/sidebarLeft';
+import {LEFT_COLUMN_ACTIVE_CLASSNAME, RIGHT_COLUMN_ACTIVE_CLASSNAME, APP_TABS} from '@lib/appColumns';
+import appSidebarRight from '@components/sidebarRight';
 import mediaSizes, {ScreenSize} from '@helpers/mediaSizes';
 import {bindActiveWindowListener, getAppWindow, getOverlayRoot} from '@helpers/appWindow';
 import {logger, LogTypes} from '@lib/logger';
@@ -30,10 +32,11 @@ import PeerTitle from '@components/peerTitle';
 import {PopupPeerCheckboxOptions} from '@components/popups/peer';
 import blurActiveElement from '@helpers/dom/blurActiveElement';
 import cancelEvent from '@helpers/dom/cancelEvent';
+import openTextLinkMenu from '@helpers/dom/openTextLinkMenu';
 import disableTransition from '@helpers/dom/disableTransition';
 import type {TextHighlightMatch} from '@helpers/dom/textHighlight';
 import clearMediaElementSource from '@helpers/dom/clearMediaElementSource';
-import crossfadeContent from '@helpers/dom/crossfadeContent';
+import crossfadeContent, {STATUS_CROSSFADE_DURATION} from '@helpers/dom/crossfadeContent';
 import whichChild from '@helpers/dom/whichChild';
 import singleInstance from '@lib/singleInstance';
 import {hideToast, toast, toastNew} from '@components/toast';
@@ -45,8 +48,9 @@ import IMAGE_MIME_TYPES_SUPPORTED from '@environment/imageMimeTypesSupport';
 import {NULL_PEER_ID, STARS_CURRENCY} from '@appManagers/constants';
 import telegramMeWebManager from '@lib/telegramMeWebManager';
 import {formatDate, ONE_DAY} from '@helpers/date';
-import createTopbarCall, {TopbarCallController} from '@components/topbarCall';
+import createTopbarCall, {showOngoingCall, TopbarCallController} from '@components/topbarCall';
 import confirmationPopup from '@components/confirmationPopup';
+import requestPhone from '@components/requestPhone';
 import IS_GROUP_CALL_SUPPORTED from '@environment/groupCallSupport';
 import IS_CONFERENCE_CALL_SUPPORTED from '@environment/conferenceCallSupport';
 import IS_CALL_SUPPORTED from '@environment/callSupport';
@@ -62,7 +66,7 @@ import numberThousandSplitter from '@helpers/number/numberThousandSplitter';
 import appChatBackground, {AppChatBackground} from '@components/chat/bubbles/chatBackground';
 import {IS_CHROMIUM, IS_FIREFOX} from '@environment/userAgent';
 import compareVersion from '@helpers/compareVersion';
-import {AppManagers} from '@lib/managers';
+import {AppManagers, ReadingManagers, TabManagers} from '@lib/managers';
 import uiNotificationsManager from '@lib/uiNotificationsManager';
 import appMediaPlaybackController from '@components/appMediaPlaybackController';
 import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
@@ -71,6 +75,7 @@ import wrapUrl from '@lib/richTextProcessor/wrapUrl';
 import getUserStatusString from '@components/wrappers/getUserStatusString';
 import getChatMembersString from '@components/wrappers/getChatMembersString';
 import {SETTINGS_INIT} from '@config/state';
+import {DEFAULT_BACKGROUND_SLUG} from '@config/app';
 import CacheStorageController from '@lib/files/cacheStorage';
 import themeController from '@helpers/themeController';
 import {pinObjectURL} from '@helpers/objectUrl';
@@ -80,17 +85,23 @@ import idleController from '@helpers/idleController';
 import EventListenerBase from '@helpers/eventListenerBase';
 import {AckedResult} from '@lib/superMessagePort';
 import callTransitionCoordinator from '@lib/calls/callTransitionCoordinator';
+import {CallAccount, captureCallAccount, showCallAccount} from '@lib/calls/callAccount';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 import groupCallsController from '@lib/calls/groupCallsController';
+import {chooseGroupCallJoinAs, confirmGroupCallJoin} from '@components/groupCall/joinAs';
 import showConferenceJoinPopup from '@components/call/conferenceJoinPopup';
 import conferenceInvitesController from '@lib/calls/conferenceInvitesController';
 import GROUP_CALL_STATE from '@lib/calls/groupCallState';
 import callsController from '@lib/calls/callsController';
+import {preloadNoiseSuppression} from '@lib/calls/noiseSuppression/noiseSuppression';
 import getConferenceInviteErrorLangKey from '@lib/calls/conferenceInviteError';
 import {groupCallToInput} from '@lib/calls/helpers/groupCallUpdates';
 import sameInputGroupCall from '@lib/calls/helpers/sameInputGroupCall';
 import getFilesFromEvent from '@helpers/files/getFilesFromEvent';
 import getFileMimeType from '@helpers/files/getFileMimeType';
 import apiManagerProxy from '@lib/apiManagerProxy';
+import toastCopyRestricted from '@components/chat/toastCopyRestricted';
+import getChatMigratedTo from '@appManagers/utils/peers/getChatMigratedTo';
 import paymentsWrapCurrencyAmount from '@helpers/paymentsWrapCurrencyAmount';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import {CLICK_EVENT_NAME} from '@helpers/dom/clickEvent';
@@ -127,7 +138,7 @@ import getPeerId from '@appManagers/utils/peers/getPeerId';
 import {RequestWebViewOptions} from '@appManagers/appAttachMenuBotsManager';
 import showWebAppPopup from '@components/popups/webApp';
 import {setMyPeerColor, setPeerColors} from '@appManagers/utils/peers/getPeerColorById';
-import {savedReactionTags} from '@components/chat/reactions';
+import {PENDING_PAID_REACTIONS, savedReactionTags} from '@components/chat/reactions';
 import {setAppState, useAppState} from '@stores/appState';
 import rtmpCallsController, {RtmpCallInstance} from '@lib/calls/rtmpCallsController';
 import openRtmpCallViewer from '@lib/calls/openRtmpCallViewer';
@@ -136,10 +147,10 @@ import {
   shouldPreventDefaultFilePaste,
   shouldInsertRichMediaFiles
 } from '@components/chat/inputEditor/mediaPaste';
-import {isRichMessageMediaMimeType} from '@helpers/files/richMessageMediaInsertPolicy';
 import useProfileColors from '@hooks/useProfileColors';
 import {wrapSlowModeLeftDuration} from '@components/wrappers/wrapDuration';
 import {splitFullMid} from '@components/chat/bubbles';
+import type {FullMid} from '@appManagers/utils/messages/fullMid';
 import getSelectedNodes from '@helpers/dom/getSelectedNodes';
 import showChatToast from '@components/chat/chatToast';
 import anchorCallback from '@helpers/dom/anchorCallback';
@@ -147,24 +158,28 @@ import showPremiumPopup from '@components/popups/premium';
 import safeWindowOpen from '@helpers/dom/safeWindowOpen';
 import {openWebAppInAppBrowser, openGameInAppBrowser} from '@components/browser';
 import {createProxiedManagersForAccount} from '@lib/getProxiedManagers';
+import {getAccountSession, getCurrentAccount, getManagersSession, isSessionLeaving} from '@lib/accounts/getCurrentAccount';
+import type {ActiveAccountNumber} from '@lib/accounts/types';
 import ChatBackgroundStore from '@lib/chatBackgroundStore';
 import useLockScreenShortcut from '@appManagers/utils/useLockScreenShortcut';
 import IS_WEB_APP_BROWSER_SUPPORTED from '@environment/webAppBrowserSupport';
 import createChatAudio, {ChatAudioController} from '@components/chat/audio';
 import AudioAssetPlayer from '@helpers/audioAssetPlayer';
 import {useAppSettings} from '@stores/appSettings';
+import useReducedMotion from '@stores/reducedMotion';
 import {MessageSendingParams, MyMessage} from '@appManagers/appMessagesManager';
 import {canUploadAsWhenEditing} from '@components/chat/utils';
 import getPeerActiveUsernames from '@appManagers/utils/peers/getPeerActiveUsernames';
 import {usePeer} from '@stores/peers';
 import useIsCrmSuperAdmin, {useIsCrmLoggedIn} from '@stores/crmRole';
-import {untrack} from 'solid-js';
+import {createEffect, createRoot, on, untrack} from 'solid-js';
 import {ButtonMenuItemOptions, ButtonMenuSync} from '@components/buttonMenu';
 import contextMenuController from '@helpers/contextMenuController';
 import positionMenu from '@helpers/positionMenu';
 import {copyTextToClipboard} from '@helpers/clipboard';
 import showDatePickerPopup from '@components/popups/datePicker';
 import noop from '@helpers/noop';
+import {registerHotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
 
 export type ChatSavedPosition = {
   /**
@@ -175,6 +190,12 @@ export type ChatSavedPosition = {
    */
   mids?: number[],
   top?: number,
+  /**
+   * The bubble at the top of the screen - by its message's peer as well: a group's history before its upgrade has
+   * its old one - and how far below the screen's top it stood: the chat goes back to it, rendering what fills the
+   * screen around it first, and the rest of `mids` after that frame
+   */
+  anchor?: {fullMid: FullMid, top: number},
   /**
    * Last-displayed pinned plate state. Captured on exit, restored on
    * re-entry so the plate paints atomically with bubbles without the
@@ -191,6 +212,11 @@ export type ChatSetPeerOptions = {
   pollOption?: string | Uint8Array,
   /** text to light up inside the `lastMsgId` bubble: the search query it was found by, or the quote that led here */
   highlight?: TextHighlightMatch,
+  /**
+   * the jump is to the whole album `lastMsgId` is an item of — a message link without `?single` —
+   * and lights all of it up instead of that one item
+   */
+  wholeAlbum?: boolean,
   lastMsgPeerId?: PeerId,
   threadId?: number,
   monoforumThreadId?: PeerId,
@@ -212,12 +238,6 @@ export type ChatSetInnerPeerOptions = Modify<ChatSetPeerOptions, {
   type?: ChatType
 }>;
 
-export enum APP_TABS {
-  CHATLIST,
-  CHAT,
-  PROFILE
-}
-
 type JoinChatFlow = {
   active: boolean,
   isWebAppOpen: boolean,
@@ -237,7 +257,12 @@ export type JoinConferenceOptions = {
    * confirmation names them, the way tdesktop names the message's sender
    * (window_session_controller.cpp:1023).
    */
-  inviterPeerId?: PeerId
+  inviterPeerId?: PeerId,
+  /**
+   * The account the call is joined on — a ringing invitation's, which the tab may no longer show.
+   * The tab's account when left out.
+   */
+  account?: CallAccount
 };
 
 /** One person the New Call screen picked, and how they were picked. */
@@ -296,6 +321,7 @@ export class AppImManager extends EventListenerBase<{
 
   public offline = false;
   public updateStatusInterval = 0;
+  private isSwitchingAccount = false;
 
   public log: ReturnType<typeof logger>;
 
@@ -305,6 +331,8 @@ export class AppImManager extends EventListenerBase<{
 
   public chats: Chat[] = [];
   private prevTab: HTMLElement;
+  // * what covers a chat left under another one once it has faded out: only its latest counts
+  private chatsCovering = new WeakMap<HTMLElement, () => boolean>();
   private chatsSelectTabDebounced: () => void;
 
   private joinChatFlowsByQueryId = new Map<string, JoinChatFlow>();
@@ -313,7 +341,7 @@ export class AppImManager extends EventListenerBase<{
   private topbarCall: TopbarCallController;
   private chatAudio: ChatAudioController;
 
-  public managers: AppManagers;
+  public managers: TabManagers;
 
   public cacheStorage = new CacheStorageController('cachedFiles');
   public customEmojiSize: MediaSize;
@@ -325,6 +353,8 @@ export class AppImManager extends EventListenerBase<{
   private chatPositions: {
     [peerId_threadId: string]: ChatSavedPosition;
   };
+
+  private lastOpenedPeerId: PeerId = NULL_PEER_ID;
 
   get myId() {
     return rootScope.myId;
@@ -354,7 +384,7 @@ export class AppImManager extends EventListenerBase<{
     });
   }
 
-  public construct(managers: AppManagers) {
+  public construct(managers: TabManagers) {
     this.managers = managers;
     internalLinkProcessor.construct(managers);
 
@@ -362,19 +392,9 @@ export class AppImManager extends EventListenerBase<{
 
     appMediaPlaybackController.construct(managers);
 
+    window.addEventListener('beforeunload', this.onBeforeUnload);
+
     this.log = logger('IM', LogTypes.Log | LogTypes.Warn | LogTypes.Debug | LogTypes.Error);
-
-    // Pre-cache the bundled wallpaper svg for every base entry — multiple base themes
-    // can reference the same `pattern` slug, so we dedupe via the cache itself.
-    SETTINGS_INIT.themes.forEach((theme) => {
-      theme.settings?.forEach(({wallpaper}) => {
-        const slug = (wallpaper as WallPaper.wallPaper)?.slug;
-        if(!slug) return;
-
-        const url = 'assets/img/' + slug + '.svg' + (IS_FIREFOX ? '?1' : '');
-        ChatBackgroundStore.setBackgroundUrlToCache({slug, url});
-      });
-    });
 
     this.selectTab(APP_TABS.CHATLIST);
 
@@ -385,11 +405,9 @@ export class AppImManager extends EventListenerBase<{
 
     idleController.addEventListener('change', (idle) => {
       this.offline = idle;
-      this.updateStatus();
-      if(idle) {
-        clearInterval(this.updateStatusInterval);
-      } else {
-        this.updateStatusInterval = window.setInterval(() => this.updateStatus(), 50e3);
+      // * mid-switch the status is neither account's to set: the switch sets the new one's when it is done
+      if(!this.isSwitchingAccount) {
+        this.scheduleStatusUpdates();
       }
     });
 
@@ -404,9 +422,7 @@ export class AppImManager extends EventListenerBase<{
 
     this.columnEl.append(this.chatsContainer);
 
-    // Tip cards for the empty column. Imported lazily so this module (which the SolidJS hot-reload
-    // guard provider imports) isn't part of an import cycle with the components the cards use.
-    import('@components/chatTips').then(({renderChatTips}) => renderChatTips(this.chatsContainer));
+    this.renderChatTips();
 
     this.createNewChat();
     this.chatsSelectTab(this.chat);
@@ -416,6 +432,8 @@ export class AppImManager extends EventListenerBase<{
 
     this.setSettings();
     rootScope.addEventListener('settings_updated', this.setSettings);
+    // * the system's reduce-motion preference moves the animation level too, under the a11y layer
+    createRoot(() => createEffect(on(useReducedMotion(), this.setAnimationLevel, {defer: true})));
 
     const onPremiumToggle = (isPremium: boolean) => {
       if(document.body.classList.contains('is-premium') === isPremium) {
@@ -621,11 +639,11 @@ export class AppImManager extends EventListenerBase<{
         icon: 'premium_speed_filled',
         title: i18n(isUpload ? 'UploadSpeedLimited' : 'DownloadSpeedLimited'),
         textElement: i18n(isUpload ? 'Chat.UploadLimit.Text' : 'Chat.DownloadLimit.Text', [
+          increaseTimes,
           anchorCallback(() => {
             hide();
             showPremiumPopup({feature: 'faster_download'});
-          }),
-          increaseTimes
+          })
         ]),
         duration: 10000
       });
@@ -771,16 +789,7 @@ export class AppImManager extends EventListenerBase<{
         }
       }];
 
-      const menu = ButtonMenuSync({buttons: buttons.filter(Boolean)});
-      menu.classList.add('contextmenu');
-
-      getOverlayRoot().append(menu);
-      positionMenu(e, menu);
-      contextMenuController.openBtnMenu(menu, () => {
-        setTimeout(() => {
-          menu.remove();
-        }, 300);
-      });
+      openTextLinkMenu({link: element, event: e, buttons: buttons.filter(Boolean)});
     };
 
     // Hover-to-play stickers — follow the active window so it still works in a Document PiP window
@@ -855,13 +864,12 @@ export class AppImManager extends EventListenerBase<{
 
     // Remember the chat we're leaving behind (closed outright, or switched away from) so the
     // tip cards shown on the empty column can offer it back under "Recently closed".
-    let lastOpenedPeerId: PeerId = NULL_PEER_ID;
     this.addEventListener('peer_changed', ({peerId}) => {
-      if(lastOpenedPeerId && lastOpenedPeerId !== peerId) {
-        this.managers.appUsersManager.pushRecentlyClosedChat(lastOpenedPeerId);
+      if(this.lastOpenedPeerId && this.lastOpenedPeerId !== peerId) {
+        this.managers.appUsersManager.pushRecentlyClosedChat(this.lastOpenedPeerId);
       }
 
-      lastOpenedPeerId = peerId;
+      this.lastOpenedPeerId = peerId;
     });
 
     this.addEventListener('peer_changed', async({peerId}) => {
@@ -1021,9 +1029,7 @@ export class AppImManager extends EventListenerBase<{
     setInterval(setAuthorized, ONE_DAY);
     setAuthorized();
 
-    this.managers.appReactionsManager.getSavedReactionTags().then((tags) => {
-      savedReactionTags.splice(0, savedReactionTags.length, ...tags);
-    });
+    this.loadSavedReactionTags();
 
     // new PasscodeLockScreenControler().lock();
 
@@ -1167,7 +1173,8 @@ export class AppImManager extends EventListenerBase<{
     enable: boolean,
     attachMenuBot?: AttachMenuBot
   ) {
-    attachMenuBot ??= await this.managers.appAttachMenuBotsManager.getAttachMenuBot(botId);
+    const managers = bindManagersToSession(this.managers);
+    attachMenuBot ??= await managers.appAttachMenuBotsManager.getAttachMenuBot(botId);
 
     if(!!attachMenuBot.pFlags.inactive === !enable) {
       return attachMenuBot;
@@ -1179,7 +1186,7 @@ export class AppImManager extends EventListenerBase<{
       await this.pushBotIdAsConfirmed(botId);
       const haveWriteAccess = true;
 
-      await this.managers.appAttachMenuBotsManager.toggleBotInAttachMenu(botId, true, haveWriteAccess);
+      await managers.appAttachMenuBotsManager.toggleBotInAttachMenu(botId, true, haveWriteAccess);
       // installed
       delete attachMenuBot.pFlags.inactive;
 
@@ -1193,7 +1200,7 @@ export class AppImManager extends EventListenerBase<{
         langPackArguments: [wrapEmojiText(attachMenuBot.short_name)]
       });
     } else {
-      await this.managers.appAttachMenuBotsManager.toggleBotInAttachMenu(botId, false);
+      await managers.appAttachMenuBotsManager.toggleBotInAttachMenu(botId, false);
       attachMenuBot.pFlags.inactive = true;
 
       toastNew({
@@ -1237,6 +1244,7 @@ export class AppImManager extends EventListenerBase<{
       chatTitle: string
     }
   }) {
+    const managers = bindManagersToSession(this.managers);
     options.botId ??= options.attachMenuBot?.bot_id;
     options.themeParams ??= {
       _: 'dataJSON',
@@ -1254,7 +1262,7 @@ export class AppImManager extends EventListenerBase<{
       (options.fromAttachMenu || options.fromSideMenu) */
     ) {
       try {
-        options.attachMenuBot = await this.managers.appAttachMenuBotsManager.getAttachMenuBot(options.botId);
+        options.attachMenuBot = await managers.appAttachMenuBotsManager.getAttachMenuBot(options.botId);
       } catch(err) {}
     }
 
@@ -1294,19 +1302,26 @@ export class AppImManager extends EventListenerBase<{
     }
 
     try {
-      const cacheKeyArr = [options.botId, options.startParam];
+      // * what tells one opened app from another: the same app asked for again is shown, not opened twice
+      // * an empty start parameter or url (a `?startapp` link) is none, as an omitted one is
+      const cacheKeyArr: (string | number)[] = [options.botId, options.startParam || undefined, options.url || undefined];
       if(options.fromBotMenu || options.fromSideMenu || options.main) {
         cacheKeyArr.push('main');
+      } else if(!options.isSimpleWebView && !options.app && !joinChat) {
+        // * an attach-menu or keyboard app answers into the chat (and topic) it was asked in: requestWebView's peer
+        // * and query_id. Asked from another chat it is another app, or its answer would go to the first chat - tdesktop
+        // * keys them by thread too
+        cacheKeyArr.push('peer', options.peerId, options.threadId);
       }
       if(joinChat) {
         cacheKeyArr.push('join', joinChat.queryId);
       }
 
-      const cacheKey = cacheKeyArr.join('-');
+      const cacheKey = JSON.stringify(cacheKeyArr); // * a url holds '-' too: joined, it could pass for another key
 
       const webViewResultUrl = joinChat ?
-        await this.managers.appChatInvitesManager.requestChatJoinWebView(joinChat.queryId, options.themeParams) :
-        await this.managers.appAttachMenuBotsManager.requestWebView(options as RequestWebViewOptions);
+        await managers.appChatInvitesManager.requestChatJoinWebView(joinChat.queryId, options.themeParams) :
+        await managers.appAttachMenuBotsManager.requestWebView(options as RequestWebViewOptions);
       if(joinChat && !joinChat.flow.active) {
         return;
       }
@@ -1430,8 +1445,9 @@ export class AppImManager extends EventListenerBase<{
       return;
     }
 
+    const managers = bindManagersToSession(this.managers);
     try {
-      const callbackAnswer = await this.managers.appInlineBotsManager.callbackButtonClick(
+      const callbackAnswer = await managers.appInlineBotsManager.callbackButtonClick(
         message.peerId,
         message.mid,
         undefined,
@@ -1445,6 +1461,13 @@ export class AppImManager extends EventListenerBase<{
         message,
         url: callbackAnswer.url
       });
+
+      // * the chat sees that a game is being played, as tdesktop shows it (api_bot.cpp) - a channel's
+      // * readers excepted
+      const {peerId} = message;
+      if(!(await managers.appPeersManager.isBroadcast(peerId))) {
+        managers.appMessagesManager.setTyping(peerId, {_: 'sendMessageGamePlayAction'});
+      }
     } catch(err) {}
   }
 
@@ -1463,6 +1486,7 @@ export class AppImManager extends EventListenerBase<{
     };
 
     const onUrlAuthResult = async(urlAuthResult: UrlAuthResult): Promise<void> => {
+      const managers = bindManagersToSession(this.managers);
       if(urlAuthResult._ === 'urlAuthResultRequest') {
         const b = document.createElement('b');
         b.append(urlAuthResult.domain);
@@ -1514,7 +1538,7 @@ export class AppImManager extends EventListenerBase<{
           return;
         }
 
-        const result = await this.managers.appSeamlessLoginManager.acceptUrlAuth(
+        const result = await managers.appSeamlessLoginManager.acceptUrlAuth(
           url,
           peerId,
           mid,
@@ -1537,6 +1561,11 @@ export class AppImManager extends EventListenerBase<{
       buttonId
     ).then((urlAuthResult) => {
       onUrlAuthResult(urlAuthResult);
+    }, (err: ApiError) => {
+      // * a request the server refused opens the link all the same, as tdesktop does (but for an account left meanwhile)
+      if(err?.type !== 'MIDDLEWARE') {
+        safeWindowOpen(url);
+      }
     });
   }
 
@@ -1544,8 +1573,15 @@ export class AppImManager extends EventListenerBase<{
     let appConfig: MTAppConfig, config: Config.config;
     rootScope.addEventListener('app_config', (_appConfig) => appConfig = _appConfig);
     rootScope.addEventListener('config', (_config) => config = _config);
-    this.managers.apiManager.getAppConfig().then((_appConfig) => appConfig = _appConfig);
-    this.managers.apiManager.getConfig().then((_config) => config = _config);
+    // * the autologin token and the domains are the account's own
+    const loadConfigs = () => {
+      appConfig = config = undefined;
+      // * through the tab's cached copy, which the widgets' switch reads synchronously (isWidgetRenderingEnabled)
+      Promise.resolve(apiManagerProxy.getAppConfig()).then((_appConfig) => appConfig = _appConfig);
+      this.managers.apiManager.getConfig().then((_config) => config = _config);
+    };
+    loadConfigs();
+    rootScope.addEventListener('account_switched', loadConfigs);
 
     const onAuthAnchorClick = (element: HTMLAnchorElement) => {
       if(!appConfig) {
@@ -1573,7 +1609,10 @@ export class AppImManager extends EventListenerBase<{
       }
 
       const originalUrl = element.dataset.originalUrl ??= element.href;
-      if(appConfig.autologin_domains.includes(url.hostname)) {
+      if(appConfig.autologin_domains.includes(url.hostname) && isWebPageUrl(url)) {
+        // the token signs the user in, so it never travels in plaintext: an http link goes out as https,
+        // the way tdesktop and tdlib upgrade it, and no other scheme gets the token at all
+        url.protocol = 'https:';
         url.searchParams.set('autologin_token', autologinToken);
         element.href = url.toString();
 
@@ -1632,6 +1671,8 @@ export class AppImManager extends EventListenerBase<{
     };
     rootScope.addEventListener('theme_changed', () => onHelpPeerColors());
     this.managers.apiManager.getPeerColors().then(onHelpPeerColors);
+    // * the palette is the same, but the colors of "me" are now another user's
+    rootScope.addEventListener('account_switched', () => lastHelpPeerColors && onHelpPeerColors());
     rootScope.addEventListener('user_update', (userId) => {
       if(userId === rootScope.myId.toUserId()) {
         setMyPeerColor(apiManagerProxy.getUser(userId));
@@ -1738,12 +1779,13 @@ export class AppImManager extends EventListenerBase<{
   }
 
   private attachKeydownListener() {
-    const IGNORE_KEYS = new Set(['Meta', 'Control']);
     const onKeyDown = async(e: KeyboardEvent) => {
+      const managers = bindManagersToSession(this.managers);
       const key = e.key;
       const isSelectionCollapsed = document.getSelection().isCollapsed;
       if(
-        (Modes.a11y ? shouldPreserveKeyboardFocus(e) : IGNORE_KEYS.has(key)) ||
+        keepsKeyFromComposer(e) ||
+        (Modes.a11y && shouldPreserveKeyboardFocus(e)) ||
         overlayCounter.isOverlayActive ||
         !e.isTrusted // * ignore synthetic events
       ) return;
@@ -1768,6 +1810,8 @@ export class AppImManager extends EventListenerBase<{
 
       const chat = this.chat;
       if(Modes.a11y && targetIsInput && target !== chat?.input?.messageInput) return;
+      // * the theme picker stands in for the composer while it is up: no key reaches the draft it hides
+      const composerTakesKeys = !chat?.themeChooser;
 
       // Hand keyboard focus to the bubbles scroll container so the browser scrolls it natively.
       // (overflow:auto + outline:none → focus is invisible.)
@@ -1782,8 +1826,6 @@ export class AppImManager extends EventListenerBase<{
 
       if((key.startsWith('Arrow') || (e.shiftKey && key === 'Shift')) && !isSelectionCollapsed) {
         return;
-      } else if(e.code === 'KeyC' && (e.ctrlKey || e.metaKey) && !targetIsInput) {
-        return;
       } else if(
         (key === 'PageUp' || key === 'PageDown') &&
         !targetIsInput &&
@@ -1793,17 +1835,18 @@ export class AppImManager extends EventListenerBase<{
         return;
       } else if(e.altKey && (key === 'ArrowUp' || key === 'ArrowDown')) {
         cancelEvent(e);
-        this.managers.dialogsStorage.getNextDialog(
+        managers.dialogsStorage.getNextDialog(
           this.chat.peerId,
           key === 'ArrowDown',
-          appDialogsManager.filterId
+          appDialogsManager.filterId,
+          appDialogsManager.xd?.getShownPeerIds()
         ).then((dialog) => {
           if(dialog) {
             this.setPeer({peerId: dialog.peerId});
           }
         });
         return;
-      } else if((key === 'ArrowUp' || key === 'ArrowDown') && !isTargetATextarea && this.chat?.type !== ChatType.Scheduled && this.chat?.type !== ChatType.Welcome) {
+      } else if((key === 'ArrowUp' || key === 'ArrowDown') && !isTargetATextarea && composerTakesKeys && this.chat?.type !== ChatType.Scheduled && this.chat?.type !== ChatType.Welcome) {
         // In chats/channels where the user can't post (read-only broadcasts, restricted groups,
         // unjoined chats), there's no message to edit, so let ArrowUp/Down scroll the chat instead.
         if(chat?.input && !chat.input.canSendPlain()) {
@@ -1837,7 +1880,7 @@ export class AppImManager extends EventListenerBase<{
             return;
           }
 
-          this.managers.appMessagesManager.getFirstMessageToEdit({
+          managers.appMessagesManager.getFirstMessageToEdit({
             peerId,
             threadId,
             forReply,
@@ -1884,9 +1927,10 @@ export class AppImManager extends EventListenerBase<{
         target !== chat.input.messageInput &&
         !targetIsInput &&
         !IS_TOUCH_SUPPORTED &&
-        (!mediaSizes.isMobile || this.tabId === APP_TABS.CHAT) &&
+        this.isChatColumnShown() &&
         !chat.selection.isSelecting &&
         !chat.input.recording &&
+        composerTakesKeys &&
         chat.input.messageInput.isContentEditable
       ) {
         chat.input.passEventToInput(e);
@@ -1911,6 +1955,11 @@ export class AppImManager extends EventListenerBase<{
           element = node.parentElement;
         }
 
+        // a widget's text sits in its shadow root (one it lets be selected): the bubble is around the root's host
+        for(let root = element?.getRootNode(); root instanceof ShadowRoot; root = element.getRootNode()) {
+          element = root.host as HTMLElement;
+        }
+
         if(!findUpClassName(element, 'no-forwards')) {
           return false;
         }
@@ -1926,18 +1975,7 @@ export class AppImManager extends EventListenerBase<{
 
       if(foundRestrictedNode) {
         e.preventDefault();
-
-        let langPackKey: LangPackKey;
-        if(peerId.isUser()) {
-          langPackKey = 'CopyRestricted.User';
-        } else {
-          const chat = apiManagerProxy.getChat(peerId.toChatId());
-          langPackKey = (chat as MTChat.channel).pFlags.broadcast ?
-            'CopyRestricted.Channel' :
-            'CopyRestricted.Group';
-        }
-
-        toastNew({langPackKey});
+        toastCopyRestricted(peerId);
       }
     });
   }
@@ -2110,6 +2148,7 @@ export class AppImManager extends EventListenerBase<{
   public async op(options: {
     peer: User.user | MTChat
   } & Omit<ChatSetPeerOptions, 'peerId'>) {
+    const managers = bindManagersToSession(this.managers);
     if(!options.peer) {
       return;
     }
@@ -2117,6 +2156,8 @@ export class AppImManager extends EventListenerBase<{
       const {CommunityForumTab} = await import(
         '@components/forumTab/communityForumTab'
       );
+      // * a community of the account it was asked on: not opened once the tab is on another
+      if(isSessionLeaving(getManagersSession(managers))) return;
       return appDialogsManager.toggleForumTabByPeerId(
         options.peer.id.toPeerId(true),
         true,
@@ -2140,13 +2181,13 @@ export class AppImManager extends EventListenerBase<{
     const isBotforum = !!(isUser && (options.peer as User.user).pFlags.bot_forum_view);
 
     await Promise.all(keys.map(async(key) => {
-      options[key] &&= await this.managers.appMessagesIdsManager.generateMessageId(options[key], channelId);
+      options[key] &&= await managers.appMessagesIdsManager.generateMessageId(options[key], channelId);
     }));
 
     const migratedTo = (options.peer as MTChat.chat).migrated_to;
     if(migratedTo) {
       const channelId = (migratedTo as InputChannel.inputChannel).channel_id;
-      options.peer = await this.managers.appChatsManager.getChat(channelId);
+      options.peer = await managers.appChatsManager.getChat(channelId);
       peerId = channelId.toPeerId(true);
     }
 
@@ -2165,7 +2206,7 @@ export class AppImManager extends EventListenerBase<{
     // handle t.me/username/thread or t.me/username/messageId
     if(lastMsgId && !threadId) {
       if(isForum) {
-        const message = await this.managers.appMessagesManager.reloadMessage(peerId, lastMsgId);
+        const message = await managers.appMessagesManager.reloadMessage(peerId, lastMsgId);
         if(message) {
           threadId = options.threadId = getMessageThreadId(message, {isForum});
         } else {
@@ -2173,7 +2214,7 @@ export class AppImManager extends EventListenerBase<{
           lastMsgId = options.lastMsgId = undefined;
         }
       } else if(isBotforum) {
-        const topic = await this.managers.dialogsStorage.getForumTopicById(peerId, lastMsgId);
+        const topic = await managers.dialogsStorage.getForumTopicById(peerId, lastMsgId);
         if(topic) {
           threadId = options.threadId = lastMsgId;
           lastMsgId = options.lastMsgId = undefined;
@@ -2194,7 +2235,8 @@ export class AppImManager extends EventListenerBase<{
       return this.openComment({
         peerId,
         msgId: lastMsgId,
-        commentId
+        commentId,
+        wholeAlbum: options.wholeAlbum
       });
     }
 
@@ -2234,15 +2276,15 @@ export class AppImManager extends EventListenerBase<{
   public async openThread(options: {
     peerId: PeerId,
     lastMsgId: number,
-    threadId: number,
-    stack?: ChatSetPeerOptions['stack']
-  }) {
-    if(await this.managers.appChatsManager.isForum(options.peerId.toChatId()) || await this.managers.appPeersManager.isBotforum(options.peerId)) {
-      await this.managers.dialogsStorage.getForumTopicOrReload(options.peerId, options.threadId);
+    threadId: number
+  } & Pick<ChatSetPeerOptions, 'stack' | 'wholeAlbum'>) {
+    const managers = bindManagersToSession(this.managers);
+    if(await managers.appChatsManager.isForum(options.peerId.toChatId()) || await managers.appPeersManager.isBotforum(options.peerId)) {
+      await managers.dialogsStorage.getForumTopicOrReload(options.peerId, options.threadId);
       return this.setInnerPeer(options);
     }
 
-    return this.managers.appMessagesManager.reloadMessage(options.peerId, options.threadId).then(async(message) => {
+    return managers.appMessagesManager.reloadMessage(options.peerId, options.threadId).then(async(message) => {
       if(!message) {
         options.lastMsgId = undefined;
       }
@@ -2261,25 +2303,30 @@ export class AppImManager extends EventListenerBase<{
     peerId: PeerId,
     msgId: number,
     commentId: number
-  }) {
+  } & Pick<ChatSetPeerOptions, 'wholeAlbum'>) {
     return this.managers.appMessagesManager.getDiscussionMessage(options.peerId, options.msgId).then((message) => {
       if(!message) return;
       return this.openThread({
         peerId: message.peerId,
         lastMsgId: options.commentId,
-        threadId: message.mid
+        threadId: message.mid,
+        wholeAlbum: options.wholeAlbum
       });
     });
   }
 
   public callUser(userId: UserId, type: CallType): Promise<void> {
+    // Loads while the confirmations and the call request go on.
+    preloadNoiseSuppression();
+    // * the account the call is placed from: the tab can switch to another while this waits its turn
+    const account = captureCallAccount(this.managers);
     return this.callTransitions.run(async() => {
-      const call = callsController.getCallByUserId(userId);
+      const call = callsController.getCallByUserId(userId, account.accountNumber);
       if(call) {
         return;
       }
 
-      const userFull = await this.managers.appProfileManager.getProfile(userId);
+      const userFull = await account.managers.appProfileManager.getProfile(userId);
       if(userFull.pFlags.phone_calls_private) {
         // This informational modal is not part of the call switch. Keep it
         // detached so the global transition reservation is released at once,
@@ -2310,15 +2357,24 @@ export class AppImManager extends EventListenerBase<{
 
       await this.discardCurrentCall(userId.toPeerId(), 'Call');
 
-      await callsController.startCallInternal(userId, type === 'video');
+      await callsController.startCallInternal(userId, type === 'video', account);
     });
   }
 
-  private discardCurrentCall(toPeerId: PeerId, toType: 'Live' | 'Voice' | 'Call' | 'Conference', ignoreGroupCall?: GroupCallInstance, ignoreCall?: CallInstance, ignoreLive?: RtmpCallInstance): Promise<void> {
-    if(groupCallsController.groupCall && groupCallsController.groupCall !== ignoreGroupCall) return this.discardGroupCallConfirmation(toPeerId, toType);
-    else if(callsController.currentCall && callsController.currentCall !== ignoreCall) return this.discardCallConfirmation(toPeerId, toType);
-    else if(rtmpCallsController.currentCall && rtmpCallsController.currentCall !== ignoreLive) return this.discardLiveConfirmation(toPeerId, toType);
-    else return Promise.resolve();
+  private async discardCurrentCall(...args: Parameters<AppImManager['confirmLeavingCurrentCall']>): Promise<void> {
+    const leave = await this.confirmLeavingCurrentCall(...args);
+    await leave?.();
+  }
+
+  /**
+   * Whether to leave the call the user is in for another: asked, and nothing left yet. Resolves to what leaves it,
+   * or to nothing when there is no call to leave; rejects with CallSwitchCancelledError when declined.
+   */
+  private confirmLeavingCurrentCall(toPeerId: PeerId, toType: 'Live' | 'Voice' | 'Call' | 'Conference', ignoreGroupCall?: GroupCallInstance, ignoreCall?: CallInstance, ignoreLive?: RtmpCallInstance): Promise<(() => Promise<void>) | undefined> {
+    if(groupCallsController.groupCall && groupCallsController.groupCall !== ignoreGroupCall) return this.confirmLeavingGroupCall(toPeerId, toType);
+    else if(callsController.currentCall && callsController.currentCall !== ignoreCall) return this.confirmLeavingCall(toPeerId, toType);
+    else if(rtmpCallsController.currentCall && rtmpCallsController.currentCall !== ignoreLive) return this.confirmLeavingLive(toPeerId, toType);
+    else return Promise.resolve(undefined);
   }
 
   private async discardAnyCallConfirmation(fromPeerId: PeerId, toPeerId: PeerId, fromType: Parameters<AppImManager['discardCurrentCall']>[1], toType: Parameters<AppImManager['discardCurrentCall']>[1]) {
@@ -2351,69 +2407,67 @@ export class AppImManager extends EventListenerBase<{
     return false;
   }
 
-  private async discardGroupCallConfirmation(toPeerId: PeerId, toType: Parameters<AppImManager['discardCurrentCall']>[1]) {
+  private async confirmLeavingGroupCall(toPeerId: PeerId, toType: Parameters<AppImManager['discardCurrentCall']>[1]) {
     const currentCall = groupCallsController.groupCall;
-    if(currentCall) {
-      // A GroupCallInstance carrying an e2e worker is a TdE2E conference — it has
-      // no backing chat (chatId is NULL_PEER_ID), so render it as `Conference`
-      // (its strings omit the peer) instead of an empty `video chat in ""`.
-      // Legacy SFU voice chats keep `Voice`.
-      const fromType = currentCall.e2e ? 'Conference' : 'Voice';
-      await this.discardAnyCallConfirmation(currentCall.chatId.toPeerId(true), toPeerId, fromType, toType);
+    // A GroupCallInstance carrying an e2e worker is a TdE2E conference — it has
+    // no backing chat (chatId is NULL_PEER_ID), so render it as `Conference`
+    // (its strings omit the peer) instead of an empty `video chat in ""`.
+    // Legacy SFU voice chats keep `Voice`.
+    const fromType = currentCall.e2e ? 'Conference' : 'Voice';
+    await this.discardAnyCallConfirmation(currentCall.chatId.toPeerId(true), toPeerId, fromType, toType);
 
+    return async() => {
       if(groupCallsController.groupCall === currentCall) {
         await currentCall.hangUp();
       }
-    }
+    };
   }
 
-  private async discardCallConfirmation(toPeerId: PeerId, toType: Parameters<AppImManager['discardCurrentCall']>[1]) {
+  private async confirmLeavingCall(toPeerId: PeerId, toType: Parameters<AppImManager['discardCurrentCall']>[1]) {
     const currentCall = callsController.currentCall;
-    if(currentCall) {
-      await this.discardAnyCallConfirmation(currentCall.interlocutorUserId.toPeerId(false), toPeerId, 'Call', toType);
+    await this.discardAnyCallConfirmation(currentCall.interlocutorUserId.toPeerId(false), toPeerId, 'Call', toType);
 
+    return async() => {
       if(!currentCall.isClosing) {
         await currentCall.hangUp('phoneCallDiscardReasonDisconnect');
       }
-    }
+    };
   }
 
-  private async discardLiveConfirmation(toPeerId: PeerId, toType: Parameters<AppImManager['discardCurrentCall']>[1]) {
+  private async confirmLeavingLive(toPeerId: PeerId, toType: Parameters<AppImManager['discardCurrentCall']>[1]) {
     const currentCall = rtmpCallsController.currentCall;
-    if(currentCall) {
-      await this.discardAnyCallConfirmation(currentCall.chatId.toPeerId(true), toPeerId, 'Live', toType);
+    await this.discardAnyCallConfirmation(currentCall.chatId.toPeerId(true), toPeerId, 'Live', toType);
 
+    return async() => {
       if(rtmpCallsController.currentCall === currentCall) {
         await rtmpCallsController.leaveCall();
       }
+    };
+  }
+
+  /**
+   * Who to be in the chat's video chat, then the call we are in left for it. Who to be is asked before the current
+   * call is left: dismissing the question leaves it be, and gives `undefined`.
+   */
+  private async chooseJoinAsAndLeaveCurrentCall(options: Parameters<typeof chooseGroupCallJoinAs>[0]) {
+    const joinAs = await chooseGroupCallJoinAs(options);
+    if(joinAs !== undefined) {
+      await this.discardCurrentCall(options.peerId, 'Voice');
     }
+
+    return joinAs;
   }
 
   public joinGroupCall(peerId: PeerId, groupCallId?: GroupCallId): Promise<void> {
+    preloadNoiseSuppression();
+    // * the account the call is joined on: the tab can switch to another while this waits its turn
+    const account = captureCallAccount(this.managers);
+    const {managers} = account;
     return this.callTransitions.run(async() => {
       const chatId = peerId.toChatId();
-      const hasRights = await this.managers.appChatsManager.hasRights(chatId, 'manage_call');
-      const next = async() => {
-        const chatFull = await this.managers.appProfileManager.getChatFull(chatId);
-        if(chatFull._ === 'communityFull') {
-          return;
-        }
-        let call: MyGroupCall;
-        if(!chatFull.call) {
-          if(!hasRights) {
-            return;
-          }
-
-          call = await this.managers.appGroupCallsManager.createGroupCall(chatId);
-        } else {
-          call = chatFull.call as InputGroupCall.inputGroupCall;
-        }
-
-        await groupCallsController.joinGroupCall(chatId, call.id, true, false);
-      };
-
+      const hasRights = await managers.appChatsManager.hasRights(chatId, 'manage_call');
       if(groupCallId) {
-        const groupCall = await this.managers.appGroupCallsManager.getGroupCallFull(groupCallId);
+        const groupCall = await managers.appGroupCallsManager.getGroupCallFull(groupCallId);
         if(groupCall._ === 'groupCallDiscarded') {
           if(!hasRights) {
             toastNew({
@@ -2432,8 +2486,31 @@ export class AppImManager extends EventListenerBase<{
         }
       }
 
-      await this.discardCurrentCall(peerId, 'Voice');
-      await next();
+      // * the chat as it is now: none when it has neither a call to join nor the right to start one
+      const getTargetChatFull = async() => {
+        const chatFull = await managers.appProfileManager.getChatFull(chatId);
+        return chatFull._ === 'communityFull' || (!chatFull.call && !hasRights) ? undefined : chatFull;
+      };
+
+      let chatFull = await getTargetChatFull();
+      if(!chatFull) {
+        return;
+      }
+
+      const joinAs = await this.chooseJoinAsAndLeaveCurrentCall({account, peerId, hasCall: !!chatFull.call});
+      if(joinAs === undefined) {
+        return;
+      }
+
+      // * the call may have ended or been replaced while the questions were open
+      chatFull = await getTargetChatFull();
+      if(!chatFull) {
+        return;
+      }
+
+      const call: MyGroupCall = (chatFull.call as InputGroupCall.inputGroupCall) ||
+        await managers.appGroupCallsManager.createGroupCall(chatId);
+      await groupCallsController.joinGroupCall(chatId, call.id, true, false, undefined, account, joinAs);
     });
   }
 
@@ -2447,6 +2524,9 @@ export class AppImManager extends EventListenerBase<{
    * link/anchor sites stay dumb.
    */
   public joinConference(input: InputGroupCall, options?: JoinConferenceOptions): Promise<void> {
+    preloadNoiseSuppression();
+    // * the account it is joined on: the tab can switch to another while this waits its turn
+    options = {...options, account: options?.account ?? captureCallAccount(this.managers)};
     return this.callTransitions.run(() => this.joinConferenceInternal(input, options));
   }
 
@@ -2460,10 +2540,13 @@ export class AppImManager extends EventListenerBase<{
    * only be in the way.
    */
   public createConference(options?: CreateConferenceOptions): Promise<void> {
-    return this.callTransitions.run(() => this.createConferenceInternal(options));
+    preloadNoiseSuppression();
+    // * the account it is started on: the tab can switch to another while this waits its turn
+    const account = captureCallAccount(this.managers);
+    return this.callTransitions.run(() => this.createConferenceInternal(account, options));
   }
 
-  private async createConferenceInternal(options: CreateConferenceOptions = {}): Promise<void> {
+  private async createConferenceInternal(account: CallAccount, options: CreateConferenceOptions = {}): Promise<void> {
     if(!IS_GROUP_CALL_SUPPORTED || !IS_CONFERENCE_CALL_SUPPORTED) {
       toastNew({langPackKey: 'ConferenceCall.Unsupported'});
       return;
@@ -2491,9 +2574,10 @@ export class AppImManager extends EventListenerBase<{
 
     try {
       await groupCallsController.startConference({
-        selfUserId: BigInt(rootScope.myId),
+        selfUserId: BigInt(account.myId),
         muted: true,
-        joinVideo: false
+        joinVideo: false,
+        account
       });
     } catch(err) {
       this.log.error('createConference failed', err);
@@ -2529,6 +2613,7 @@ export class AppImManager extends EventListenerBase<{
       return;
     }
 
+    const account = options?.account ?? captureCallAccount(this.managers);
     let canonicalInput = input as InputGroupCall;
     // Who is already in the call — the join confirmation names them, so the
     // resolve that has to happen anyway brings them along.
@@ -2536,7 +2621,7 @@ export class AppImManager extends EventListenerBase<{
     let participantsCount = 0;
     if(input._ !== 'inputGroupCall') {
       try {
-        const preview = await this.managers.appGroupCallsManager.resolveConferenceCallPreview(input);
+        const preview = await account.managers.appGroupCallsManager.resolveConferenceCallPreview(input);
         const resolved = preview.call;
         if(resolved._ === 'groupCallDiscarded') {
           toastNew({langPackKey: 'InviteExpired'});
@@ -2558,9 +2643,12 @@ export class AppImManager extends EventListenerBase<{
     // GroupCallInstance and re-run the whole join. Slug/invite references were
     // resolved above, so this short-circuit is based on the canonical server id
     // rather than assuming every unresolved link means the current call.
+    // The call is the same only on the same account: in it on one account, joined from another, it is a
+    // call to leave first (tdesktop's PeerData of each session is a different peer of the same chat).
     const currentCall = groupCallsController.groupCall;
     const currentCallInput = currentCall?.toInputGroupCall();
     if(currentCall && currentCall.state !== GROUP_CALL_STATE.CLOSED &&
+      currentCall.accountNumber === account.accountNumber &&
       canonicalInput._ === 'inputGroupCall' && currentCallInput &&
       sameInputGroupCall(canonicalInput, currentCallInput)) {
       return;
@@ -2615,9 +2703,10 @@ export class AppImManager extends EventListenerBase<{
         // enter the call.
         input,
         expectedCanonicalInput: canonicalInput._ === 'inputGroupCall' ? canonicalInput : undefined,
-        selfUserId: BigInt(rootScope.myId),
+        selfUserId: BigInt(account.myId),
         muted: true,
-        joinVideo: false
+        joinVideo: false,
+        account
       });
     } catch(err) {
       // Server's "this invite link is dead / call ended" responses. Match
@@ -2630,25 +2719,117 @@ export class AppImManager extends EventListenerBase<{
   }
 
   public joinLiveStream(peerId: PeerId): Promise<void> {
+    // * the account the stream is watched on: the tab can switch to another while this waits its turn
+    const account = captureCallAccount(this.managers);
     return this.callTransitions.run(async() => {
       await this.discardCurrentCall(peerId, 'Live');
+      await this.watchLiveStream(peerId, account);
+    });
+  }
 
-      try {
-        await rtmpCallsController.joinCall(peerId.toChatId());
-      } catch(err) {
-        console.error(err);
-        toastNew({
-          langPackKey: 'Error.AnError'
+  // * `callId`: the stream asked for, when only that one will do (see rtmpCallsController.joinCall)
+  private async watchLiveStream(peerId: PeerId, account: CallAccount, callId?: GroupCallId) {
+    try {
+      await rtmpCallsController.joinCall(peerId.toChatId(), account, callId);
+    } catch(err) {
+      console.error(err);
+      toastNew({
+        langPackKey: 'Error.AnError'
+      });
+      return;
+    }
+
+    try {
+      await openRtmpCallViewer(peerId);
+    } catch(err) {
+      this.log.error('opening RTMP viewer failed', err);
+      toastNew({langPackKey: 'Error.AnError'});
+    }
+  }
+
+  /**
+   * The chat's video chat or live stream a link points at — t.me/<chat>?videochat (?voicechat, ?livestream), or
+   * tg://voicechat?chat_id=…&id=… from anywhere but the chat's own service message (tdesktop
+   * SessionNavigation::joinVoiceChatFromLink → Instance::startOrJoinGroupCall with JoinConfirm::Always): only the
+   * call running there, the one the link names when it names one, never a new one, and only once the user said so.
+   * The call the user is in already is only shown. In another call, the one question is whether to leave it
+   * (Instance::confirmLeaveCurrent); otherwise it is who to be, when there is a choice, or else whether to join at
+   * all, naming the call by its title. A live stream is watched and any other call joined, whatever the link called
+   * it; `inviteHash`, a speaker invite (?voicechat=<hash>), goes with the join.
+   */
+  public joinCallFromLink(peerId: PeerId, groupCallId?: GroupCallId, inviteHash?: string): Promise<void> {
+    // * the account the call is joined on: the tab can switch to another while this waits its turn
+    const account = captureCallAccount(this.managers);
+    return this.callTransitions.run(async() => {
+      const chatId = peerId.toChatId();
+      const call = await account.managers.appGroupCallsManager.getRunningGroupCall(chatId, groupCallId).catch((err): undefined => {
+        // * a chat that cannot be had is one with no call to join
+        this.log.warn('the call of a link', err);
+        return undefined;
+      });
+      if(!call) {
+        toastNew({langPackKey: 'VoiceChat.LinkInvalid'});
+        return;
+      }
+
+      // * the call the user is in already, on this account: shown, nothing asked (tdesktop
+      // * Instance::activateCurrentCall), and its speaker invite used when an admin keeps us muted there
+      const isThisCall = (instance: Pick<CallAccount, 'accountNumber'> & {chatId: ChatId}, id: GroupCallId) => {
+        return instance.accountNumber === account.accountNumber && instance.chatId === chatId && String(id) === String(call.id);
+      };
+
+      const groupCall = groupCallsController.groupCall;
+      if(groupCall && groupCallsController.isCurrentGroupCall(groupCall) && isThisCall(groupCall, groupCall.id)) {
+        showOngoingCall(groupCall);
+        await groupCallsController.rejoinWithInviteHash(groupCall, inviteHash).catch((err) => {
+          this.log.error('rejoin with the invite of a link', err);
         });
         return;
       }
 
-      try {
-        await openRtmpCallViewer(peerId);
-      } catch(err) {
-        this.log.error('opening RTMP viewer failed', err);
-        toastNew({langPackKey: 'Error.AnError'});
+      // * a stream has no one to speak: tdesktop makes no speaker invite for one
+      const liveCall = rtmpCallsController.currentCall;
+      if(liveCall && isThisCall(liveCall, liveCall.call.id)) {
+        showOngoingCall(liveCall);
+        return;
       }
+
+      const isLive = !!call.pFlags.rtmp_stream;
+      if(!isLive && !IS_GROUP_CALL_SUPPORTED) {
+        return;
+      }
+
+      // * in another call, leaving it is what is asked, and joining this one is then asked no more; every
+      // * question is the joining account's: the tab goes back to it first
+      await showCallAccount(account.accountNumber);
+      let leaveCurrentCall: () => Promise<void>;
+      try {
+        leaveCurrentCall = await this.confirmLeavingCurrentCall(peerId, isLive ? 'Live' : 'Voice');
+      } catch(err) {
+        if(err instanceof CallSwitchCancelledError) return;
+        throw err;
+      }
+
+      const confirm = !leaveCurrentCall;
+      if(isLive) {
+        if(confirm && !(await confirmGroupCallJoin(account, peerId, call.title))) {
+          return;
+        }
+
+        await leaveCurrentCall?.();
+        await this.watchLiveStream(peerId, account, call.id);
+        return;
+      }
+
+      preloadNoiseSuppression();
+      // * who to be is asked before the call we are in is left: dismissing the question leaves it be
+      const joinAs = await chooseGroupCallJoinAs({account, peerId, hasCall: true, confirm, callTitle: call.title});
+      if(joinAs === undefined) {
+        return;
+      }
+
+      await leaveCurrentCall?.();
+      await groupCallsController.joinGroupCall(chatId, call.id, true, false, undefined, account, joinAs, inviteHash);
     });
   }
 
@@ -2657,7 +2838,10 @@ export class AppImManager extends EventListenerBase<{
     const themeSettings = themeController.getThemeSettings(theme);
 
     const slug = (themeSettings?.wallpaper as WallPaper.wallPaper)?.slug;
-    if(slug) {
+    // * the default pattern comes with the app (the chat background draws it from assets/) and is never in the
+    // * cache, so there is nothing to look up for it. The default themes all wear it, so the fall back to one
+    // * below asks no more: a lookup that could fail there would fall back again, without end
+    if(slug && slug !== DEFAULT_BACKGROUND_SLUG) {
       const defaultTheme = SETTINGS_INIT.themes.find((t) => t.name === theme.name);
       return Promise.resolve(ChatBackgroundStore.getBackground({
         slug,
@@ -2706,6 +2890,7 @@ export class AppImManager extends EventListenerBase<{
       const position: ChatSavedPosition = {
         mids: chatBubbles.getRenderedHistory('desc', true, false).map((fullMid) => splitFullMid(fullMid).mid),
         top: chatBubbles.scrollable.scrollPosition,
+        anchor: chatBubbles.getScrollAnchor(),
         pinnedMessages
       };
       chatPositions[key] = position;
@@ -2760,6 +2945,28 @@ export class AppImManager extends EventListenerBase<{
     );
   }
 
+  // * leaving the page ends a call and stops what is playing, so the browser asks first - unless the app leaves it
+  // * itself (a log out, a restart), which is not to be stayed on
+  private onBeforeUnload = (e: BeforeUnloadEvent) => {
+    if(appNavigationController.leaving) {
+      return;
+    }
+
+    const media = appMediaPlaybackController.getPlayingMedia();
+    if(callsController.wouldUnloadEndCall() || (media && !media.paused)) {
+      e.preventDefault();
+      e.returnValue = ''; // * Chrome before 119 asks only when it is set
+    }
+  };
+
+  // * every level up to the current one, so `@include animation-level(1)` holds at full too
+  private setAnimationLevel = () => {
+    const animationLevel = liteMode.getAnimationLevel();
+    document.body.classList.toggle('animation-level-0', animationLevel === 0);
+    document.body.classList.toggle('animation-level-1', animationLevel >= 1);
+    document.body.classList.toggle('animation-level-2', animationLevel === 2);
+  };
+
   private setSettings = () => {
     const [appSettings] = useAppSettings();
     const {messagesTextSize} = appSettings;
@@ -2783,9 +2990,7 @@ export class AppImManager extends EventListenerBase<{
       });
     }
 
-    document.body.classList.toggle('animation-level-0', !liteMode.isAvailable('animations'));
-    document.body.classList.toggle('animation-level-1', false);
-    document.body.classList.toggle('animation-level-2', liteMode.isAvailable('animations'));
+    this.setAnimationLevel();
 
     // Firefox keeps no-backdrop unconditionally — it renders backdrop-filter poorly.
     document.documentElement.classList.toggle('no-backdrop', !liteMode.isAvailable('blur') || IS_FIREFOX);
@@ -2821,14 +3026,29 @@ export class AppImManager extends EventListenerBase<{
       disableTransition([tab, this.prevTab].filter(Boolean));
     }
 
+    this.uncoverChat(tab);
     if(this.prevTab) {
       this.prevTab.classList.remove('active');
       this.chatsSelectTabDebounced();
 
-      // ! нужно переделать на animation, так как при лаге анимация будет длиться не 250мс
-      if(liteMode.isAvailable('animations') && animate !== false) {
-        dispatchHeavyAnimationEvent(pause(250 + 150), 250 + 150);
+      // * for as long as the chats cross: that is over well before the time a fixed pause held, and what waits for it -
+      // * the first page of a chat opened from the server among it - waits no longer. That time stays the most it holds
+      const animated = liteMode.isAvailable('animations') && animate !== false;
+      if(animated) {
+        let onEnd: (e: TransitionEvent) => void;
+        const crossed = new Promise<void>((resolve) => {
+          onEnd = (e) => e.target === tab && e.propertyName === 'opacity' && resolve();
+          tab.addEventListener('transitionend', onEnd);
+          tab.addEventListener('transitioncancel', onEnd);
+        });
+
+        dispatchHeavyAnimationEvent(Promise.race([crossed, pause(250 + 150)]).then(() => {
+          tab.removeEventListener('transitionend', onEnd);
+          tab.removeEventListener('transitioncancel', onEnd);
+        }));
       }
+
+      this.coverChatWhenFaded(this.prevTab, animated);
 
       const prevIdx = whichChild(this.prevTab);
       const idx = whichChild(tab);
@@ -2850,6 +3070,63 @@ export class AppImManager extends EventListenerBase<{
 
     tab.classList.add('active');
     this.prevTab = tab;
+  }
+
+  /**
+   * The chat left under the one opened over it keeps its layout, for its scroll to be where it was when it is gone
+   * back to, but once it has faded out nothing of it is styled or drawn any more (`.chat.is-covered`): its CSS
+   * animations - a channel's paid-reaction sparkles - were restyled in every frame the page made.
+   * Its own fade has to be over, not the crossing: one turned back midway is cancelled and runs anew
+   */
+  private coverChatWhenFaded(tab: HTMLElement, animated: boolean) {
+    // * true once there is nothing more to wait for
+    const cover = (): boolean => {
+      if(this.chatsCovering.get(tab) !== cover) {
+        return true;
+      }
+
+      // * a one-off read, once per chat left
+      if(animated && getComputedStyle(tab).opacity !== '0') {
+        return false;
+      }
+
+      this.chatsCovering.delete(tab);
+      tab.classList.add('is-covered');
+      return true;
+    };
+
+    this.chatsCovering.set(tab, cover);
+    if(!animated) {
+      cover();
+      return;
+    }
+
+    const onEnd = (e: TransitionEvent) => {
+      if(e.target === tab && e.propertyName === 'opacity' && cover()) {
+        off();
+      }
+    };
+
+    // * for a fade that ends with no event of it (no transition ran at all): one still running is waited for
+    const timeout = window.setTimeout(() => {
+      if(cover()) {
+        off();
+      }
+    }, 1000);
+
+    const off = () => {
+      clearTimeout(timeout);
+      tab.removeEventListener('transitionend', onEnd);
+      tab.removeEventListener('transitioncancel', onEnd);
+    };
+
+    tab.addEventListener('transitionend', onEnd);
+    tab.addEventListener('transitioncancel', onEnd);
+  }
+
+  private uncoverChat(tab: HTMLElement) {
+    this.chatsCovering.delete(tab);
+    tab.classList.remove('is-covered');
   }
 
   private init() {
@@ -2894,18 +3171,8 @@ export class AppImManager extends EventListenerBase<{
       const richMediaPasteTarget = mount && richMessageEditorExpanded ?
         this.chat.input?.captureRichMediaPasteTarget(e) :
         undefined;
-      const canInsertAsRichMedia = !!(
-        richMediaPasteTarget &&
-        (
-          !types.length ||
-          types.every((mimeType) => (
-            !mimeType ||
-            mimeType === 'application/octet-stream' ||
-            isRichMessageMediaMimeType(mimeType) ||
-            mimeType === 'video/quicktime'
-          ))
-        )
-      );
+      // any file goes in: what is no photo, video or music becomes a file block
+      const canInsertAsRichMedia = !!richMediaPasteTarget;
       if(mount) {
         if(
           !isFiles ||
@@ -3099,15 +3366,21 @@ export class AppImManager extends EventListenerBase<{
     bindActiveWindowListener((w) => w.document.body, 'drop', async(e) => {
       debug && log('body drop', e, counter);
 
+      // * dropped on a chat of the account shown: read once the tab is on another, the files are for no chat
+      const session = getAccountSession();
       if(lastDialogElement) {
         cancelEvent(e);
         const files = await getFilesFromEvent(e);
-        this.setPeer({
-          peerId: lastDialogElement.dataset.peerId.toPeerId()
-        }).then(() => {
-          this.onDocumentPaste(e, undefined, files);
+        if(isSessionLeaving(session)) {
           clearLastDialogElement();
-        });
+        } else {
+          this.setPeer({
+            peerId: lastDialogElement.dataset.peerId.toPeerId()
+          }).then(() => {
+            this.onDocumentPaste(e, undefined, files);
+            clearLastDialogElement();
+          });
+        }
       } else if(
         !getCurrentNewMediaPopup() &&
         this.chat.input?.isRichMessageEditorExpanded() &&
@@ -3115,7 +3388,9 @@ export class AppImManager extends EventListenerBase<{
       ) {
         cancelEvent(e);
         const files = await getFilesFromEvent(e);
-        await this.onDocumentPaste(e, undefined, files);
+        if(!isSessionLeaving(session)) {
+          await this.onDocumentPaste(e, undefined, files);
+        }
       }
 
       toggle(e, false);
@@ -3151,8 +3426,12 @@ export class AppImManager extends EventListenerBase<{
     files?: Awaited<ReturnType<typeof getFilesFromEvent>>
   ) => {
     const newMediaPopup = getCurrentNewMediaPopup();
-    const ephemeralSnapshot = this.chat?.input?.getEphemeralSendingSnapshot();
-    const chatInput = this.chat.input;
+    // * the chat the files came in on: once another takes its place while they are read (an account switch
+    // * puts the next account's chat there), they are for no chat shown
+    const chat = this.chat;
+    const isChatGone = () => this.chat !== chat;
+    const ephemeralSnapshot = chat?.input?.getEphemeralSendingSnapshot();
+    const chatInput = chat.input;
     const richMessageEditorExpanded = (
       !newMediaPopup &&
       chatInput?.isRichMessageEditorExpanded()
@@ -3183,28 +3462,18 @@ export class AppImManager extends EventListenerBase<{
     }
 
     files ??= await getFilesFromEvent(e);
-    if(!files.length) {
+    if(!files.length || isChatGone()) {
       return;
     }
 
-    const insertAsRichMedia = shouldInsertRichMediaFiles(
-      files,
-      richMediaPasteTarget,
-      attachType,
-      (file) => (
-        isRichMessageMediaMimeType(getFileMimeType(file), file.name)
-      )
-    );
-    if(richMessageEditorExpanded && !insertAsRichMedia) {
-      toastNew({langPackKey: 'RichMessage.Error.FileUnsupported'});
-      return;
-    }
+    const insertAsRichMedia = shouldInsertRichMediaFiles(files, richMediaPasteTarget);
+    if(richMessageEditorExpanded && !insertAsRichMedia) return;
     if(!(
       await this.canDrag(
         insertAsRichMedia,
         !!ephemeralSnapshot || chatInput.isEphemeralComposerMode()
       )
-    ) && !newMediaPopup) {
+    ) && !newMediaPopup || isChatGone()) {
       return;
     }
 
@@ -3223,7 +3492,8 @@ export class AppImManager extends EventListenerBase<{
     }
 
     if(insertAsRichMedia) {
-      await chatInput.insertRichMediaFiles(files as File[], richMediaPasteTarget);
+      // dropped on "Send as a file": file blocks, music an audio
+      await chatInput.insertRichMediaFiles(files as File[], richMediaPasteTarget, attachType === 'document');
       return;
     }
 
@@ -3235,7 +3505,7 @@ export class AppImManager extends EventListenerBase<{
 
       if(chatInput.willAttachType) {
         showNewMediaPopup(
-          this.chat,
+          chat,
           [file],
           chatInput.willAttachType,
           undefined,
@@ -3249,7 +3519,7 @@ export class AppImManager extends EventListenerBase<{
 
     chatInput.willAttachType = attachType || ((MEDIA_MIME_TYPES_SUPPORTED.has(getFileMimeType(files[0])) || isConvertibleMov(files[0])) ? 'media' : 'document');
     showNewMediaPopup(
-      this.chat,
+      chat,
       files,
       chatInput.willAttachType,
       undefined,
@@ -3289,11 +3559,12 @@ export class AppImManager extends EventListenerBase<{
 
     this.log('selectTab', id, prevTabId);
 
-    let animationPromise: Promise<any> = liteMode.isAvailable('animations') ? doubleRaf() : Promise.resolve();
+    // * the columns slide with full animations only - below them there is nothing to wait for
+    let animationPromise: Promise<any> = liteMode.isAvailable('motion') ? doubleRaf() : Promise.resolve();
     if(
       prevTabId !== undefined &&
       prevTabId !== id &&
-      liteMode.isAvailable('animations') &&
+      liteMode.isAvailable('motion') &&
       animate !== false &&
       mediaSizes.activeScreen !== ScreenSize.large
     ) {
@@ -3317,13 +3588,20 @@ export class AppImManager extends EventListenerBase<{
 
     if(prevTabId !== undefined && id > prevTabId) {
       if(id < APP_TABS.PROFILE || !appNavigationController.findItemByType('im')) {
-        appNavigationController.pushItem({
-          type: 'im',
-          onPop: (canAnimate) => {
-            // this.selectTab(prevTabId, !isSafari);
-            this.setPeer({}, canAnimate);
+        // * under what the chat shown has put up already (its theme picker, a bot's keyboard): the chat comes in once
+        // * its background is ready, which can be well after, and Escape is theirs first - as `chatsSelectTab` has it
+        const found = this.chat && appNavigationController.findItem((item) => item.context === this.chat);
+        appNavigationController.spliceItems(
+          found ? found.index : appNavigationController.getNextIndex(),
+          0,
+          {
+            type: 'im',
+            onPop: (canAnimate) => {
+              // this.selectTab(prevTabId, !isSafari);
+              this.setPeer({}, canAnimate);
+            }
           }
-        });
+        );
       }
     }
 
@@ -3345,7 +3623,12 @@ export class AppImManager extends EventListenerBase<{
     // On mobile these columns slide outside the viewport but stay mounted.
     // Match their keyboard/AT visibility to the selected screen, including PiP.
     appSidebarLeft.sidebarEl.inert = mediaSizes.isMobile && this.tabId !== APP_TABS.CHATLIST;
-    this.columnEl.inert = mediaSizes.isMobile && this.tabId !== APP_TABS.CHAT;
+    this.columnEl.inert = !this.isChatColumnShown();
+  }
+
+  /** On a phone one column is on screen at a time: the chats' only while their tab is selected */
+  public isChatColumnShown() {
+    return !mediaSizes.isMobile || this.tabId === APP_TABS.CHAT;
   }
 
   public updateStatus() {
@@ -3357,12 +3640,91 @@ export class AppImManager extends EventListenerBase<{
     this.updateStatus();
   }
 
-  private createNewChat() {
+  // * Tip cards for the empty column - the account's own top peers and recently closed chats. Imported
+  // * lazily so this module (which the SolidJS hot-reload guard provider imports) isn't part of an
+  // * import cycle with the components the cards use. A second render replaces the first.
+  private renderChatTips() {
+    import('@components/chatTips').then(({renderChatTips}) => renderChatTips(this.chatsContainer));
+  }
+
+  private loadSavedReactionTags() {
+    savedReactionTags.splice(0, savedReactionTags.length);
+    this.managers.appReactionsManager.getSavedReactionTags().then((tags) => {
+      savedReactionTags.splice(0, savedReactionTags.length, ...tags);
+    });
+  }
+
+  /**
+   * The tab is about to move to another account: every chat of this one goes - the open one's draft
+   * is saved first, while this account is still the current one - and so does what was kept for it.
+   */
+  public closeForAccountSwitch(to: ActiveAccountNumber) {
+    this.isSwitchingAccount = true;
+    this.offline = true;
+    // * through this account's session: the answer comes when the tab is on the next one already
+    bindManagersToSession(this.managers).appUsersManager.updateMyOnlineStatus(true);
+    clearInterval(this.updateStatusInterval);
+
+    // * while the chat is still the open one: its listeners (the draft, the emoji dropdown) look it up
+    if(this.chat?.peerId) {
+      this.dispatchEvent('peer_changing', this.chat);
+    }
+
+    const chats = this.chats.splice(0, this.chats.length);
+    chats.forEach((chat) => {
+      chat.beforeDestroy();
+      chat.destroy();
+    });
+
+    // * paid reactions still in their undo delay are dropped, as a reload drops them
+    PENDING_PAID_REACTIONS.forEach((pending) => pending.abortController.abort());
+    new Set(this.joinChatFlowsByQueryId.values()).forEach((flow) => this.closeJoinChatFlow(flow));
+    this.prevTab = undefined;
+    this.chatPositions = {};
+    this.lastOpenedPeerId = NULL_PEER_ID;
+    this.setPeerPromise = null;
+    emojiAnimationContainer.textContent = '';
+    document.body.classList.remove('has-chat');
+
+    // * an empty chat of the next account takes the place at once: plenty reads `this.chat` while the
+    // * switch is under way - a notification, a closing overlay
+    this.createNewChat(to);
+    this.chatsSelectTab(this.chat);
+  }
+
+  // * the counterpart of closeForAccountSwitch, once the tab is on the new account
+  public openAfterAccountSwitch() {
+    this.isSwitchingAccount = false;
+    this.offline = idleController.isIdle;
+    this.scheduleStatusUpdates();
+
+    this.tabId = undefined;
+    this.selectTab(APP_TABS.CHATLIST);
+    // * the previous account's chat could have had a theme or a wallpaper of its own
+    this.chat.publishBackground('auto');
+    apiManagerProxy.updateTabState('chatPeerIds', []);
+    this.loadSavedReactionTags();
+    this.renderChatTips();
+  }
+
+  private scheduleStatusUpdates() {
+    this.updateStatus();
+    clearInterval(this.updateStatusInterval);
+    if(!this.offline) {
+      this.updateStatusInterval = window.setInterval(() => this.updateStatus(), 50e3);
+    }
+  }
+
+  private createNewChat(accountNumber = getCurrentAccount()) {
+    // * a chat is closed with its account, so whatever it sends late goes to that account; what comes
+    // * back once it is destroyed has nothing left to land on
+    let isChatGone = false;
     const chat = new Chat(
       this,
-      this.managers,
+      createProxiedManagersForAccount(accountNumber, () => !isChatGone),
       true
     );
+    chat.destroyMiddlewareHelper.onDestroy(() => isChatGone = true);
 
     this.chatsContainer.append(chat.container);
 
@@ -3430,10 +3792,24 @@ export class AppImManager extends EventListenerBase<{
     }, 250 + 100);
   }
 
+  /**
+   * The page mirrors the chat already, so the answer is right here: no round trip to the worker before the chat
+   * starts opening, which on a busy main thread waits for a whole frame. A peer the page does not know asks the worker
+   */
+  private getPeerMigratedTo(peerId: PeerId, managers: ReadingManagers = this.managers) {
+    if(!peerId || peerId.isUser()) {
+      return;
+    }
+
+    const chat = apiManagerProxy.getChat(peerId.toChatId());
+    return chat ? getChatMigratedTo(chat) : managers.appPeersManager.getPeerMigratedTo(peerId);
+  }
+
   public async setPeer(options: Partial<ChatSetInnerPeerOptions> = {}, animate?: boolean): Promise<boolean> {
+    const managers = bindManagersToSession(this.managers);
     options.peerId ??= NULL_PEER_ID;
     if(options.peerId && !useIsCrmLoggedIn()()) return false;
-    options.peerId = await this.managers.appPeersManager.getPeerMigratedTo(options.peerId) || options.peerId;
+    options.peerId = await this.getPeerMigratedTo(options.peerId, managers) || options.peerId;
 
     const {peerId} = options;
 
@@ -3442,17 +3818,17 @@ export class AppImManager extends EventListenerBase<{
       const peer = apiManagerProxy.getPeer(peerId);
       const isMin = peer && (peer as User.user).pFlags.min;
       if(isMin && peerId.isUser()) {
-        await this.managers.appUsersManager.getApiUsers([{
+        await managers.appUsersManager.getApiUsers([{
           _: 'inputUserFromMessage',
           msg_id: getServerMessageId(options.stack.mid),
-          peer: await this.managers.appPeersManager.getInputPeerById(options.stack.peerId),
+          peer: await managers.appPeersManager.getInputPeerById(options.stack.peerId),
           user_id: peerId.toUserId()
         }]);
       } else if(isMin) {
-        await this.managers.appChatsManager.resolveChannel({
+        await managers.appChatsManager.resolveChannel({
           _: 'inputChannelFromMessage',
           msg_id: getServerMessageId(options.stack.mid),
-          peer: await this.managers.appPeersManager.getInputPeerById(options.stack.peerId),
+          peer: await managers.appPeersManager.getInputPeerById(options.stack.peerId),
           channel_id: peerId.toChatId()
         });
       }
@@ -3538,7 +3914,7 @@ export class AppImManager extends EventListenerBase<{
       return;
     }
 
-    peerId = options.peerId = await this.managers.appPeersManager.getPeerMigratedTo(peerId) || peerId;
+    peerId = options.peerId = await this.getPeerMigratedTo(peerId) || peerId;
 
     if(!options.type) {
       if(options.threadId) {
@@ -3600,6 +3976,9 @@ export class AppImManager extends EventListenerBase<{
     el.classList.add(c);
     el.dataset.action = action._;
     switch(action._) {
+      // * choosing what to share is shown with the dots of typing, the way tdesktop and Android do
+      case 'sendMessageChooseContactAction':
+      case 'sendMessageGeoLocationAction':
       case 'sendMessageTypingAction': {
       // default: {
         c += '-text';
@@ -3649,19 +4028,20 @@ export class AppImManager extends EventListenerBase<{
   }
 
   public async getPeerTyping(peerId: PeerId, container?: HTMLElement, threadId?: number) {
+    const managers = bindManagersToSession(this.managers);
     // const log = this.log.bindPrefix('getPeerTyping-' + peerId);
     // log('getting peer typing');
 
     // * asked for every dialog element that gets built, so the cheap check that
     // * answers "no" for almost every peer goes first
-    const allTypings = await this.managers.appProfileManager.getPeerTypings(peerId, threadId);
+    const allTypings = await managers.appProfileManager.getPeerTypings(peerId, threadId);
     if(!allTypings?.length) {
       // log('have no typing');
       return;
     }
 
     const isUser = peerId.isUser();
-    if(isUser && await this.managers.appUsersManager.isBot(peerId)) {
+    if(isUser && await managers.appUsersManager.isBot(peerId)) {
       // log('a bot');
       return;
     }
@@ -3693,7 +4073,9 @@ export class AppImManager extends EventListenerBase<{
         'sendMessageRecordRoundAction': 'Peer.Activity.User.RecordingVideo',
         'sendMessageGamePlayAction': 'Peer.Activity.User.PlayingGame',
         'sendMessageChooseStickerAction': 'Peer.Activity.User.ChoosingSticker',
-        'sendMessageEmojiInteractionSeen': 'Peer.Activity.User.EnjoyingAnimations'
+        'sendMessageEmojiInteractionSeen': 'Peer.Activity.User.EnjoyingAnimations',
+        'sendMessageChooseContactAction': 'SelectingContact',
+        'sendMessageGeoLocationAction': 'SelectingLocation'
       },
       chat: {
         'sendMessageTypingAction': 'Peer.Activity.Chat.TypingText',
@@ -3707,7 +4089,9 @@ export class AppImManager extends EventListenerBase<{
         'sendMessageRecordRoundAction': 'Peer.Activity.Chat.RecordingVideo',
         'sendMessageGamePlayAction': 'Peer.Activity.Chat.PlayingGame',
         'sendMessageChooseStickerAction': 'Peer.Activity.Chat.ChoosingSticker',
-        'sendMessageEmojiInteractionSeen': 'Peer.Activity.Chat.EnjoyingAnimations'
+        'sendMessageEmojiInteractionSeen': 'Peer.Activity.Chat.EnjoyingAnimations',
+        'sendMessageChooseContactAction': 'IsSelectingContact',
+        'sendMessageGeoLocationAction': 'IsSelectingLocation'
       },
       multi: {
         'sendMessageTypingAction': 'Peer.Activity.Chat.Multi.TypingText1',
@@ -3720,7 +4104,10 @@ export class AppImManager extends EventListenerBase<{
         'sendMessageRecordAudioAction': 'Peer.Activity.Chat.Multi.RecordingAudio1',
         'sendMessageRecordRoundAction': 'Peer.Activity.Chat.Multi.RecordingVideo1',
         'sendMessageGamePlayAction': 'Peer.Activity.Chat.Multi.PlayingGame1',
-        'sendMessageChooseStickerAction': 'Peer.Activity.Chat.Multi.ChoosingSticker1'
+        'sendMessageChooseStickerAction': 'Peer.Activity.Chat.Multi.ChoosingSticker1',
+        // * several people choosing what to share read as typing, as on Android
+        'sendMessageChooseContactAction': 'Peer.Activity.Chat.Multi.TypingText1',
+        'sendMessageGeoLocationAction': 'Peer.Activity.Chat.Multi.TypingText1'
       },
       pair: {
         'sendMessageTypingAction': 'Peer.Activity.Chat.Pair.TypingText',
@@ -3733,7 +4120,9 @@ export class AppImManager extends EventListenerBase<{
         'sendMessageRecordAudioAction': 'Peer.Activity.Chat.Pair.RecordingAudio',
         'sendMessageRecordRoundAction': 'Peer.Activity.Chat.Pair.RecordingVideo',
         'sendMessageGamePlayAction': 'Peer.Activity.Chat.Pair.PlayingGame',
-        'sendMessageChooseStickerAction': 'Peer.Activity.Chat.Pair.ChoosingSticker'
+        'sendMessageChooseStickerAction': 'Peer.Activity.Chat.Pair.ChoosingSticker',
+        'sendMessageChooseContactAction': 'Peer.Activity.Chat.Pair.TypingText',
+        'sendMessageGeoLocationAction': 'Peer.Activity.Chat.Pair.TypingText'
       }
     };
 
@@ -3818,12 +4207,13 @@ export class AppImManager extends EventListenerBase<{
   }
 
   private async getChatStatus(chatId: ChatId, noTyping?: boolean): Promise<AckedResult<HTMLElement>> {
+    const managers = bindManagersToSession(this.managers);
     const typingEl = noTyping ? undefined : await this.getPeerTyping(chatId.toPeerId(true));
     if(typingEl) {
       return {cached: true, result: Promise.resolve(typingEl)};
     }
 
-    const chatFullResult = await this.managers.acknowledged.appProfileManager.getChatFull(chatId);
+    const chatFullResult = await managers.acknowledged.appProfileManager.getChatFull(chatId);
     const dooo = async(chatFull: ChatFull) => {
       let [subtitle, onlinesResult] = await Promise.all([
         getChatMembersString(chatId, undefined, undefined, undefined, chatFull),
@@ -3943,7 +4333,7 @@ export class AppImManager extends EventListenerBase<{
           element,
           content,
           needClear !== false ? 'replace' : isReworded ? 'crossfade' : 'update',
-          {resize}
+          {resize, duration: STATUS_CROSSFADE_DURATION}
         );
       };
     };
@@ -3960,7 +4350,13 @@ export class AppImManager extends EventListenerBase<{
   }
 
   public setChoosingStickerTyping(cancel: boolean) {
-    this.managers.appMessagesManager.setTyping(this.chat.peerId, {_: cancel ? 'sendMessageCancelAction' : 'sendMessageChooseStickerAction'}, undefined, this.chat.threadId);
+    // * the stickers helper hides after a transition: its chat can be closed by then (an account switch)
+    const {chat} = this;
+    if(!chat?.peerId) {
+      return;
+    }
+
+    chat.managers.appMessagesManager.setTyping(chat.peerId, {_: cancel ? 'sendMessageCancelAction' : 'sendMessageChooseStickerAction'}, undefined, chat.threadId);
   }
 
   public isSamePeer(options1: {peerId: PeerId, threadId?: number, monoforumThreadId?: PeerId, type?: ChatType}, options2: typeof options1) {
@@ -3981,20 +4377,14 @@ export class AppImManager extends EventListenerBase<{
     });
   }
 
-  public requestPhone(peerId: PeerId) {
-    return confirmationPopup({
-      titleLangKey: 'ShareYouPhoneNumberTitle',
-      button: {
-        langKey: 'OK'
-      },
-      descriptionLangKey: 'AreYouSureShareMyContactInfoBot'
-    }).then(() => {
-      return this.managers.appMessagesManager.sendContact({peerId, contactPeerId: rootScope.myId});
-    });
+  public requestPhone(options: {peerId: PeerId, threadId?: number}) {
+    return requestPhone({...options, managers: bindManagersToSession(this.managers)});
   }
 
   /** A bot keyboard asked where we are: confirm, then answer its message with the current position. */
   public async requestLocation(options: Pick<MessageSendingParams, 'peerId' | 'threadId' | 'replyToMsgId'>) {
+    // * the account session asked: a switch to another account while the browser finds the position leaves it there
+    const managers = bindManagersToSession(this.managers);
     try {
       await confirmationPopup({
         titleLangKey: 'ShareYouLocationTitle',
@@ -4019,7 +4409,7 @@ export class AppImManager extends EventListenerBase<{
 
     const {latitude: lat, longitude: long, accuracy} = position.coords;
     const accuracy_radius = accuracy ? Math.round(accuracy) : undefined;
-    return this.managers.appMessagesManager.sendOther({
+    return managers.appMessagesManager.sendOther({
       ...options,
       inputMedia: {
         _: 'inputMediaGeoPoint',
@@ -4030,10 +4420,11 @@ export class AppImManager extends EventListenerBase<{
   }
 
   public async initGifting() {
-    const appConfig = await this.managers.apiManager.getAppConfig();
-    const user = await this.managers.appUsersManager.resolveUsername(appConfig.premium_bot_username);
+    const managers = bindManagersToSession(this.managers);
+    const appConfig = await managers.apiManager.getAppConfig();
+    const user = await managers.appUsersManager.resolveUsername(appConfig.premium_bot_username);
     const peerId = user.id.toPeerId(false);
-    this.managers.appMessagesManager.sendText({peerId, text: '/gift'});
+    managers.appMessagesManager.sendText({peerId, text: '/gift'});
     this.setInnerPeer({peerId});
   }
 
@@ -4126,7 +4517,12 @@ export class AppImManager extends EventListenerBase<{
         a.t = (a.t - firstTime) / 1000;
       });
 
-      const {peerId, threadId} = this.chat;
+      // * the chat the sticker is in: when the throttle fires, the open one can be another, or none
+      if(!middleware()) {
+        return;
+      }
+
+      const threadId = this.chat?.peerId === peerId ? this.chat.threadId : undefined;
 
       const bubble = findUpClassName(container, 'bubble');
       managers.appMessagesManager.setTyping(peerId, {
@@ -4146,10 +4542,12 @@ export class AppImManager extends EventListenerBase<{
     activeAnimations.add(o);
 
     const isOut = bubble ? bubble.classList.contains('is-out') : undefined;
+    // * the bubble's physical side: outgoing ones sit on the left of a right-to-left chat
+    const isOnRight = !!isOut !== I18n.getIsRTL();
     const {animationDiv} = wrapStickerAnimation({
       doc,
       middleware,
-      side: isOut ? 'right' : 'left',
+      side: isOnRight ? 'right' : 'left',
       size: 360,
       target: container,
       play: true,
@@ -4160,7 +4558,7 @@ export class AppImManager extends EventListenerBase<{
       scrollable: this.chat.bubbles.scrollable
     });
 
-    if(isOut !== undefined && !isOut) {
+    if(isOut !== undefined && !isOnRight) {
       animationDiv.classList.add('reflect-x');
     }
 
@@ -4179,6 +4577,10 @@ export class AppImManager extends EventListenerBase<{
   }
 }
 
+// made once: a hot update keeps it and moves it onto the edited class (see @helpers/hotRegistry)
 const appImManager = new AppImManager();
 MOUNT_CLASS_TO && (MOUNT_CLASS_TO.appImManager = appImManager);
+registerHotReloadGuard({appImManager});
 export default appImManager;
+
+if(import.meta.hot) import.meta.hot.accept();

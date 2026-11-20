@@ -6,6 +6,7 @@ import type toggleStorages from '@helpers/toggleStorages';
 import type {ActiveAccountNumber} from '@lib/accounts/types';
 import type {LoadStateResult} from '@appManagers/utils/state/loadState';
 import type {PasscodeStorageValue} from '@lib/commonStateStorage';
+import type {EncryptionKeyBytes} from '@lib/passcode/keyStore';
 import type {ThreadedWorkerType} from '@lib/threadedWorkerTypes';
 import type {LogEntry} from '@lib/debug/logsBuffer';
 import type {ThreadMemoryStats} from '@lib/debug/memoryStats';
@@ -28,7 +29,7 @@ type MTProtoBroadcastEvent = {
 
 export type ToggleUsingPasscodePayload = {
   isUsingPasscode: boolean;
-  encryptionKey?: CryptoKey;
+  encryptionKey?: EncryptionKeyBytes;
 };
 
 export type ThreadedWorkerEvents = {
@@ -42,6 +43,7 @@ export default class MTProtoMessagePort<Master extends boolean = true> extends S
   manager: (payload: MTProtoManagerTaskPayload) => any,
   singleManager: (payload: MTProtoSingleManagerTaskPayload) => any,
   toggleStorages: (payload: {enabled: boolean, clearWrite: boolean}) => ReturnType<typeof toggleStorages>,
+  mirrorAll: (payload: {accountNumber: ActiveAccountNumber}, source: MessageEventSource) => MaybePromise<void>,
   serviceWorkerOnline: (online: boolean) => void,
   serviceWorkerPort: (payload: void, source: MessageEventSource, event: MessageEvent) => void,
   threadedPort: (payload: ThreadedWorkerType, source: MessageEventSource, event: MessageEvent) => void,
@@ -54,12 +56,12 @@ export default class MTProtoMessagePort<Master extends boolean = true> extends S
   releaseSharedObjectURL: (payload: {url: string, owner: string}) => void,
   tabState: (payload: TabState, source: MessageEventSource) => void,
   createProxyWorkerURLs: (payload: {originalUrl: string, blob: Blob, type: ThreadedWorkerType}) => string[],
-  setInterval: (timeout: number) => number,
-  clearInterval: (intervalId: number) => void,
+  setInterval: (timeout: number, source: MessageEventSource) => number,
+  clearInterval: (intervalId: number, source: MessageEventSource) => void,
   terminate: () => void,
   toggleUsingPasscode: (payload: ToggleUsingPasscodePayload, source: MessageEventSource) => void,
-  changePasscode: (payload: {toStore: PasscodeStorageValue, encryptionKey: CryptoKey}, source: MessageEventSource) => void,
-  saveEncryptionKey: (payload: CryptoKey, source: MessageEventSource) => void,
+  changePasscode: (payload: {toStore: PasscodeStorageValue, encryptionKey: EncryptionKeyBytes}, source: MessageEventSource) => void,
+  saveEncryptionKey: (payload: EncryptionKeyBytes, source: MessageEventSource) => void,
   isLocked: (payload: void, source: MessageEventSource) => Promise<boolean>,
   toggleLockOthers: (isLocked: boolean, source: MessageEventSource) => void
   localStorageEncryptedProxy: (payload: LocalStorageEncryptedProxyTaskPayload) => Promise<any>,
@@ -75,6 +77,7 @@ export default class MTProtoMessagePort<Master extends boolean = true> extends S
   // visible to the worker's own location.search).
   getLogs: (payload: void) => LogEntry[],
   setLogBufferEnabled: (enabled: boolean) => void,
+  clearLogs: (payload: void) => void,
   // The worker shares the tab's renderer process (Chrome hosts a same-origin SharedWorker in an
   // existing renderer for that site), so its heap is charged to the tab - see @lib/debug/memoryStats.
   getMemoryStats: (payload: void) => Promise<ThreadMemoryStats>
@@ -94,7 +97,7 @@ export default class MTProtoMessagePort<Master extends boolean = true> extends S
   callNotification: (payload: CallNotificationPayload) => void,
   intervalCallback: (intervalId: number) => void,
   toggleLock: (isLocked: boolean) => void,
-  saveEncryptionKey: (payload: CryptoKey, source: MessageEventSource) => void,
+  saveEncryptionKey: (payload: EncryptionKeyBytes, source: MessageEventSource) => void,
   toggleCacheStorage: (value: boolean, source: MessageEventSource) => void,
   toggleUsingPasscode: (payload: ToggleUsingPasscodePayload, source: MessageEventSource) => void,
 } & MTProtoBroadcastEvent, Master> {

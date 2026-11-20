@@ -26,6 +26,14 @@ defineStories('Premium & Stars', [
     }
   },
   {
+    id: 'limit/folderPin',
+    title: 'Limit reached — pinned chats in the archive',
+    open: async(ctx) => {
+      const {default: showLimitPopup} = await import('@components/popups/limit');
+      await showLimitPopup('folderPin');
+    }
+  },
+  {
     id: 'limit/channels',
     title: 'Limit reached — channels (with inactive-chat picker)',
     managers: {
@@ -50,6 +58,14 @@ defineStories('Premium & Stars', [
     open: async(ctx) => {
       const {default: showPremiumPopup} = await import('@components/popups/premium');
       showPremiumPopup({feature: 'stories'});
+    }
+  },
+  {
+    id: 'premium/business',
+    title: 'Telegram Business',
+    open: async(ctx) => {
+      const {showBusinessPopup} = await import('@components/popups/premium');
+      showBusinessPopup();
     }
   },
   {
@@ -94,5 +110,20 @@ defineStories('Premium & Stars', [
       const {default: showBoostPopup} = await import('@components/popups/boost');
       showBoostPopup(ctx.peer('channel'));
     }
+  },
+  {
+    id: 'boost/channel-reactions',
+    title: 'Boost a channel: custom reactions need a level',
+    open: async(ctx) => {
+      const [{default: showBoostPopup}, {getCustomReactionsBoostReason}] = await Promise.all([
+        import('@components/popups/boost'),
+        import('@components/openBoosts')
+      ]);
+      showBoostPopup(ctx.peer('channel'), {reason: getCustomReactionsBoostReason(3)});
+    }
   }
 ]);
+
+// The sandbox reloads on an edit anyway (watchForEdits). Accepting here keeps an edit of a popup this story imports
+// from climbing through the story to the app's root once the sandbox has been opened on the dev server.
+if(import.meta.hot) import.meta.hot.accept();

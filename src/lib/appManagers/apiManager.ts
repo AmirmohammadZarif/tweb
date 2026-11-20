@@ -14,6 +14,7 @@ import sessionStorage from '@lib/sessionStorage';
 import MTPNetworker, {MTMessage} from '@lib/mtproto/networker';
 import {ConnectionType, constructTelegramHttpUrl, constructTelegramWebSocketUrl, DcConfigurator, TransportType} from '@lib/mtproto/dcConfigurator';
 import {setRelayConfig} from '@lib/mtproto/relay';
+import isValidDcId from '@lib/mtproto/isValidDcId';
 import deferredPromise, {CancellablePromise} from '@helpers/cancellablePromise';
 import App from '@config/app';
 import {MOUNT_CLASS_TO} from '@config/debug';
@@ -42,7 +43,7 @@ import {getCommonDatabaseState} from '@config/databases/state';
 import {saveEncryptionKeyForHandoff} from '@lib/passcode/keyHandoff';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 import {MTAuthKey} from '@lib/mtproto/authKey';
-import TempAuthKeys from '@lib/mtproto/tempAuthKeys';
+import TempAuthKeys, {StoredTempAuthKey} from '@lib/mtproto/tempAuthKeys';
 /**
  * To not be used in an ApiManager instance as there is no account number attached to it
  */
@@ -65,10 +66,10 @@ export class ApiManager extends ApiManagerMethods {
     }
   };
 
-  private cachedExportPromise: {[x: number]: Promise<unknown>};
   private gettingNetworkers: {[dcIdAndType: string]: Promise<MTPNetworker>};
   // * Perfect Forward Secrecy: temporary keys per DC, and per its media cluster
   private tempAuthKeys: {[dcIdAndCluster: string]: TempAuthKeys};
+  private droppedTempAuthKeys: boolean;
   private baseDcId: DcId;
 
   private afterMessageTempIds: {
@@ -87,7 +88,6 @@ export class ApiManager extends ApiManagerMethods {
     this.name = 'API';
 
     this.cachedNetworkers = {} as any;
-    this.cachedExportPromise = {};
     this.gettingNetworkers = {};
     this.tempAuthKeys = {};
     this.baseDcId = 0;
@@ -277,9 +277,11 @@ export class ApiManager extends ApiManagerMethods {
     }
 
     const accountData = await AccountController.get(this.getAccountNumber());
-    const baseDcId = accountData.dcId;
+    const baseDcId = accountData.dcId || accountData.sign_in_dc_id;
     if(!this.baseDcId) {
-      if(!baseDcId) {
+      // * a DC no client connects to, kept before setBaseDcId refused one, gives way to the default: the slot's
+      // * requests went nowhere until site data was cleared
+      if(!isValidDcId(baseDcId, Modes.test)) {
         this.setBaseDcId(App.baseDcId);
       } else {
         this.baseDcId = baseDcId;
@@ -301,17 +303,27 @@ export class ApiManager extends ApiManagerMethods {
       userAuth.dcID = baseDcId;
     }
 
-    AccountController.update(this.getAccountNumber(), {
+    // * a sign-in is over once the account is recorded: a tab that switches to it right after reads it
+    await AccountController.update(this.getAccountNumber(), {
       date: (userAuth as UserAuth).date,
       userId: (userAuth as UserAuth).id,
-      dcId: (userAuth as UserAuth).dcID as TrueDcId
+      dcId: (userAuth as UserAuth).dcID as TrueDcId,
+      sign_in_dc_id: undefined
     });
+
+    this.appAccountManager.saveSessionUser();
   }
 
+  /** false for a DC the client does not connect to: the base stays where it is, and nothing of it is kept */
   public setBaseDcId(dcId: DcId) {
+    if(!isValidDcId(dcId, Modes.test)) {
+      this.log.error('invalid base dc:', dcId);
+      return false;
+    }
+
     const wasDcId = this.baseDcId;
     if(wasDcId && wasDcId === dcId) {
-      return;
+      return true;
     }
 
     if(wasDcId) { // if migrated set ondrain
@@ -322,9 +334,18 @@ export class ApiManager extends ApiManagerMethods {
 
     this.baseDcId = dcId;
 
-    AccountController.update(this.getAccountNumber(), {
-      dcId: this.baseDcId as TrueDcId
+    // * a slot with a DC is a signed-in account to Web A, which opens it as one: until the sign-in records it
+    // * (setUserAuth), the DC is kept apart, for a sign-in that goes on after a reload
+    AccountController.update(this.getAccountNumber(), (data) => {
+      const dcId = this.baseDcId as TrueDcId;
+      if(data.userId) {
+        return data.dcId === dcId ? undefined : {dcId};
+      }
+
+      return data.sign_in_dc_id === dcId ? undefined : {sign_in_dc_id: dcId};
     });
+
+    return true;
   }
 
   public async logOut(migrateAccountTo?: ActiveAccountNumber, cause?: {reason: CrmTelegramLogoutReason, error?: string}) {
@@ -362,6 +383,15 @@ export class ApiManager extends ApiManagerMethods {
     const clear = async() => {
       if(wasCleared) return;
       wasCleared = true;
+
+      // * a write still on its way would bring the data back after it is gone
+      await AccountController.whenUpdated(accountNumber);
+
+      // * the wallet key never outlives the account on this device
+      const userId = accountData.userId;
+      if(userId) {
+        await import('@lib/wallet/vault').then(({default: WalletVault}) => new WalletVault(userId).wipe()).catch(noop);
+      }
 
       this.baseDcId = undefined;
       // * totalAccounts can be 0 somehow
@@ -421,6 +451,8 @@ export class ApiManager extends ApiManagerMethods {
     .map(accountNumber => AppStoragesManager.clearAllStoresForAccount(accountNumber));
 
     await Promise.all([
+      // * no wallet key outlives the accounts on this device (the per-account logout wipes its own)
+      import('@lib/wallet/vault').then(({default: WalletVault}) => WalletVault.wipeAll()).catch(noop),
       sessionStorage.localStorageProxy('clear'),
       commonStateStorage.clear(),
       EncryptedStorageLayer.getInstance(getCommonDatabaseState(), 'localStorage__encrypted').clear(),
@@ -514,6 +546,10 @@ export class ApiManager extends ApiManagerMethods {
           server_time_offset: timeOffset
         });
       };
+    }
+
+    if(!Modes.pfs) {
+      this.dropTempAuthKeys();
     }
 
     let transport = this.chooseServer(dcId, connectionType, transportType);
@@ -617,8 +653,45 @@ export class ApiManager extends ApiManagerMethods {
         ...options,
         dcId,
         serverSalt: options.authKey.serverSalt
-      })
+      }),
+      load: async() => (await AccountController.get(this.getAccountNumber())).temp_auth_keys?.[key],
+      store: (stored) => this.storeTempAuthKey(key, stored)
     });
+  }
+
+  // * Kept in the account's data next to the permanent keys they are bound to: encrypted with them
+  // * under a passcode, and gone with them at log out
+  private storeTempAuthKey(key: string, stored: StoredTempAuthKey) {
+    AccountController.update(this.getAccountNumber(), (data) => {
+      // * nothing is written for an account that is logging out, nor while the accounts move to
+      // * other slots after a log out - this one may no longer be in its own
+      if(this.loggingOut || AccountController.shifting) {
+        return;
+      }
+
+      const keys = {...data.temp_auth_keys};
+      if(stored) {
+        keys[key] = stored;
+      } else {
+        delete keys[key];
+      }
+
+      return {temp_auth_keys: keys};
+    }).catch((err) => {
+      this.log.error('can\'t keep temporary auth key', err);
+    });
+  }
+
+  // * with PFS off (?noPfs=1) the kept keys have no use, and are not kept
+  private dropTempAuthKeys() {
+    if(this.droppedTempAuthKeys) {
+      return;
+    }
+
+    this.droppedTempAuthKeys = true;
+    AccountController.update(this.getAccountNumber(), (data) => {
+      return !this.loggingOut && !AccountController.shifting && data.temp_auth_keys ? {temp_auth_keys: undefined} : undefined;
+    }).catch(noop);
   }
 
   private changeNetworkerTransport(networker: MTPNetworker, transport?: MTTransport) {
@@ -675,9 +748,11 @@ export class ApiManager extends ApiManagerMethods {
 
     let {afterMessageId, prepareTempMessageId} = options;
     if(prepareTempMessageId) {
-      deferred.then(() => {
+      // * whichever way it went: one that failed is waited for no more (MSG_WAIT_FAILED below)
+      const forget = () => {
         delete this.afterMessageTempIds[prepareTempMessageId];
-      });
+      };
+      deferred.then(forget, forget);
     }
 
     if(MOUNT_CLASS_TO) {
@@ -770,31 +845,37 @@ export class ApiManager extends ApiManagerMethods {
           }
           throw error;
         } else if(error.code === 401 && this.baseDcId && dcId !== this.baseDcId) {
-          if(this.cachedExportPromise[dcId] === undefined) {
-            const promise = new Promise((exportResolve, exportReject) => {
-              this.invokeApi('auth.exportAuthorization', {dc_id: dcId}, {noErrorBox: true}).then((exportedAuth) => {
-                this.invokeApi('auth.importAuthorization', {
-                  id: exportedAuth.id,
-                  bytes: exportedAuth.bytes
-                }, {dcId, noErrorBox: true}).then(exportResolve, exportReject);
-              }, exportReject);
-            });
-
-            this.cachedExportPromise[dcId] = promise;
-          }
-
-          return this.cachedExportPromise[dcId].then(() => performRequest());
+          // * the home DC's authorization imported once for the requests that hit 401 meanwhile, and anew for the next
+          // * 401 (as tdesktop's _authWaiters): kept for the session instead, one failed import would fail every later
+          // * request there, and a DC that has dropped the authorization since would send them round in circles
+          return this.invokeApiSingleProcess({
+            method: 'auth.exportAuthorization',
+            params: {dc_id: dcId},
+            options: {noErrorBox: true},
+            processResult: (exportedAuth) => {
+              return this.invokeApi('auth.importAuthorization', {
+                id: exportedAuth.id,
+                bytes: exportedAuth.bytes
+              }, {dcId, noErrorBox: true});
+            }
+          }).then(() => performRequest());
         } else if(error.code === 303) {
-          const newDcId = +error.type.match(/^(PHONE_MIGRATE_|NETWORK_MIGRATE_|USER_MIGRATE_|STATS_MIGRATE_)(\d+)/)[2] as DcId;
-          if(newDcId !== dcId) {
-            if(options.dcId) {
+          // * a 303 of a kind not listed here is an ordinary error, as in tdesktop's onErrorDefault; FILE_MIGRATE comes
+          // * as a 303 too (payments.getBankCardData), and moves only the request, as its 400 below does
+          const match = error.type.match(/^(PHONE_MIGRATE_|NETWORK_MIGRATE_|USER_MIGRATE_|STATS_MIGRATE_|FILE_MIGRATE_)(\d+)/);
+          const newDcId = match && +match[2] as DcId;
+          if(newDcId && newDcId !== dcId) {
+            if(options.dcId || match[1] === 'FILE_MIGRATE_') {
               options.dcId = newDcId;
-            } else {
-              this.setBaseDcId(newDcId);
+            } else if(!this.setBaseDcId(newDcId)) {
+              // * the request would only go back where it was told to leave
+              throw error;
             }
 
             return this.invokeApi(method, params, options);
           }
+
+          throw error;
         } else if(error.code === 400 && error.type.indexOf('FILE_MIGRATE') === 0) {
           const newDcId = +error.type.match(/^(FILE_MIGRATE_)(\d+)/)[2] as DcId;
           if(newDcId !== dcId) {
@@ -845,9 +926,15 @@ export class ApiManager extends ApiManagerMethods {
           afterMessageId = undefined;
           delete options.afterMessageId;
 
-          if(after) return after.promise.then(() => performRequest());
+          // * sent on its own once the one it waited for is over, whichever way it went, as tdesktop resends it: taken
+          // * down with the one before, a text sent right after a sticker the chat refuses failed with its error
+          if(after) return after.promise.then(() => performRequest(), () => performRequest());
           else return performRequest();
         } else if(!options.rawError && error.code === 500) {
+          if(options.noRetry) {
+            throw error;
+          }
+
           const now = Date.now();
           if(options.stopTime) {
             if(now >= options.stopTime) {
@@ -857,7 +944,7 @@ export class ApiManager extends ApiManagerMethods {
 
           options.waitTime = options.waitTime ? Math.min(60, options.waitTime * 1.5) : 1;
           return pause(options.waitTime * 1000).then(() => performRequest());
-        } else if(error.type === 'UNKNOWN' || error.type === 'MTPROTO_CLUSTER_INVALID') { // cluster invalid - request from regular user to premium endpoint
+        } else if((error.type === 'UNKNOWN' && !options.noRetry) || error.type === 'MTPROTO_CLUSTER_INVALID') { // cluster invalid - request from regular user to premium endpoint
           return pause(1000).then(() => performRequest());
         } else {
           if(RepayRequestHandler.canHandleError(error))

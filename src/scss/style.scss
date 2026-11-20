@@ -21,6 +21,7 @@
 @use "partials/chat";
 @use "partials/chatTopbar";
 @use "partials/chatBubble";
+@use "partials/memberTag";
 @use "partials/chatPinned";
 @use "partials/chatMarkupTooltip";
 @use "partials/chatStickersHelper";
@@ -118,6 +119,7 @@
 @use "partials/popups/confirmation";
 @use "partials/popups/reportAd";
 @use "partials/popups/deleteMegagroupMessages";
+@use "partials/transactions";
 @use "partials/popups/stars";
 @use "partials/popups/makePaid";
 @use "partials/popups/accountsLimit";
@@ -131,3 +133,4 @@
 @use "partials/passcodeLockScreen";
 
 @use "partials/accessibility";
+@use "partials/testDcBadge";

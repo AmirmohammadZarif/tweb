@@ -20,7 +20,8 @@ function attachHandler() {
   const input = document.createElement('div');
   Object.defineProperty(input, 'isContentEditable', {value: true});
   const host = {
-    chat: {input: {messageInput: input, passEventToInput: redirect}, selection: {isSelecting: false}}
+    chat: {input: {messageInput: input, passEventToInput: redirect}, selection: {isSelecting: false}},
+    isChatColumnShown: AppImManager.prototype.isChatColumnShown
   };
   callbacks.length = 0;
   (AppImManager.prototype as unknown as {attachKeydownListener(): void}).attachKeydownListener.call(host);
@@ -51,5 +52,18 @@ test('without the a11y layer the keys still go to the composer from a focused co
   const container = document.createElement('div');
   container.innerHTML = '<button>Bold</button>';
   await handler({key: 'Enter', code: 'Enter', target: container.firstElementChild, isTrusted: true, defaultPrevented: false} as unknown as KeyboardEvent);
+  expect(redirect).toHaveBeenCalledTimes(1);
+});
+
+test('copying leaves the selection on the page where it is, pasting goes to the composer', async() => {
+  const {handler, redirect} = attachHandler();
+  const target = document.createElement('div');
+  const press = (init: Partial<KeyboardEvent>) => handler({target, isTrusted: true, defaultPrevented: false, ...init} as unknown as KeyboardEvent);
+  await press({key: 'c', code: 'KeyC', ctrlKey: true});
+  await press({key: 'c', code: 'KeyC', metaKey: true});
+  await press({key: 'Insert', code: 'Insert', ctrlKey: true});
+  await press({key: 'Insert', code: 'Numpad0', ctrlKey: true});
+  expect(redirect).not.toHaveBeenCalled();
+  await press({key: 'Insert', code: 'Insert', shiftKey: true});
   expect(redirect).toHaveBeenCalledTimes(1);
 });

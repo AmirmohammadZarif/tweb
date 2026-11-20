@@ -1,5 +1,5 @@
 import type Chat from '@components/chat/chat';
-import {RichMessageBubble} from '@components/chat/bubbles/richMessage';
+import {RichMessageBubble, RichMessageBubbleLayout} from '@components/chat/bubbles/richMessage';
 import {
   createMessageTextRevealCoordinator,
   MessageTextLayoutEvent,
@@ -7,6 +7,7 @@ import {
   MessageTextRevealEvent,
   SolidMessageTextBody
 } from '@components/chat/bubbleParts/solidMessageText';
+import {setMessageTextSource} from '@components/chat/messageTextCopy';
 import {Middleware} from '@helpers/middleware';
 import {modifyAckedPromise} from '@helpers/modifyAckedResult';
 import usePeerTranslation from '@hooks/usePeerTranslation';
@@ -45,6 +46,8 @@ export type CreateSolidMessageBodyOptions = {
   translation?: SolidMessageBodyTranslationOptions,
   reducedMotion?: Accessor<boolean>,
   scrollToElement?: (element: HTMLElement) => void,
+  // how a rich message meets the bubble: where the time floats, whether it starts with media
+  onRichBubbleLayout?: (layout: RichMessageBubbleLayout) => void,
   onLayout?: (event: MessageTextLayoutEvent) => void,
   onReveal?: (event: MessageTextRevealEvent) => void,
   onFinalized?: (event: MessageTextRevealEvent) => void
@@ -126,6 +129,7 @@ function SolidMessageBody(props: {
   translation?: SolidMessageBodyTranslationOptions,
   reducedMotion?: Accessor<boolean>,
   scrollToElement?: (element: HTMLElement) => void,
+  onRichBubbleLayout?: (layout: RichMessageBubbleLayout) => void,
   onLayout?: (event: MessageTextLayoutEvent) => void,
   onReveal?: (event: MessageTextRevealEvent) => void,
   onTextFinalized?: (event: MessageTextRevealEvent) => void
@@ -382,6 +386,7 @@ function SolidMessageBody(props: {
             richTextOptions={props.richTextOptions}
             revealCoordinator={richRevealCoordinator}
             onTextLayout={props.onLayout}
+            onBubbleLayout={props.onRichBubbleLayout}
             scrollToElement={props.scrollToElement}
           />
         </div>
@@ -402,6 +407,8 @@ export function createSolidMessageBody(
   let disposed = false;
 
   element.classList.add(styles.Host);
+  // a selection in the text copies the message's own text and entities, as its Copy does
+  setMessageTextSource(element, () => currentSnapshot.text);
 
   const disposeRender = render(() => (
     <SolidJSHotReloadGuardProvider>
@@ -411,6 +418,7 @@ export function createSolidMessageBody(
         translation={options.translation}
         reducedMotion={options.reducedMotion}
         scrollToElement={options.scrollToElement}
+        onRichBubbleLayout={options.onRichBubbleLayout}
         chat={options.chat}
         onLayout={options.onLayout}
         onReveal={options.onReveal}

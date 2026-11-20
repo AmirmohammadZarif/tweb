@@ -1,4 +1,4 @@
-import wrapUrl from '@lib/richTextProcessor/wrapUrl';
+import wrapUrl, {getAnchorHandlerName, isAnchorHandlerName} from '@lib/richTextProcessor/wrapUrl';
 import matchTelegramUrlHost from '@lib/richTextProcessor/matchTelegramUrlHost';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import parseUriParams from '@helpers/string/parseUriParams';
@@ -36,6 +36,15 @@ type InternalLinkAnchorType =
   | 'contacts'
   | 'chats'
   | 'addstyle'
+  | 'contact'
+  | 'proxy'
+  | 'socks'
+  | 'unknownDeepLink'
+  | 'sendgrams'
+  | 'transfer'
+  | 'openTonAddress'
+  | 'ton-connect'
+  | 'tonconnect'
 ;
 
 export const UNSAFE_ANCHOR_LINK_TYPES: Set<InternalLinkAnchorType> = new Set([
@@ -50,13 +59,18 @@ export default function addAnchorListener<
   }
 >(options: {
   name: InternalLinkAnchorType,
-  protocol?: 'tg',
+  protocol?: 'tg' | 'ton' | 'tc',
   callback: (params: Params & {element?: HTMLAnchorElement, masked?: boolean, event?: Event}) => any,
   noPathnameParams?: boolean,
   noUriParams?: boolean,
   noCancelEvent?: boolean
 }) {
-  (window as any)[(options.protocol ? options.protocol + '_' : '') + options.name] = (element?: HTMLAnchorElement, e?: Event) => {
+  const handlerName = getAnchorHandlerName(options.name, options.protocol);
+  if(!isAnchorHandlerName(handlerName)) {
+    throw new Error(`a link handler is called by its name from an anchor's onclick, which ${handlerName} cannot be`);
+  }
+
+  (window as any)[handlerName] = (element?: HTMLAnchorElement, e?: Event) => {
     !options.noCancelEvent && cancelEvent(null);
 
     let href = element.href;

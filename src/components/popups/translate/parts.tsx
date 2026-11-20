@@ -1,5 +1,4 @@
 import {ButtonIconTsx} from '@components/buttonIconTsx';
-import {openInstantViewInAppBrowser} from '@components/browser';
 import {InstantViewBlocks} from '@components/instantView';
 import {instantViewStyles} from '@components/instantViewFormatting';
 import {previewStyles} from '@components/popups/previewCard';
@@ -15,9 +14,10 @@ import classNames from '@helpers/string/classNames';
 import {Message, RichMessage, TextWithEntities} from '@layer';
 import {flattenRichMessageContent, richMessageToPage} from '@lib/richMessage';
 import {useHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
-import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
-import {createEffect, createResource, createSignal, JSX, Match, Switch} from 'solid-js';
+import SolidJSHotReloadGuardProvider, {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
+import {createEffect, createResource, createSignal, JSX, Match, Show, Switch} from 'solid-js';
 import {Transition} from 'solid-transition-group';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 type TranslationResult =
   {type: 'text', value: TextWithEntities} |
@@ -40,16 +40,19 @@ export const Result = (props: {
   message?: Message.message;
   textWithEntities?: TextWithEntities;
   wireCaptionClick?: (div: HTMLElement) => void;
+  /** Protected text: no copy button */
+  noCopy?: boolean;
 }) => {
   const {rootScope, wrapRichText} = useHotReloadGuard();
 
   const [translation] = createResource<TranslationResult, TranslatableLanguageISO>(
     () => props.language,
     async(lang) => {
+      const managers = bindManagersToSession(rootScope.managers);
       if(props.message?.rich_message) {
         return {
           type: 'rich',
-          value: await rootScope.managers.appTranslationsManager.translateRichMessage({
+          value: await managers.appTranslationsManager.translateRichMessage({
             peerId: props.message.peerId,
             mid: props.message.mid,
             lang
@@ -59,7 +62,7 @@ export const Result = (props: {
 
       return {
         type: 'text',
-        value: await rootScope.managers.appTranslationsManager.translateText({
+        value: await managers.appTranslationsManager.translateText({
           ...(props.message ? {peerId: props.message.peerId, mid: props.message.mid} : {text: props.textWithEntities}),
           lang
         })
@@ -99,14 +102,16 @@ export const Result = (props: {
       <div class={previewStyles.resultHeader}>
         <div class={previewStyles.resultTitleWrapper}>
           {props.title}
-          <ButtonIconTsx
-            class={previewStyles.copyButton}
-            classList={{
-              [previewStyles.hidden]: translation.state !== 'ready'
-            }}
-            icon='copy'
-            onClick={onCopyClick}
-          />
+          <Show when={!props.noCopy}>
+            <ButtonIconTsx
+              class={previewStyles.copyButton}
+              classList={{
+                [previewStyles.hidden]: translation.state !== 'ready'
+              }}
+              icon='copy'
+              onClick={onCopyClick}
+            />
+          </Show>
         </div>
       </div>
       <div class={previewStyles.resultContent}>
@@ -139,7 +144,7 @@ export const Result = (props: {
                         webPageId={props.message.mid}
                         page={richMessageToPage(translated.value)}
                         openNewPage={(page) => {
-                          openInstantViewInAppBrowser({
+                          hotReloadGuard.openInstantViewInAppBrowser({
                             cachedPage: page,
                             HotReloadGuardProvider: SolidJSHotReloadGuardProvider
                           });

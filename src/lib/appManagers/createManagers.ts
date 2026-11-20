@@ -48,6 +48,7 @@ import AppUsernamesManager from '@appManagers/appUsernamesManager';
 import AppChatInvitesManager from '@appManagers/appChatInvitesManager';
 import AppStoriesManager from '@appManagers/appStoriesManager';
 import AppBotsManager from '@appManagers/appBotsManager';
+import AppWidgetsManager from '@appManagers/appWidgetsManager';
 import AppBoostsManager from '@appManagers/appBoostsManager';
 import AppStatisticsManager from '@appManagers/appStatisticsManager';
 import AppBusinessManager from '@appManagers/appBusinessManager';
@@ -65,6 +66,7 @@ import AppSupportMetricsManager from '@appManagers/appSupportMetricsManager';
 import AppQuickRepliesManager from '@appManagers/appQuickRepliesManager';
 import AppCrmManager from '@appManagers/appCrmManager';
 import {AiTonesManager} from '@lib/appManagers/aiTonesManager';
+import AppWalletManager from '@appManagers/appWalletManager';
 
 export default function createManagers(
   appStoragesManager: AppStoragesManager,
@@ -121,6 +123,7 @@ export default function createManagers(
     appChatInvitesManager: new AppChatInvitesManager,
     appStoriesManager: new AppStoriesManager,
     appBotsManager: new AppBotsManager,
+    appWidgetsManager: new AppWidgetsManager,
     appBoostsManager: new AppBoostsManager,
     appStatisticsManager: new AppStatisticsManager,
     appBusinessManager: new AppBusinessManager,
@@ -135,7 +138,8 @@ export default function createManagers(
     appSupportMetricsManager: new AppSupportMetricsManager,
     appQuickRepliesManager: new AppQuickRepliesManager,
     appCrmManager: new AppCrmManager,
-    aiTonesManager: new AiTonesManager
+    aiTonesManager: new AiTonesManager,
+    appWalletManager: new AppWalletManager
   };
 
   managers.authorizer = new Authorizer({

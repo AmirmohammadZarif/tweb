@@ -7,6 +7,7 @@ import ListenerSetter from '@helpers/listenerSetter';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import liteMode from '@helpers/liteMode';
+import I18n from '@lib/langPack';
 import GroupCallVideoTile, {GROUP_CALL_MOVE_DURATION, GROUP_CALL_MOVE_EASING, GroupCallVideoTileType} from '@components/groupCall/videoTile';
 import {
   GroupCallTileRect,
@@ -30,8 +31,16 @@ const MAX_CROP_STAGE = 0.2;
 export type GroupCallVideoGridMode = {
   /** The wide panel: tiles on the stage, the participants in a column beside it. */
   wide: boolean,
-  /** Only wide: the column is out and covers this much of the stage's right edge. */
+  /** Only wide: the column is out and covers this much of the stage's inline-end edge. */
   columnWidth: number
+};
+
+/**
+ * The layout works left to right (videoLayout.ts); a right-to-left interface reads the tiles from
+ * the right, and its column covers the stage's left edge — the same rects, mirrored in their host.
+ */
+const mirrorRects = (rects: GroupCallTileRect[], hostWidth: number) => {
+  return rects.map((rect) => ({...rect, x: hostWidth - rect.x - rect.width}));
 };
 
 /**
@@ -181,6 +190,11 @@ export default class GroupCallVideoGrid {
     this.layout(animateChange);
   }
 
+  /** Lays the tiles out again where no host changed its size: the interface switched direction. */
+  public relayout() {
+    this.scheduleLayout(false);
+  }
+
   private updateParticipant(participant: GroupCallParticipant, relayout = true) {
     const {instance} = this.options;
     const peerId = getPeerId(participant.peer);
@@ -216,7 +230,8 @@ export default class GroupCallVideoGrid {
         participant,
         result.video,
         (animate) => this.scheduleLayout(animate),
-        original?.videoWidth ? {width: original.videoWidth, height: original.videoHeight} : undefined
+        original?.videoWidth ? {width: original.videoWidth, height: original.videoHeight} : undefined,
+        instance.accountNumber
       );
       created.setSpeaking(instance.isSpeaking(peerId));
       // The SFU can hand a source to a newcomer before the row saying its last owner left: that
@@ -290,12 +305,15 @@ export default class GroupCallVideoGrid {
     const ordered = this.getOrderedTiles();
     const others = ordered.filter((tile) => tile !== pinned);
     const placements: Array<{tile: GroupCallVideoTile, host: HTMLElement, rect: GroupCallTileRect, maxCrop: number}> = [];
+    const isRTL = I18n.getIsRTL();
+    const inDirection = (rects: GroupCallTileRect[], hostWidth: number) => isRTL ? mirrorRects(rects, hostWidth) : rects;
 
     let listHeight = 0;
     if(mode.wide) {
       const onStage = pinned ? [pinned] : ordered;
       const stageWidth = Math.max(0, this.stageSize.width - mode.columnWidth);
-      const stageRects = layoutStage(onStage.map((tile) => tile.size), stageWidth, this.stageSize.height);
+      // mirrored over the whole stage: the part the column leaves is on the right in RTL
+      const stageRects = inDirection(layoutStage(onStage.map((tile) => tile.size), stageWidth, this.stageSize.height), this.stageSize.width);
       // alone on the stage — pinned or the only video — it is shown whole, as the large tile of a
       // narrow panel is, so pinning the only video changes nothing
       const maxCrop = onStage.length === 1 ? 0 : MAX_CROP_STAGE;
@@ -317,9 +335,10 @@ export default class GroupCallVideoGrid {
       }
 
       const list = layoutList(inList.map((tile) => tile.size), this.listWidth, !!pinned);
+      const listRects = inDirection(list.rects, this.listWidth);
       inList.forEach((tile, index) => {
         const isLarge = index === 0 && (!!pinned || inList.length === 1);
-        placements.push({tile, host: this.list, rect: list.rects[index], maxCrop: isLarge ? 0 : MAX_CROP_LIST});
+        placements.push({tile, host: this.list, rect: listRects[index], maxCrop: isLarge ? 0 : MAX_CROP_LIST});
       });
       listHeight = list.height;
     }
@@ -339,7 +358,8 @@ export default class GroupCallVideoGrid {
       return !unchanged && {tile, host, rect, maxCrop};
     }).filter(Boolean);
 
-    const shouldAnimate = animate && liteMode.isAvailable('animations');
+    // * tiles fly to their places, and the list grows with them, with full animations only
+    const shouldAnimate = animate && liteMode.isAvailable('motion');
     // read every start before writing anything: measured mid-flight when a move interrupts another
     const starts = shouldAnimate ? moves.map(({tile}) => tile.measure()) : [];
     const hostRects = shouldAnimate ? new Map([this.stage, this.list, this.flight].map((host) => [host, host.getBoundingClientRect()])) : undefined;
@@ -355,7 +375,7 @@ export default class GroupCallVideoGrid {
       const wasPlaced = !!tile.host;
       if(!start) {
         tile.place(host, rect, maxCrop);
-        if(shouldAnimate && !wasPlaced) {
+        if(animate && liteMode.isAvailable('animations') && !wasPlaced) {
           tile.appear();
         }
 

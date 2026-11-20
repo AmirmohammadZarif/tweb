@@ -9,6 +9,7 @@ import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
 import showQuickReplyEditPopup from '@components/popups/quickReplyEdit';
 import confirmationPopup from '@components/confirmationPopup';
 import {QuickReply} from '@lib/quickReplies/types';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
 
 export default function QuickReplies() {
   const [tab] = useSuperTab();
@@ -22,6 +23,7 @@ export default function QuickReplies() {
   const edit = (reply: QuickReply) => showQuickReplyEditPopup({reply});
 
   const remove = async(reply: QuickReply) => {
+    const managers = bindManagersToSession(rootScope.managers);
     try {
       await confirmationPopup({
         titleLangKey: 'QuickReplies.DeleteTitle',
@@ -32,7 +34,7 @@ export default function QuickReplies() {
     } catch{
       return;
     }
-    rootScope.managers.appQuickRepliesManager.deleteQuickReply(reply.id);
+    managers.appQuickRepliesManager.deleteQuickReply(reply.id);
   };
 
   return (

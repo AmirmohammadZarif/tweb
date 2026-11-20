@@ -1,17 +1,15 @@
 import {createEffect, createSignal, For, JSX, createMemo, onCleanup, untrack, createReaction, Show, Switch, Match} from 'solid-js';
 import {getOverlayRoot} from '@helpers/appWindow';
-import {Portal} from 'solid-js/web';
-import {createStoriesViewer, createStoriesViewerWithPeer} from '@components/stories/viewer';
 import {Document, MessageMedia, Photo, StoryItem} from '@layer';
-import {wrapStoryMedia} from '@components/stories/preview';
+import wrapStoryGridItem from '@components/stories/gridItem';
 import getMediaThumbIfNeeded from '@helpers/getStrippedThumbIfNeeded';
-import {StoriesContext, useStories, createStoriesStore, StoriesContextState} from '@components/stories/store';
+import {StoriesContext, useStories, createStoriesStore, StoriesContextState, StoriesContextActions} from '@components/stories/store';
+import {attachReorder, createReorderMode, REORDERABLE_CLASS_NAME, ReorderBarContent, ReorderMode, SelectionPlate} from '@components/reorderMode';
+import {AppManagers} from '@lib/managers';
 import Icon from '@components/icon';
 import {ChipTab, ChipTabs} from '@components/chipTabs';
 import I18n, {i18n} from '@lib/langPack';
-import buttonKeyDown from '@helpers/solid/buttonKeyDown';
-import Modes from '@config/modes';
-import {formatFullSentTime} from '@helpers/date';
+import classNames from '@helpers/string/classNames';
 import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
 import {PreloaderTsx} from '@components/putPreloader';
 import fastSmoothScroll from '@helpers/fastSmoothScroll';
@@ -21,8 +19,7 @@ import {doubleRaf} from '@helpers/schedulers';
 import {I18nTsx} from '@helpers/solid/i18n';
 import ButtonTsx from '@components/buttonTsx';
 import {StoriesSelection, toastStoryPinnedToProfile} from './selection';
-import {ButtonMenuItemOptions, ButtonMenuSync} from '@components/buttonMenu';
-import CheckboxField from '@components/checkboxField';
+import {ButtonMenuSync} from '@components/buttonMenu';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import {attachContextMenuListener} from '@helpers/dom/attachContextMenuListener';
 import contextMenuController from '@helpers/contextMenuController';
@@ -33,27 +30,92 @@ import ListenerSetter from '@helpers/listenerSetter';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
 import cancelClickOrNextIfNotClick from '@helpers/dom/cancelClickOrNextIfNotClick';
 import {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
-import {AppMyStoriesTab} from '@components/solidJsTabs/tabs';
 import SidebarSlider from '../slider';
 import InputField from '@components/inputField';
 import confirmationPopup from '@components/confirmationPopup';
 import showChooseStoryPopup from '@components/popups/chooseStoryPopup';
-import createSubmenuTrigger from '@components/createSubmenuTrigger';
+import {createAddToAlbumSubmenuTrigger, openCreateAlbumPopup} from '@components/stories/albums';
 import showStoriesStealthModePopup from '@components/popups/storiesStealthMode';
 import {toastNew} from '@components/toast';
 import {IconTsx} from '@components/iconTsx';
 import LottieAnimation from '@components/lottieAnimation';
-import Tabs from '@components/tabs';
 import lottieLoader from '@lib/lottie/lottieLoader';
 import {copyTextToClipboard} from '@helpers/clipboard';
-import {handleShareStory} from './share';
-import wrapPeerTitle from '../wrappers/peerTitle';
+import {copyStoryLink, handleShareStory, hasStoryLink} from './share';
+import {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
+import {bindManagersToSession} from '@lib/accounts/bindManagersToAccount';
+import verifyMenuItem from '@helpers/verifyMenuItem';
 
 const ALL_ALBUMS_ID = -1;
 const ADD_ALBUM_ID = -2;
 
 const TEST_ONE = false;
 const TEST_TWO = false;
+
+const ALBUM_CHIP_CLASS_NAME = 'stories-album-chip';
+
+/**
+ * The mode the owner of a profile's stories rearranges them in, as on iOS and Android: the stories
+ * of an album, and the albums themselves. Each move is saved as it is dropped, so leaving the mode
+ * has nothing left to save. The stories pinned to the top are not among them, unlike there: the
+ * server keeps those newest first whatever order it is sent.
+ */
+type StoriesReorder = ReorderMode & {
+  /** whether the stories of the list shown now can be moved: those of an album */
+  canMoveStories: () => boolean,
+  /** the album's stories, in their new order - of the album they were dragged in, which may be left by now */
+  moveStories: (albumId: number, ids: number[]) => void,
+  moveAlbums: (ids: number[]) => void
+};
+
+function createStoriesReorder({peerId, state, actions, selection, managers}: {
+  peerId: PeerId,
+  state: StoriesContextState,
+  actions: StoriesContextActions,
+  selection?: StoriesSelection,
+  managers: AppManagers
+}): StoriesReorder {
+  const mode = createReorderMode({
+    onStart: () => {
+      if(selection?.isSelecting) {
+        selection.cancelSelection();
+      }
+    }
+  });
+
+  // * a selection started from the header's menu takes the bar and the presses over
+  createEffect(() => {
+    if(selection?.selecting()) {
+      untrack(mode.stop);
+    }
+  });
+
+  const onError = () => toastNew({langPackKey: 'Error.AnError'});
+
+  return {
+    ...mode,
+    canMoveStories: () => state.albumId !== undefined,
+    moveStories: (albumId, ids) => {
+      if(state.albumId === albumId) {
+        actions.reorder({stories: ids});
+      }
+
+      managers.appStoriesManager.reorderAlbumStories(peerId, albumId, ids)?.catch(onError);
+    },
+    moveAlbums: (ids) => {
+      actions.reorder({albums: ids});
+      managers.appStoriesManager.reorderAlbums(peerId, ids)?.catch(onError);
+    }
+  };
+}
+
+/**
+ * Whether a touch starts on a story tile that is being rearranged: what follows is a drag across the grid,
+ * which a swipe between the tabs or albums around it must leave alone
+ */
+export function isStoryReorderTarget(target: EventTarget) {
+  return !!(target as HTMLElement).closest?.(`.search-super-item.${REORDERABLE_CLASS_NAME}`);
+}
 
 class StoriesContextMenu {
   private buttons: ButtonMenuItemOptionsVerifiable[];
@@ -68,11 +130,17 @@ class StoriesContextMenu {
     private attachTo: HTMLElement,
     private selection: StoriesSelection | undefined,
     private listenerSetter: ListenerSetter,
-    private state: StoriesContextState
+    private state: StoriesContextState,
+    private reorder?: StoriesReorder
   ) {
     attachContextMenuListener({
       element: attachTo,
       callback: (e) => {
+        // * a long press is what picks a tile up while they are being rearranged
+        if(reorder?.active()) {
+          return;
+        }
+
         if(this.init) {
           this.init();
           this.init = null;
@@ -99,7 +167,7 @@ class StoriesContextMenu {
           this.storyItem = await rootScope.managers.appStoriesManager.getStoryById(this.peerId, this.mid);
 
           const f = await Promise.all(this.buttons.map(async(button) => {
-            const good = button.verify ? !!(await button.verify()) : true;
+            const good = await verifyMenuItem(button);
             button.element.classList.toggle('hide', !good);
             return good;
           }));
@@ -123,7 +191,7 @@ class StoriesContextMenu {
   }
 
   private init() {
-    const managers = rootScope.managers;
+    const managers = bindManagersToSession(rootScope.managers);
     const getSelectedIds = () => {
       if(this.selection && this.selection.isSelecting) {
         return this.selection.getSelectedStoryIds(this.peerId);
@@ -159,47 +227,17 @@ class StoriesContextMenu {
       text: 'ChatList.Context.Unpin',
       onClick: () => managers.appStoriesManager.togglePinnedToTop(this.peerId, [this.storyItem.id], false),
       verify: () => !this.state.albumId && this.state.pinned && this.storyItem?.pinnedIndex !== undefined && managers.appStoriesManager.hasRights(this.peerId, this.storyItem.id, 'pin')
-    }, createSubmenuTrigger({
-      options: {
-        icon: 'folder',
-        text: 'Stories.Albums.AddToAlbum',
-        verify: () => !this.state.albumId && !!(this.state.peer?.albums?.length) && hasRightsOnSelected('edit')
-      },
-      createSubmenu: async() => {
-        const selectedIds = getSelectedIds();
-        const selectedStories = await managers.appStoriesManager.getStoriesById(this.peerId, selectedIds);
-
-        const buttons: ButtonMenuItemOptions[] = this.state.peer?.albums.map((album) => {
-          const checkboxField = new CheckboxField({
-            checked: selectedStories.every((story) => {
-              return story?._ === 'storyItem' && !!story.albums?.includes(album.album_id);
-            })
-          });
-
-          const span = document.createElement('span');
-          span.classList.add('stories-album-title');
-          span.append(wrapEmojiText(album.title));
-
-          return {
-            textElement: span,
-            onClick: () => {
-              const wasChecked = checkboxField.checked;
-              checkboxField.checked = !wasChecked;
-              rootScope.managers.appStoriesManager.updateAlbum(this.peerId, album.album_id, {
-                [wasChecked ? 'deleteStories' : 'addStories']: selectedIds
-              }).catch(() => {
-                checkboxField.checked = wasChecked;
-                toastNew({langPackKey: 'Error.AnError'});
-              });
-            },
-            checkboxField,
-            noCheckboxClickListener: true,
-            keepOpen: true
-          };
-        });
-
-        return ButtonMenuSync({buttons, listenerSetter: this.listenerSetter});
-      }
+    }, {
+      icon: 'menu',
+      text: 'Stories.Reorder',
+      onClick: () => this.reorder.start(),
+      verify: () => !!this.reorder && this.state.canEdit && this.reorder.canMoveStories()
+    }, createAddToAlbumSubmenuTrigger({
+      getPeerId: () => this.peerId,
+      getStoryIds: getSelectedIds,
+      getAlbums: () => this.state.peer?.albums,
+      verify: () => !this.state.albumId && !!(this.state.peer?.albums?.length) && hasRightsOnSelected('edit'),
+      listenerSetter: this.listenerSetter
     }), {
       icon: 'crossround',
       text: 'Stories.Albums.RemoveFromAlbum',
@@ -217,28 +255,15 @@ class StoriesContextMenu {
     }, {
       icon: 'link',
       text: 'CopyLink',
-      onClick: async() => {
-        const username = await rootScope.managers.appPeersManager.getPeerUsername(this.peerId);
-        copyTextToClipboard(`https://t.me/${username}/s/${this.storyItem.id}`);
-        toastNew({langPackKey: 'LinkCopied'});
-      },
-      verify: async() => {
-        const username = await rootScope.managers.appPeersManager.getPeerUsername(this.peerId);
-        return !!username;
-      }
+      onClick: () => copyStoryLink(managers, this.peerId, this.storyItem.id),
+      verify: () => hasStoryLink(this.storyItem, this.peerId)
     }, {
       icon: 'forward',
       text: 'ShareFile',
       onClick: async() => {
         handleShareStory({
           story: this.storyItem,
-          peerId: this.peerId,
-          onSend: async(toPeerId: PeerId) => {
-            toastNew({
-              langPackKey: toPeerId === rootScope.myId ? 'StorySharedToSavedMessages' : 'StorySharedTo',
-              langPackArguments: [await wrapPeerTitle({peerId: toPeerId})]
-            })
-          }
+          peerId: this.peerId
         });
       },
       verify: async() => {
@@ -256,7 +281,7 @@ class StoriesContextMenu {
         const id = this.storyItem.id;
         showStoriesStealthModePopup({
           onActivate: () => {
-            createStoriesViewerWithPeer({peerId, id});
+            hotReloadGuard.createStoriesViewerWithPeer({peerId, id});
           }
         });
       },
@@ -287,33 +312,14 @@ class StoriesContextMenu {
   }
 }
 
-async function openCreateAlbumPopup(peerId: PeerId): Promise<number | undefined> {
-  const inputField = new InputField({
-    maxLength: 64,
-    placeholder: 'Stories.Albums.CreatePlaceholder',
-    required: true
-  });
-
-  try {
-    await confirmationPopup({
-      titleLangKey: 'Stories.Albums.CreateTitle',
-      inputField,
-      button: {langKey: 'Create'}
-    });
-  } catch(e) {
-    return;
-  }
-
-  const album = await rootScope.managers.appStoriesManager.createAlbum(peerId, inputField.value);
-  return album.album_id;
-}
-
 function StoriesAlbums(props: {
   selection?: StoriesSelection,
   onAlbumChange: (albumId: number | undefined) => void,
-  peerId: PeerId
+  peerId: PeerId,
+  reorder?: StoriesReorder
 }) {
   const [stories] = useStories();
+  const reorder = props.reorder;
   const hasAlbums = () => stories.ready && stories.peer.albums && stories.peer.albums.length > 0;
   const chosenAlbumId = () => stories.albumId === undefined ? ALL_ALBUMS_ID : stories.albumId;
 
@@ -338,9 +344,18 @@ function StoriesAlbums(props: {
         view="surface"
         center
         needIntersectionObserver
+        scrollableRef={reorder && ((list) => attachReorder({
+          list,
+          axis: 'x',
+          scrollable: {container: list},
+          active: reorder.active,
+          key: 'value',
+          onMove: reorder.moveAlbums
+        }))}
         contextMenuButtons={async(id_) => {
           const id = Number(id_);
-          if(id === ALL_ALBUMS_ID || id === ADD_ALBUM_ID) return [];
+          // * a long press is what picks a chip up while they are being rearranged
+          if(id === ALL_ALBUMS_ID || id === ADD_ALBUM_ID || reorder?.active()) return [];
 
           const album = stories.peer.albums?.find((a) => a.album_id === id);
           if(!album) return [];
@@ -370,6 +385,7 @@ function StoriesAlbums(props: {
               text: 'Stories.Albums.Rename',
               verify: () => stories.canEdit,
               onClick: async() => {
+                const managers = bindManagersToSession(rootScope.managers);
                 const inputField = new InputField({
                   maxLength: 64,
                   placeholder: 'Stories.Albums.CreatePlaceholder',
@@ -388,10 +404,16 @@ function StoriesAlbums(props: {
                 }
 
                 if(inputField.value === album.title) return;
-                rootScope.managers.appStoriesManager.updateAlbum(props.peerId, id, {title: inputField.value}).catch(() => {
+                managers.appStoriesManager.updateAlbum(props.peerId, id, {title: inputField.value}).catch(() => {
                   toastNew({langPackKey: 'Error.AnError'});
                 });
               }
+            },
+            {
+              icon: 'menu',
+              text: 'Stories.Reorder',
+              verify: () => !!reorder && stories.canEdit,
+              onClick: () => reorder.start()
             },
             {
               icon: 'delete',
@@ -399,6 +421,7 @@ function StoriesAlbums(props: {
               verify: () => stories.canEdit,
               danger: true,
               onClick: async() => {
+                const managers = bindManagersToSession(rootScope.managers);
                 try {
                   await confirmationPopup({
                     titleLangKey: 'Stories.Albums.Delete',
@@ -409,7 +432,7 @@ function StoriesAlbums(props: {
                   return;
                 }
 
-                rootScope.managers.appStoriesManager.deleteAlbum(props.peerId, id).catch(() => {
+                managers.appStoriesManager.deleteAlbum(props.peerId, id).catch(() => {
                   toastNew({langPackKey: 'Error.AnError'});
                 });
               }
@@ -422,7 +445,10 @@ function StoriesAlbums(props: {
         </ChipTab>
         <For each={stories.peer.albums}>
           {(album) => (
-            <ChipTab class="stories-album-chip" value={album.album_id.toString()}>
+            <ChipTab
+              class={classNames(ALBUM_CHIP_CLASS_NAME, reorder?.active() && REORDERABLE_CLASS_NAME)}
+              value={album.album_id.toString()}
+            >
               <span class="stories-album-chip-title">
                 {wrapEmojiText(album.title)}
               </span>
@@ -441,6 +467,7 @@ function StoriesAlbums(props: {
 }
 
 async function openAddToAlbumPopup(peerId: PeerId, albumId: number) {
+  const managers = bindManagersToSession(rootScope.managers);
   const result = await new Promise<{added: number[], removed: number[]} | null>((resolve) => {
     showChooseStoryPopup({peerId, albumId, onFinish: resolve});
   });
@@ -448,7 +475,7 @@ async function openAddToAlbumPopup(peerId: PeerId, albumId: number) {
   if(!result) return;
   const {added, removed} = result;
   if(!added.length && !removed.length) return;
-  rootScope.managers.appStoriesManager.updateAlbum(peerId, albumId, {
+  managers.appStoriesManager.updateAlbum(peerId, albumId, {
     addStories: added.length ? added : undefined,
     deleteStories: removed.length ? removed : undefined
   }).catch(() => {
@@ -463,9 +490,11 @@ function StoriesGrid(props: {
   selection?: StoriesSelection,
   pinned: boolean,
   archive?: boolean,
+  reorder?: StoriesReorder,
   onSetAlbumAnimated?: (fn: (albumId: number | undefined) => void) => void
 }) {
   const [stories, actions] = useStories();
+  const reorder = props.reorder;
   const [viewerId, setViewerId] = createSignal<number>();
   const items = new Map<number, HTMLElement>();
 
@@ -494,7 +523,7 @@ function StoriesGrid(props: {
       actions.set({peer, index});
     });
 
-    createStoriesViewer({
+    hotReloadGuard.createStoriesViewer({
       onExit,
       target,
       splitByDays: true
@@ -502,31 +531,25 @@ function StoriesGrid(props: {
   });
 
   const Item = (storyItem: StoryItem) => {
-    const {container, div, media, thumb} = wrapStoryMedia({
+    const {container, div, media, thumb} = wrapStoryGridItem({
       peerId: stories.peer.peerId,
       storyItem: storyItem as StoryItem.storyItem,
-      forPreview: true,
-      noAspecter: true,
-      containerProps: {
-        // @ts-ignore
-        'data-mid': storyItem.id,
-        'data-peer-id': stories.peer.peerId,
-        'data-timestamp': (storyItem as StoryItem.storyItem).date,
-        'class': 'grid-item search-super-item',
-        'role': 'button',
-        'tabindex': Modes.a11y ? 0 : undefined,
-        'aria-label': `${I18n.format('OpenStory', true)}, ${formatFullSentTime((storyItem as StoryItem.storyItem).date).textContent}`,
-        'onKeyDown': buttonKeyDown,
-        'onClick': () => {
-          setViewerId(storyItem.id);
+      onClick: () => {
+        // * the tiles are being rearranged, not watched
+        if(reorder?.active()) {
+          return;
         }
+
+        setViewerId(storyItem.id);
       },
-      childrenClassName: 'grid-item-media',
-      noPlayButton: true
+      own: () => stories.canEdit,
+      pinned: () => props.pinned && !stories.albumId && (storyItem as StoryItem.storyItem).pinnedIndex !== undefined
     });
 
-    let icon: HTMLElement;
-    let archiveIcon: HTMLElement;
+    createEffect(() => {
+      div.classList.toggle(REORDERABLE_CLASS_NAME, !!reorder?.active() && reorder.canMoveStories());
+    });
+
     createEffect(() => {
       const t = thumb();
       const m = media();
@@ -568,17 +591,14 @@ function StoriesGrid(props: {
           });
         }
       }
+    });
 
-      if(element.parentElement && props.pinned && !stories.albumId && (storyItem as StoryItem.storyItem).pinnedIndex !== undefined) {
-        icon ??= Icon('pin2_filled', 'grid-item-pin');
-        element.parentElement.append(icon);
-      } else if(icon) {
-        icon.remove();
-      }
-
-      if(element.parentElement && props.archive && !(storyItem as StoryItem.storyItem).pFlags.pinned) {
+    // * on the tile itself: a video's own element is not on it until it plays
+    let archiveIcon: HTMLElement;
+    createEffect(() => {
+      if(props.archive && !(storyItem as StoryItem.storyItem).pFlags.pinned) {
         archiveIcon ??= Icon('hide', 'grid-item-archived');
-        element.parentElement.append(archiveIcon);
+        div.append(archiveIcon);
       } else if(archiveIcon) {
         archiveIcon.remove();
       }
@@ -601,7 +621,8 @@ function StoriesGrid(props: {
   let scrollDiff = 0;
 
   const slideKeyframes = (_element: Element, removed: boolean): Keyframe[] => {
-    const dir = direction();
+    // * the album chips run the other way in RTL, and the albums slide in from the side of theirs
+    const dir = direction() * (I18n.getIsRTL() ? -1 : 1);
     const yOffset = scrollDiff ? ` translateY(${scrollDiff}px)` : '';
     if(removed) {
       // AnimationList reverses these for exit; Y offset compensates scroll change
@@ -696,6 +717,15 @@ function StoriesGrid(props: {
           </Match>
           <Match when={true}>
             <div
+              ref={(list) => reorder && stories.albumId !== undefined && attachReorder({
+                list,
+                axis: 'grid',
+                scrollable: props.scrollable,
+                active: reorder.active,
+                key: 'mid',
+                // * the grid is the album's own: a drop that lands after another is chosen still goes to it
+                onMove: reorder.moveStories.bind(null, stories.albumId)
+              })}
               class="grid"
               classList={{two: stories.peer.stories.length === 2, one: stories.peer.stories.length === 1}}
             >
@@ -725,9 +755,21 @@ function StoriesSelectionToolbar(props: {
   albumId?: number,
   peerId?: PeerId,
   pinned?: boolean,
-  mount?: HTMLElement
+  mount?: HTMLElement,
+  reorder?: StoriesReorder
 }) {
-  const content = (
+  const shown = () => props.selection.selecting() || !!props.reorder?.active();
+  // * the bar fades out with what it was showing, not with what it shows when there is nothing
+  const reordering = createMemo<boolean>((was) => {
+    const selecting = props.selection.selecting(), reordering = !!props.reorder?.active();
+    return selecting || reordering ? reordering : was;
+  }, false);
+
+  const reorderContent = (
+    <ReorderBarContent titleKey="Stories.Reorder" onDone={() => props.reorder.stop()} />
+  );
+
+  const selectionContent = (
     <div class="search-super-selection-container">
       <ButtonTsx
         icon="close"
@@ -784,24 +826,18 @@ function StoriesSelectionToolbar(props: {
     </div>
   );
 
-  if(props.mount) {
-    createEffect(() => {
-      const selecting = props.selection.selecting();
-      props.mount.classList.toggle('is-selecting', selecting);
-      props.mount.classList.toggle('backwards', !selecting);
-    });
-    return <Portal mount={props.mount}>{content}</Portal>;
-  }
-
-  // with nowhere to mount into, the toolbar brings the plate the search tabs would have sat on
-  return (
-    <Tabs.MenuShell
-      class="search-super-tabs-scrollable sticky is-single"
-      classList={{'is-selecting': props.selection.selecting(), 'backwards': !props.selection.selecting()}}
-    >
-      {content}
-    </Tabs.MenuShell>
+  const content = (
+    <Show when={reordering()} fallback={selectionContent}>
+      {reorderContent}
+    </Show>
   );
+
+  const giveWay = () => {
+    if(props.selection.isSelecting) props.selection.cancelSelection();
+    props.reorder?.stop();
+  };
+
+  return <SelectionPlate shown={shown} mount={props.mount} giveWay={giveWay}>{content}</SelectionPlate>;
 }
 
 export function profileStoriesButtonMenu(props: {
@@ -829,8 +865,8 @@ export function profileStoriesButtonMenu(props: {
     icon: 'archive',
     text: 'MyStories.ShowArchive',
     onClick: () => {
-      props.slider.createTab(AppMyStoriesTab).open({
-        ...AppMyStoriesTab.getInitArgs(),
+      props.slider.createTab(hotReloadGuard.tabs.AppMyStoriesTab).open({
+        ...hotReloadGuard.tabs.AppMyStoriesTab.getInitArgs(),
         isArchive: true,
         chatId: props.peerId.isAnyChat() ? props.peerId.toChatId() : undefined
       });
@@ -887,13 +923,23 @@ export function StoriesProfileList(props: {
     }
   });
 
+  const managers = bindManagersToSession(rootScope.managers);
   const selection = props.withSelection ? new StoriesSelection({
     container: props.scrollable.container,
-    managers: rootScope.managers,
+    managers,
     listenerSetter: props.listenerSetter,
     isArchive: props.archive,
     chatId: props.peerId.isAnyChat() ? props.peerId.toChatId() : undefined,
     forPicker: props.forPicker
+  }) : undefined;
+
+  // * a profile's own stories, where the bar that leaves the mode has a place
+  const reorder = props.pinned && selection && !props.forPicker ? createStoriesReorder({
+    peerId: props.peerId,
+    state,
+    actions,
+    selection,
+    managers
   }) : undefined;
 
   let setAlbumAnimated!: (albumId: number | undefined) => void;
@@ -907,6 +953,7 @@ export function StoriesProfileList(props: {
             selection={selection}
             onAlbumChange={(id) => setAlbumAnimated?.(id)}
             peerId={props.peerId}
+            reorder={reorder}
           />
         )}
         <StoriesGrid
@@ -916,7 +963,8 @@ export function StoriesProfileList(props: {
               containerRef,
               selection,
               props.listenerSetter,
-              state
+              state,
+              reorder
             );
 
             if(selection) {
@@ -924,7 +972,7 @@ export function StoriesProfileList(props: {
                 if(selection.isSelecting) {
                   const item = findUpClassName(e.target, 'search-super-item');
                   if(!item) return;
-                  cancelClickOrNextIfNotClick(e);
+                  selection.cancelElementClick(e, item, cancelClickOrNextIfNotClick);
                   selection.toggleByElement(item);
                 }
               }, {capture: true, passive: false, listenerSetter: props.listenerSetter});
@@ -935,6 +983,7 @@ export function StoriesProfileList(props: {
           selection={selection}
           pinned={props.pinned}
           archive={props.archive}
+          reorder={reorder}
           onSetAlbumAnimated={(fn) => setAlbumAnimated = fn}
         />
         {selection && !props.forPicker && (
@@ -944,6 +993,7 @@ export function StoriesProfileList(props: {
             peerId={props.peerId}
             pinned={props.pinned}
             mount={props.selectionMount}
+            reorder={reorder}
           />
         )}
       </div>

@@ -1,12 +1,12 @@
 import ctx from '@environment/ctx';
 import callbackify from '@helpers/callbackify';
-import {ignoreRestrictionReasons} from '@helpers/restrictions';
 import {Config, DataJSON, HelpAppConfig, HelpPeerColors, MethodDeclMap, User} from '@layer';
 import {InvokeApiOptions} from '@types';
 import {AppManager} from '@appManagers/manager';
 import rootScope from '@lib/rootScope';
 import {UserAuth} from '@appManagers/constants';
 import {MTMessage} from '@lib/mtproto/networker';
+import LIMIT_DEFAULTS from '@config/limitDefaults';
 
 type HashResult = {
   hash: number,
@@ -16,6 +16,8 @@ type HashResult = {
 type HashOptions = {
   [queryJSON: string]: HashResult
 };
+
+type ApiLimitKey = keyof typeof LIMIT_DEFAULTS;
 
 export type ApiLimitType = 'pin' | 'folderPin' | 'folders' |
   'favedStickers' | 'reactions' | 'bio' | 'topicPin' | 'caption' |
@@ -326,7 +328,6 @@ export default abstract class ApiManagerMethods extends AppManager {
 
   private applyAppConfig(appConfig: MTAppConfig, save?: boolean) {
     this.appConfig = appConfig;
-    ignoreRestrictionReasons(appConfig.ignore_restriction_reasons ?? []);
 
     if(save) {
       appConfig.cachedTime = Date.now();
@@ -361,13 +362,23 @@ export default abstract class ApiManagerMethods extends AppManager {
     });
   }
 
+  /** The DC this connection landed on, the one nearest to the user, and the user's country by IP */
+  public getNearestDc() {
+    return this.invokeApi('help.getNearestDc');
+  }
+
+  /** What the server has to say about a `tg://` link this client does not know (tdesktop's `requestDeepLinkInfo`). */
+  public getDeepLinkInfo(path: string) {
+    return this.invokeApiSingle('help.getDeepLinkInfo', {path});
+  }
+
   public getTimezonesList() {
     return this.invokeApiCacheable('help.getTimezonesList', {hash: 0}, {cacheSeconds: 86400, syncIfHasResult: true});
   }
 
   public getLimit(type: ApiLimitType, isPremium?: boolean) {
     return callbackify(this.getAppConfig(), (appConfig) => {
-      const map: {[type in ApiLimitType]: [keyof MTAppConfig, keyof MTAppConfig] | keyof MTAppConfig} = {
+      const map: {[type in ApiLimitType]: [ApiLimitKey, ApiLimitKey] | ApiLimitKey} = {
         pin: ['dialogs_pinned_limit_default', 'dialogs_pinned_limit_premium'],
         folderPin: ['dialogs_folder_pinned_limit_default', 'dialogs_folder_pinned_limit_premium'],
         folders: ['dialog_filters_limit_default', 'dialog_filters_limit_premium'],
@@ -391,7 +402,9 @@ export default abstract class ApiManagerMethods extends AppManager {
 
       const a = map[type];
       const key = Array.isArray(a) ? a[isPremium ? 1 : 0] : a;
-      return appConfig[key] as number;
+      // * a limit the config does not have read as `undefined`: "You can't pin more than undefined chats" in the
+      // * limit popup, and every local check against it (`count > undefined`) let the action through
+      return (appConfig[key] as number) ?? LIMIT_DEFAULTS[key];
     });
   }
 

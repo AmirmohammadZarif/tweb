@@ -23,9 +23,16 @@ $menu-search-translateY: -#{$menu-height};
 	flex: 1 1 auto;
   position: absolute;
   inset-inline-end: 0;
-  bottom: calc(var(--chat-input-height) + .5rem);
+  // * over the input, which a bot keyboard under it lifts (`--chat-input-keyboard-height`, Chat)
+  bottom: calc(var(--chat-input-height) + .5rem + var(--chat-input-keyboard-height, 0px));
   max-width: calc(100% - 1rem);
   max-height: 26.25rem;
+
+  // * the composer's, over the input: no higher than the room left under the topbar, which a bot keyboard lifting the
+  // * input takes (a picker of its own, `is-standalone`, is placed by its own height)
+  .chat-input & {
+    max-height: min(26.25rem, calc(var(--100vh-inset) - var(--chat-topbar-height, 3rem) - var(--chat-input-height) - 1rem - var(--chat-input-keyboard-height, 0px)));
+  }
   box-shadow: 0px 5px 10px 5px rgba(16, 35, 47, .14);
   z-index: 4;
   border-radius: 1.25rem;
@@ -33,6 +40,11 @@ $menu-search-translateY: -#{$menu-height};
   transform: scale(.85);
   opacity: 0;
   transform-origin: 100% 100%;
+
+  // reduced: the panel fades where it stands, in and out
+  @include animation-level-below(2) {
+    transform: none;
+  }
 
   body.animation-level-0 & {
     transition: none;
@@ -48,7 +60,9 @@ $menu-search-translateY: -#{$menu-height};
   }
 
   &.is-standalone {
-    transform-origin: calc(9rem * var(--reflect)) 4.625rem;
+    // * physical, as the panel's place is: every `getOpenPosition` hands over the physical `left`
+    // * of its anchor, in RTL too (a `* var(--reflect)` here put the origin 9rem outside the panel)
+    transform-origin: 9rem 4.625rem;
     transform: scale(.85);
     bottom: auto;
     // Physical `right`, not `inset-inline-start`: --top/--left are physical viewport
@@ -63,7 +77,7 @@ $menu-search-translateY: -#{$menu-height};
 
   &.is-under {
     --width: 100%;
-    --height: min(282px, calc(var(--100vh-inset) - 135px));
+    --height: min(282px, var(--under-input-max-height));
     position: relative;
     transform: none;
     inset: unset;
@@ -431,7 +445,7 @@ $menu-search-translateY: -#{$menu-height};
         z-index: 1;
         opacity: 1;
 
-        @include animation-level(2) {
+        @include animation-level(1) {
           transition: opacity var(--transition-standard-in);
         }
 
@@ -440,9 +454,10 @@ $menu-search-translateY: -#{$menu-height};
           opacity: 0;
         }
 
+        // * fades the side the categories scrolled away to: the inline start
         &.is-scrolled {
           -webkit-mask-image: linear-gradient(
-            to right,
+            calc(90deg * var(--reflect)),
             rgba(0, 0, 0, 0) 0%,
             rgb(0, 0, 0) .75rem
           );

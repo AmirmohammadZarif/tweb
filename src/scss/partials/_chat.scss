@@ -33,9 +33,25 @@
     padding-top: 12px;
 	}
 
-	.menu-send {
-		top: auto;
-    bottom: calc(100% + .5rem);
+	// * the theme picker stands in for the composer while it is up
+	&.is-choosing-theme > &-container {
+		display: none;
+	}
+
+	// * and turns out of it or back into it: the composer stays where it stood meanwhile, over the picker, fading out
+	// * or in (`swapWithComposer`)
+	&.is-choosing-theme.is-swapping-theme-chooser > &-container {
+		display: flex;
+		position: absolute;
+		inset-inline: 0;
+		bottom: 0;
+		z-index: 4;
+		pointer-events: none;
+
+		// * the picker's plate under it, which it is part of, has the shadow
+		.chat-input-wrapper {
+			box-shadow: none;
+		}
 	}
 
   .chat-input-secondary-button {
@@ -90,20 +106,18 @@
 		}
 
 		&.show.backwards {
-			@include animation-level(2) {
-				animation: hide-icon .4s forwards ease-in-out !important;
-			}
+			@include animation-level-icon-out(true);
 		}
 	}
 
+	// * by the emoji button on the field's last line, as the other buttons of the row: also while the field still
+	// * shrinks from a long message just sent, when the field is empty and these come back
 	.float {
-		align-self: center;
+		align-self: flex-end;
 		display: none !important;
 		margin: 0 !important;
 
-		@include animation-level(2) {
-			animation: grow-icon .4s forwards ease-in-out !important;
-		}
+		@include animation-level-icon-in(true);
 	}
 
 	&:not(.is-recording) {
@@ -126,22 +140,6 @@
     display: flex;
     align-items: center;
     justify-content: center;
-
-    .btn-menu-overlay {
-			z-index: 3;
-		}
-
-    @include respond-to(until-floating-left-sidebar) {
-      .btn-menu-reactions {
-        &-container {
-          --bubble-side-offset: 0;
-        }
-
-        &-bubble {
-          display: none;
-        }
-      }
-    }
 	}
 
 	.btn-icon {
@@ -163,10 +161,6 @@
     height: var(--size) !important;
     margin: 0 !important;
     width: var(--size);
-
-    .is-rtl & {
-      transform: scaleX(-1);
-    }
 
     @include hover() {
       background-color: var(--dark-primary-color) !important;
@@ -196,7 +190,7 @@
     &.stop .btn-send-icon-stop,
     &.forward .btn-send-icon-forward {
 			visibility: visible !important;
-      animation: grow-icon .4s forwards ease-in-out !important;
+      @include animation-level-icon-in(true);
 		}
 	}
 
@@ -299,24 +293,26 @@
     top: var(--padding-vertical);
     inset-inline-end: var(--padding-horizontal);
 
-    // it stays mounted while the field is too short for it, and `.btn-icon`'s `display: flex`
-    // outranks the attribute — a caption's button then sat over the popup's Send and took its clicks
-    &[hidden] {
-      display: none;
-    }
+    // * it stays while the field is too short for it, where it would cover another button (a caption's popup's Send),
+    // * and comes as the field has grown round it, as the field's expand button does
+    @include animation-level-icon-toggle(is-shown);
 
     &__icon {
       pointer-events: none;
       font-size: 1.5rem;
     }
 
-    &__star-1 {
+    // * its stars twinkle in each time it comes
+    &__star-1,
+    &__star-2 {
       opacity: 0;
+    }
+
+    &.is-shown &__star-1 {
       animation: chat-input-ai-editor-button-star-animation 3.2s ease-in-out forwards;
     }
 
-    &__star-2 {
-      opacity: 0;
+    &.is-shown &__star-2 {
       animation: chat-input-ai-editor-button-star-animation 3.2s ease-in-out 0.32s forwards;
     }
   }
@@ -336,6 +332,35 @@
   &-about {
     font-size: var(--font-size-12);
     line-height: var(--line-height-12);
+  }
+}
+
+// * "Rate transcription" over 👍 and 👎, on top of a voice message's menu
+.btn-menu-rate-transcription {
+  display: flex;
+  flex-direction: column;
+
+  &-title {
+    padding: .25rem .75rem 0;
+    text-align: center;
+    color: var(--secondary-text-color);
+    font-size: var(--font-size-12);
+    line-height: var(--line-height-14);
+  }
+
+  &-buttons {
+    display: flex;
+  }
+
+  &-button.btn-menu-item {
+    flex: 1 1 0;
+    justify-content: center;
+    padding-inline: .5rem;
+    font-size: var(--font-size-20);
+
+    .btn-menu-item-text {
+      flex: 0 0 auto;
+    }
   }
 }
 
@@ -380,9 +405,9 @@
   }
 }
 
-.btn-menu-item-text,
-.submenu-label-text {
-  > .message-input-editor-premium-star {
+// a submenu trigger's label sits deeper: .btn-menu-item-text > .submenu-label > .submenu-label-text > label
+.btn-menu-item-text {
+  .message-input-editor-premium-star {
     margin-inline-start: .25rem;
     vertical-align: text-top;
   }
@@ -497,13 +522,15 @@
         }
 
         .btn-send {
-          transition: $input-transition-time transform;
+          @include animation-level(2) {
+            transition: $input-transition-time transform;
+          }
         }
       }
     }
   }
 
-  @include animation-level(0) {
+  @include animation-level-below(2) {
     transition: none !important;
   }
 
@@ -591,14 +618,22 @@
 		transition: none !important;
 	}
 
+	// the centring is movement: with reduced animations the chat is where it goes at once
+	// (a phone's column still fades in and out, pages/_chats.scss)
+	@include respond-to(no-floating-left-sidebar) {
+		@include animation-level-below(2) {
+			transition: none !important;
+		}
+	}
+
 	@include respond-to(handhelds) {
 		body.is-left-column-shown & {
-			transform: translate3d(100vw, 0, 0);
+			transform: translate3d(calc(100vw * var(--reflect)), 0, 0);
 			opacity: 0;
 		}
 
 		body.is-right-column-shown & {
-			transform: translate3d(-25vw, 0, 0);
+			transform: translate3d(calc(-25vw * var(--reflect)), 0, 0);
 			opacity: 0;
 		}
 	}
@@ -606,7 +641,7 @@
 	@include respond-to(floating-left-sidebar) {
 		body.is-left-column-shown & {
 			//transform: translate3d(26.5rem, 0, 0);
-			transform: translate3d(26.5625rem, 0, 0); // + 1px to show left border
+			transform: translate3d(calc(26.5625rem * var(--reflect)), 0, 0); // + 1px to show left border
 
 			.sidebar-close-button {
         &:before {
@@ -621,18 +656,41 @@
 	height: 100%;
 }
 
+// * how much taller the input is than its one line: given only to the boxes that read it, by a rule of
+// * the chat's own (Chat.setChatInputSurplusRule) - set on the chat, a custom property is worked out
+// * anew for every element in it, and it changes on each line the input grows and each reply shown
+@property --chat-input-height-surplus {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+// * how much higher the input stands for the bot keyboard under it (ReplyKeyboard), given the same way
+@property --chat-input-keyboard-height {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+// * the room above and under the history together (`.bubbles-padding`, Chat.recomputePaddings), given the same way
+@property --bubbles-padding-height {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
 .chat {
   --chat-topbar-height: 3rem;
-  --chat-input-height-surplus: 0px;
   --pinned-floating-height: 0px;
   --chat-padding-top: calc(var(--chat-topbar-height) + var(--page-chats-padding) + var(--pinned-floating-height));
-  --chat-padding-bottom: calc(var(--chat-input-height) + var(--page-chats-padding) + var(--chat-input-height-surplus));
+  // * without the input's surplus, which whatever reads this adds of its own
+  --chat-padding-bottom: calc(var(--chat-input-height) + var(--page-chats-padding));
   --chat-input-background: var(--surface-color);
 	display: flex !important;
 	width: 100%;
 	align-items: center;
 	flex-direction: column;
-	transition: transform var(--tabs-transition), opacity var(--tabs-transition);
+	@include animation-level-transition(transform var(--tabs-transition), opacity var(--tabs-transition));
 
 	@include animation-level(0) {
 		transition: none !important;
@@ -640,11 +698,22 @@
 
   &:not(.active) {
     opacity: 0;
-    transform: translate3d(-200px, 0, 0);
+    transform: translate3d(calc(-200px * var(--reflect)), 0, 0);
 
     &:last-child {
-      transform: translate3d(200px, 0, 0);
+      transform: translate3d(calc(200px * var(--reflect)), 0, 0);
     }
+
+    // reduced: the chats crossfade in place
+    @include animation-level-below(2) {
+      transform: none;
+    }
+  }
+
+  // * left under the chat opened over it, once it has faded out (appImManager.coverChatWhenFaded): its layout
+  // * is kept, for its scroll to be where it was when it is gone back to, but it is neither styled nor drawn
+  &.is-covered {
+    content-visibility: hidden;
   }
 
   .drops-container {
@@ -682,7 +751,7 @@
 	--padding-vertical: .25rem;
 	--padding-horizontal: .25rem;
 	--padding: var(--padding-vertical) var(--padding-horizontal);
-  --button-size: 2.5rem;
+  --button-size: #{$chat-input-button-size};
   --button-horizontal-margin: 0.25rem;
   --message-input-editor-side-controls-width: calc(
     var(--button-size) +
@@ -749,6 +818,11 @@
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+
+  // * nothing on either side (CHAT_INPUT_PLATE_SINGLE_CLASS): the centre spans the plate
+  &.is-single &-side {
+    display: none;
   }
 
   &-button {
@@ -886,6 +960,18 @@
   }
 }
 
+// * a send menu (sendContextMenu.ts) with no room past its end keeps the effects bar over itself,
+// * with no bubble pointing at the button
+.menu-send.effects-within-menu .btn-menu-reactions {
+  &-container {
+    --bubble-side-offset: 0;
+  }
+
+  &-bubble {
+    display: none;
+  }
+}
+
 .rows-wrapper {
   transform: none;
 
@@ -988,17 +1074,10 @@
     inset-inline-start: unset;
   }
 
-  .input-message-input {
-    // max-height is JS-owned — see RichMessageInputController.syncHeight()
-    // in components/richMessageInput/index.tsx. The same number drives both the inline
-    // style.maxHeight and the scrollHeight clamp in InputFieldAnimated, so
-    // `--chat-input-height-surplus` matches what the user actually sees.
-
-    &[data-inline-placeholder]:after {
-      content: attr(data-inline-placeholder);
-      color: var(--input-message-placeholder-color);
-      pointer-events: none;
-    }
+  .chat-input-inline-placeholder:after {
+    content: attr(data-inline-placeholder);
+    color: var(--input-message-placeholder-color);
+    pointer-events: none;
   }
 
 	.new-message-wrapper {
@@ -1014,7 +1093,8 @@
     --offset-translateX: 0px;
 		align-items: flex-end;
 		min-height: var(--chat-input-height);
-		overflow: hidden;
+		// * only across: the send price stands above the composer's top edge
+		overflow-x: clip;
 
     .new-message-bot-commands,
     .new-message-send-as-container {
@@ -1059,9 +1139,7 @@
       }
 
       &-view {
-        white-space: nowrap;
-        overflow: hidden;
-        // @include text-overflow();
+        @include text-overflow();
       }
 
       &-icon-scale {
@@ -1092,6 +1170,11 @@
         opacity: 0;
         pointer-events: none;
 
+        // reduced: it fades in and out where it stands
+        @include animation-level-below(2) {
+          transform: none;
+        }
+
         &.is-visible {
           &.forwards {
             transform: scale(1);
@@ -1099,7 +1182,7 @@
           }
 
           &.animating {
-            transition: transform var(--transition-standard-in), opacity var(--transition-standard-in);
+            @include animation-level-transition(transform var(--transition-standard-in), opacity var(--transition-standard-in));
           }
         }
       }
@@ -1161,17 +1244,19 @@
       }
 
       &.animating {
+        // reduced: the field steps aside at once and the buttons fade in - going, they are gone
+        // at once, as it is their scale(0) that hides them
         .attach-file,
         .input-message-container {
-          transition: transform var(--transition-standard-in);
+          @include animation-level-transition(transform var(--transition-standard-in));
         }
 
         .new-message-send-as-container {
-          transition: transform var(--transition-standard-in), opacity var(--transition-standard-in);
+          @include animation-level-transition(transform var(--transition-standard-in), opacity var(--transition-standard-in));
         }
 
         .new-message-bot-commands {
-          transition: transform var(--transition-standard-in), opacity var(--transition-standard-in), width var(--transition-standard-in);
+          @include animation-level-transition(transform var(--transition-standard-in), opacity var(--transition-standard-in), width var(--transition-standard-in));
         }
       }
     }
@@ -1250,6 +1335,10 @@
 }
 
 .input-message-input {
+  // max-height is JS-owned — see RichMessageInputController.syncHeight()
+  // in components/richMessageInput/index.tsx. The same number drives both the inline
+  // style.maxHeight and the scrollHeight clamp in InputFieldAnimated, so
+  // `--chat-input-height-surplus` matches what the user actually sees.
   --custom-emoji-size: var(--messages-custom-emoji-size);
   background: none;
   border: none;
@@ -1283,9 +1372,21 @@
   position: absolute;
   inset-inline: 0;
   top: var(--chat-padding-top);
-  bottom: var(--chat-padding-bottom);
+  bottom: calc(var(--chat-padding-bottom) + var(--chat-input-height-surplus, 0px) + var(--chat-input-keyboard-height, 0px));
   margin-block: calc(var(--page-chats-padding) * -1);
 }
+
+// * where the bot keyboard under the input stands (`--chat-input-keyboard-height`, Chat), from the
+// * bottom of the history's scroller: nothing of the history shows under it, its buttons let the wallpaper
+// * through and a message passing under them would muddle them. With the page's padding below it, once
+// * there is a keyboard (`min()` is that padding then and nothing without one), which the fade above it gives up:
+// * the fade stands where it would without a keyboard, only higher by it - so the history, which goes up and down
+// * with the input by a transform under the mask of one or the other (Chat.setChatInputKeyboardHeight), is
+// * masked alike on the way and once it is there. Written out where it is used rather than kept in a custom
+// * property: one changing on the scroller is worked out anew for every message in it
+$bubbles-keyboard-padding: "min(var(--chat-input-keyboard-height, 0px) * 1000, var(--page-chats-padding))";
+$bubbles-keyboard-zone: string.unquote("(var(--chat-input-keyboard-height, 0px) + #{$bubbles-keyboard-padding})");
+$bubbles-keyboard-fade: string.unquote("(var(--bubbles-scrollable-fade-bottom) - #{$bubbles-keyboard-padding})");
 
 .bubbles {
 	--translateY: 0;
@@ -1321,7 +1422,7 @@
     }
   }
 
-	@include animation-level(0) {
+	@include animation-level-below(2) {
 		transition: none !important;
 	}
 
@@ -1352,19 +1453,23 @@
       color-mix(in srgb, #000 66.6%, var(--bubbles-scrollable-fade-color)) calc(var(--bubbles-scrollable-fade-top-add) + var(--bubbles-scrollable-fade-top-ramp) * 0.6),
       color-mix(in srgb, #000 91.4%, var(--bubbles-scrollable-fade-color)) calc(var(--bubbles-scrollable-fade-top-add) + var(--bubbles-scrollable-fade-top-ramp) * 0.8),
       #000 var(--bubbles-scrollable-fade-top),
-      #000 calc(100% - var(--bubbles-scrollable-fade-bottom)),
-      color-mix(in srgb, #000 91.4%, var(--bubbles-scrollable-fade-color)) calc(100% - var(--bubbles-scrollable-fade-bottom) * 0.8),
-      color-mix(in srgb, #000 66.6%, var(--bubbles-scrollable-fade-color)) calc(100% - var(--bubbles-scrollable-fade-bottom) * 0.6),
-      color-mix(in srgb, #000 33.4%, var(--bubbles-scrollable-fade-color)) calc(100% - var(--bubbles-scrollable-fade-bottom) * 0.4),
-      color-mix(in srgb, #000 8.6%, var(--bubbles-scrollable-fade-color)) calc(100% - var(--bubbles-scrollable-fade-bottom) * 0.2),
-      var(--bubbles-scrollable-fade-color) 100%
+      #000 calc(100% - #{$bubbles-keyboard-fade} - #{$bubbles-keyboard-zone}),
+      color-mix(in srgb, #000 91.4%, var(--bubbles-scrollable-fade-color)) calc(100% - #{$bubbles-keyboard-fade} * 0.8 - #{$bubbles-keyboard-zone}),
+      color-mix(in srgb, #000 66.6%, var(--bubbles-scrollable-fade-color)) calc(100% - #{$bubbles-keyboard-fade} * 0.6 - #{$bubbles-keyboard-zone}),
+      color-mix(in srgb, #000 33.4%, var(--bubbles-scrollable-fade-color)) calc(100% - #{$bubbles-keyboard-fade} * 0.4 - #{$bubbles-keyboard-zone}),
+      color-mix(in srgb, #000 8.6%, var(--bubbles-scrollable-fade-color)) calc(100% - #{$bubbles-keyboard-fade} * 0.2 - #{$bubbles-keyboard-zone}),
+      var(--bubbles-scrollable-fade-color) calc(100% - #{$bubbles-keyboard-zone}),
+      transparent calc(100% - #{$bubbles-keyboard-zone}),
+      transparent 100%
     );
   }
 
 	// ! WARNING, НЕЛЬЗЯ СТАВИТЬ ТРАНСФОРМ КРОМЕ TRANSLATEZ(0) НА БЛОК С OVERFLOW, ОН БУДЕТ ПРЫГАТЬ ВВЕРХ ПРИ ВКЛЮЧЕННОМ ПРАВИЛЕ И ЭТО НЕ ИСПРАВИТЬ JS'ОМ!
 
+	// * reduced animations keep this shift: it is short, the user's own doing, and
+	// * bubbles jumping aside at once read worse than them stepping over
 	&.is-selecting {
-    @include animation-level(2) {
+    @include animation-level(1) {
       .is-in .bubble-content-wrapper,
       .bubbles-group-avatar {
         transition: var(--bubble-transition-out);
@@ -1372,7 +1477,7 @@
     }
 
     &.forwards {
-      @include animation-level(2) {
+      @include animation-level(1) {
         .is-in .bubble-content-wrapper,
         .bubbles-group-avatar {
           transition: var(--bubble-transition-in);
@@ -1413,7 +1518,8 @@
     opacity: 1;
     visibility: visible;
 
-    @include animation-level(2) {
+    // its transform is pinned, so this is a fade
+    @include animation-level(1) {
       transition: opacity var(--layer-transition), transform var(--layer-transition), visibility 0s 0s !important;
     }
   }
@@ -1439,15 +1545,23 @@
 
 .bubbles-remover {
   position: absolute;
+  // * as tall as the frame, which its transform stands in for to the gradient of an outgoing bubble being deleted
+  // * (`message-out-gradient`); and a freeform one's piece is placed across where the frame is, which its container
+  // * fills (`cqw`), as it is narrower, in the middle
+  top: 0;
+  bottom: 0;
   left: 50%;
   transform: translateX(-50%) !important;
   z-index: 0;
+  --message-out-gradient-left: calc(50% - 50cqw);
+  --message-out-gradient-width: 100cqw;
 
   &-container {
     position: absolute;
     inset: 0;
     pointer-events: none;
     overflow: hidden;
+    container-type: size;
   }
 
   &:after {
@@ -1467,7 +1581,7 @@
     transition: none;
   }
 
-  @include animation-level(0) {
+  @include animation-level-below(2) {
     transition: none !important;
   }
 }
@@ -1477,16 +1591,18 @@
 	display: flex;
 	flex-direction: column;
 	margin: 0 auto;
-	min-height: calc(100% - var(--chat-padding-top) - var(--chat-padding-bottom));
+	// * a short history fills what the room above and under it leaves, to the pixel: with that worked out of other
+	// * numbers it stood off the input (a call's or a player's bar over the topbar) or under it
+	min-height: calc(100% - var(--bubbles-padding-height));
 	justify-content: flex-end;
 	max-width: calc(var(--chat-width) - var(--chat-bubbles-padding) * 2);
-	transition: transform var(--transition-standard-out);
-	transform: translateY(0);
   box-sizing: content-box;
 
-	@include animation-level(0) {
-		transition: none !important;
-	}
+  // * what is laid out against it (no messages' placeholder), without a transform: one would take the outgoing
+  // * bubbles' gradient in, which is fixed to the frame (`message-out-gradient`)
+  &:not(.bubbles-remover) {
+    position: relative;
+  }
 
 	// (No right-column subtraction here: .bubbles spans the full middle zone and
 	// the inner is centred within it via max-width + margin:auto, which keeps the
@@ -1560,13 +1676,13 @@
 	cursor: default;
 	opacity: 0;
 	visibility: hidden;
-  transition: transform var(--layer-transition), opacity var(--layer-transition), visibility 0s .2s !important;
+	@include animation-level-transition(transform var(--layer-transition), opacity var(--layer-transition), visibility 0s .2s, $important: true);
 
 	&.is-visible {
 		cursor: pointer;
 		opacity: 1;
 		visibility: visible;
-		transition: transform var(--layer-transition), opacity var(--layer-transition), visibility 0s 0s !important;
+		@include animation-level-transition(transform var(--layer-transition), opacity var(--layer-transition), visibility 0s 0s, $important: true);
 	}
 
   &.is-visible + .bubbles-go-reaction {
@@ -1626,7 +1742,7 @@
 	bottom: calc(var(--chat-input-height) + .5rem);
 	z-index: 2;
 	overflow: visible;
-  transform: translateY(var(--translateY)) translateY(calc(var(--chat-input-height-surplus) * -1)) !important;
+  transform: translateY(var(--translateY)) translateY(calc(var(--chat-input-height-surplus, 0px) * -1)) !important;
 
   @include animation-level(2) {
     transition: transform var(--transition-standard-in);
@@ -1676,7 +1792,7 @@
     pointer-events: none;
     opacity: 0;
 
-    @include animation-level(2) {
+    @include animation-level(1) {
       transition: opacity var(--transition-standard-in);
     }
 

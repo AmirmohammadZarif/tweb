@@ -7,11 +7,13 @@
 
 import type {MyTopPeer} from '@appManagers/appUsersManager';
 import tsNow from '@helpers/tsNow';
-import {ChannelParticipantsFilter, ChannelsChannelParticipants, ChannelParticipant, Chat, ChatFull, ChatParticipants, ChatPhoto, ExportedChatInvite, InputChannel, InputFile, InputPhoto, SendMessageAction, Update, UserFull, Photo, PhotoSize, Updates, ChatParticipant, PeerSettings, SendAsPeer, InputGroupCall, Birthday, TextWithEntities, UsersUserFull, MessagesChatFull, ProfileTab, Document, InputCollectible} from '@layer';
+import setBooleanFlag from '@helpers/object/setBooleanFlag';
+import {ChannelParticipantsFilter, ChannelsChannelParticipants, ChannelParticipant, Chat, ChatFull, ChatParticipants, ChatPhoto, ExportedChatInvite, InputChannel, InputFile, InputPhoto, SendMessageAction, Update, UserFull, Photo, PhotoSize, Updates, ChatParticipant, PeerSettings, SendAsPeer, InputGroupCall, Birthday, TextWithEntities, UsersUserFull, MessagesChatFull, ProfileTab, Document, InputCollectible, ReportReason, WallPaper, ShareTheme, ShareThemeBackdropOption, ShareThemeBackdrops} from '@layer';
 import SearchIndex from '@lib/searchIndex';
 import {AppManager} from '@appManagers/manager';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
 import getPhotoInput from '@appManagers/utils/photos/getPhotoInput';
+import {applyChatParticipantRank} from '@appManagers/utils/chats/memberTag';
 import getParticipantPeerId from '@appManagers/utils/chats/getParticipantPeerId';
 import filterParticipantsByQuery from '@appManagers/utils/chats/filterParticipantsByQuery';
 import ctx from '@environment/ctx';
@@ -19,7 +21,10 @@ import {ReferenceContext} from '@lib/storages/references';
 import assumeType from '@helpers/assumeType';
 import makeError from '@helpers/makeError';
 import callbackify from '@helpers/callbackify';
+import noop from '@helpers/noop';
+import createSerializedQueue, {SerializedQueue} from '@helpers/createSerializedQueue';
 import getPeerActiveUsernames from '@appManagers/utils/peers/getPeerActiveUsernames';
+import isSuspiciousPeer, {endSuspiciousPeerSettings} from '@appManagers/utils/peers/isSuspiciousPeer';
 import getParticipantsCount from '@appManagers/utils/chats/getParticipantsCount';
 import callbackifyAll from '@helpers/callbackifyAll';
 import indexOfAndSplice from '@helpers/array/indexOfAndSplice';
@@ -46,14 +51,28 @@ const defaultGetChannelParticipantsOptions: Partial<GetChannelParticipantsOption
   offset: 0
 };
 
+// * `rolledBack`: the latest choice failed and the full peer went back to `confirmed`
+type ShareThemeSaves = {confirmed: ShareTheme | undefined, confirmedId: number, latest: number, pending: number, rolledBack: boolean};
+
 export class AppProfileManager extends AppManager {
   // private botInfos: any = {};
   private usersFull: {[id: UserId]: UserFull.userFull} = {};
+  // * the block updates (and pages of the blocked list) of users whose full profile is not here
+  private usersBlocked: Map<UserId, boolean> = new Map();
   private chatsFull: {[id: ChatId]: ChatFull} = {};
   private fullExpiration: {[peerId: PeerId]: number} = {};
   private botCommandsByPeer: State['botCommands'] = {};
   private typingsInPeer: {[key: string]: UserTyping[]};
   private peerSettings: {[peerId: PeerId]: PeerSettings};
+  // * the users whose settings are on the way, and whether a send to them was answered meanwhile (`endSuspiciousPeer`)
+  private peerSettingsLoading: Map<PeerId, boolean> = new Map();
+  // * how many times a chat's wallpaper has changed here, by chat: a change after a moment is newer than it
+  private chatWallPaperRevisions: {[peerId: PeerId]: number} = {};
+  // * the share theme saves of a peer still on their way: the theme the server last took, which a failed latest
+  // * choice goes back to (an older choice still on its way is not one the server has)
+  private shareThemeSaves: Map<PeerId, ShareThemeSaves> = new Map();
+  // * and the saves themselves, one after another by peer: an older one the network retried must not land after a newer
+  private shareThemeWrites: Map<PeerId, SerializedQueue> = new Map();
 
   protected after() {
     this.apiUpdatesManager.addMultipleEventsListeners({
@@ -65,6 +84,8 @@ export class AppProfileManager extends AppManager {
 
       updateChatParticipantAdmin: this.onUpdateChatParticipantAdmin,
 
+      updateChatParticipantRank: this.onUpdateChatParticipantRank,
+
       updateUserTyping: this.onUpdateUserTyping,
       updateChatUserTyping: this.onUpdateUserTyping,
       updateChannelUserTyping: this.onUpdateUserTyping,
@@ -74,6 +95,8 @@ export class AppProfileManager extends AppManager {
       updatePeerSettings: this.onUpdatePeerSettings,
 
       updatePeerHistoryTTL: this.onUpdatePeerHistoryTTL,
+
+      updatePeerWallpaper: this.onUpdatePeerWallpaper,
 
       updateBotCommands: this.onUpdateBotCommands
     });
@@ -145,7 +168,11 @@ export class AppProfileManager extends AppManager {
     });
   }
 
-  private saveFullPeer<T extends UserFull.userFull | ChatFull>(peerId: PeerId, fullPeer: T): T {
+  /**
+   * `settingsAskedAt`: the notification settings clock's tick the full peer was asked for at, so that the settings it
+   * holds do not overwrite what changed since (a mute, a Reset All)
+   */
+  private saveFullPeer<T extends UserFull.userFull | ChatFull>(peerId: PeerId, fullPeer: T, settingsAskedAt?: number): T {
     this.applyCachedBotCommands(peerId, fullPeer);
 
     const isUser = peerId.isUser();
@@ -168,6 +195,7 @@ export class AppProfileManager extends AppManager {
         userFull.personal_photo = this.appPhotosManager.savePhoto(userFull.personal_photo, {type: 'profilePhoto', peerId});
       }
       userFull.wallpaper = this.appThemesManager.saveWallPaper(userFull.wallpaper);
+      userFull.theme = this.appThemesManager.saveChatTheme(userFull.theme);
 
       const referenceContext: ReferenceContext = {type: 'userFull', userId: peerId.toUserId()};
 
@@ -212,6 +240,12 @@ export class AppProfileManager extends AppManager {
       }
     }
 
+    // * the documents of the gift a share theme shows (its model, its pattern) are saved to be wrapped by the tab
+    const shareTheme = (fullPeer as UserFull.userFull | ChatFull.channelFull).share_theme;
+    if(shareTheme?._ === 'shareThemeGift' && shareTheme.stargift._ === 'starGiftUnique') {
+      this.appGiftsManager.wrapGift(shareTheme.stargift);
+    }
+
     if('pinned_msg_id' in fullPeer && fullPeer.pinned_msg_id) {
       fullPeer.pinned_msg_id = this.appMessagesIdsManager.generateMessageId(
         fullPeer.pinned_msg_id,
@@ -228,7 +262,8 @@ export class AppProfileManager extends AppManager {
     if('notify_settings' in fullPeer) {
       this.appNotificationsManager.savePeerSettings({
         peerId,
-        settings: fullPeer.notify_settings
+        settings: fullPeer.notify_settings,
+        askedAt: settingsAskedAt
       });
     }
 
@@ -237,6 +272,7 @@ export class AppProfileManager extends AppManager {
     if(isUser) {
       const userId = peerId.toUserId();
       this.usersFull[userId] = fullPeer as UserFull.userFull;
+      this.appWalletManager.saveWalletAddress(userId, (fullPeer as UserFull.userFull).wallet_card?.address);
       this.rootScope.dispatchEvent('user_full_update', userId);
     } else {
       const chatId = peerId.toChatId();
@@ -260,10 +296,10 @@ export class AppProfileManager extends AppManager {
     return fullPeer;
   }
 
-  private saveFullPeerResult(peerId: PeerId, result: UsersUserFull | MessagesChatFull) {
+  private saveFullPeerResult(peerId: PeerId, result: UsersUserFull | MessagesChatFull, settingsAskedAt: number) {
     this.appPeersManager.saveApiPeers(result);
     const fullPeer = (result as UsersUserFull).full_user || (result as MessagesChatFull).full_chat;
-    return this.saveFullPeer(peerId, fullPeer);
+    return this.saveFullPeer(peerId, fullPeer, settingsAskedAt);
   }
 
   public getProfile(id: UserId, override?: boolean) {
@@ -272,13 +308,14 @@ export class AppProfileManager extends AppManager {
       return this.usersFull[id];
     }
 
+    const settingsAskedAt = this.appNotificationsManager.getSettingsClock();
     return this.apiManager.invokeApiSingleProcess({
       method: 'users.getFullUser',
       params: {
         id: this.appUsersManager.getUserInput(id)
       },
       processResult: (usersUserFull) => {
-        return this.saveFullPeerResult(peerId, usersUserFull) as UserFull;
+        return this.saveFullPeerResult(peerId, usersUserFull, settingsAskedAt) as UserFull;
       }
     });
   }
@@ -316,6 +353,94 @@ export class AppProfileManager extends AppManager {
       }
 
       return result;
+    });
+  }
+
+  /**
+   * The colours a share theme can pick (`backdrop_id` names one). The server list is hashed: a repeated call passes the
+   * hash and a `shareThemeBackdropsNotModified` answer keeps the list from the first one.
+   */
+  public getShareThemeBackdrops(overwrite?: boolean): Promise<ShareThemeBackdropOption[]> {
+    return this.apiManager.invokeApiHashable({
+      method: 'messages.getShareThemeBackdrops',
+      processResult: (result) => (result as ShareThemeBackdrops.shareThemeBackdrops).backdrops,
+      overwrite
+    });
+  }
+
+  /** The theme of the full peer in the cache, if the full peer is there: `undefined` without it, the default one has no field. */
+  public getCachedShareTheme(peerId: PeerId): ShareTheme | undefined {
+    const fullPeer = this.getCachedProfileByPeerId(peerId) as UserFull.userFull | ChatFull.channelFull;
+    if(!fullPeer) {
+      return;
+    }
+
+    return fullPeer.share_theme || {_: 'shareThemeDefault'};
+  }
+
+  /**
+   * Saves the share theme of the own profile or of a public channel. The cached full peer takes the theme at once
+   * (`peer_full_update`); if the request fails while it is still the latest choice, the full peer gets back the theme
+   * the server last took.
+   * @param shown what the full peer holds in place of `theme`, when `theme` is an input constructor
+   * (`inputShareThemeGift` is sent, `shareThemeGift` is shown).
+   */
+  public async setShareTheme(peerId: PeerId, theme: ShareTheme, shown?: ShareTheme) {
+    const local = shown || (theme._ !== 'inputShareThemeGift' ? theme : undefined);
+    const tracked = !!local && !!this.getCachedProfileByPeerId(peerId);
+    let save: ShareThemeSaves, id: number;
+    if(tracked) {
+      save = this.shareThemeSaves.get(peerId);
+      this.modifyCachedFullPeer(peerId, (fullPeer) => {
+        const target = fullPeer as UserFull.userFull | ChatFull.channelFull;
+        if(!save) this.shareThemeSaves.set(peerId, save = {confirmed: target.share_theme, confirmedId: 0, latest: 0, pending: 0, rolledBack: false});
+        target.share_theme = local;
+      });
+      id = ++save.latest;
+      ++save.pending;
+      save.rolledBack = false;
+    }
+
+    let writes = this.shareThemeWrites.get(peerId);
+    if(!writes) this.shareThemeWrites.set(peerId, writes = createSerializedQueue());
+    try {
+      const result = await writes.enqueue(() => this.apiManager.invokeApi('messages.setShareTheme', {
+        peer: peerId === this.rootScope.myId ? this.appPeersManager.getInputPeerSelf() : this.appPeersManager.getInputPeerById(peerId),
+        theme
+      }));
+      // * an answer to an older choice coming after a newer one's does not take its place
+      if(tracked && id > save.confirmedId) {
+        // * the latest choice failed and went back to what the server had then: it has this one since
+        if(save.rolledBack) this.replaceCachedShareTheme(peerId, save.confirmed, local);
+        save.confirmed = local;
+        save.confirmedId = id;
+      }
+
+      return result;
+    } catch(err) {
+      if(tracked && id === save.latest) {
+        this.replaceCachedShareTheme(peerId, local, save.confirmed);
+        save.rolledBack = true;
+      }
+
+      throw err;
+    } finally {
+      if(tracked && !--save.pending && this.shareThemeSaves.get(peerId) === save) {
+        this.shareThemeSaves.delete(peerId);
+      }
+    }
+  }
+
+  /** The full peer's share theme becomes `to` if it still is `from`: something else may have written it meanwhile, which is not ours to undo */
+  private replaceCachedShareTheme(peerId: PeerId, from: ShareTheme | undefined, to: ShareTheme | undefined) {
+    this.modifyCachedFullPeer(peerId, (fullPeer) => {
+      const target = fullPeer as UserFull.userFull | ChatFull.channelFull;
+      if(target.share_theme !== from) {
+        return false;
+      }
+
+      if(to) target.share_theme = to;
+      else delete target.share_theme;
     });
   }
 
@@ -380,6 +505,38 @@ export class AppProfileManager extends AppManager {
 
   public getCachedFullUser(userId: UserId) {
     return this.usersFull[userId];
+  }
+
+  /**
+   * Whether the user is blocked: as their full profile says, or else as the last block update (or a page of the
+   * blocked list) said, the way tdesktop keeps it on the peer. Waits for nothing, unlike `isUserBlocked`: one not
+   * known yet reads as not blocked, as in tdesktop, and their profile is loaded in the background, so that the next
+   * asking knows
+   */
+  public isUserKnownBlocked(userId: UserId) {
+    const userFull = this.usersFull[userId];
+    if(userFull) {
+      return !!userFull.pFlags.blocked;
+    }
+
+    if(!this.usersBlocked.has(userId)) {
+      Promise.resolve().then(() => this.getProfile(userId)).catch(noop);
+    }
+
+    return !!this.usersBlocked.get(userId);
+  }
+
+  /**
+   * A page of the blocked list (`contacts.getBlocked`): the users it names are blocked, unless a block update or the
+   * full profile has its own word, which may be newer than the page
+   */
+  public saveBlockedPeers(peerIds: PeerId[]) {
+    for(const peerId of peerIds) {
+      const userId = peerId.isUser() && peerId.toUserId();
+      if(userId && !this.usersFull[userId] && !this.usersBlocked.has(userId)) {
+        this.usersBlocked.set(userId, true);
+      }
+    }
   }
 
   public getCachedProfileByPeerId(peerId: PeerId) {
@@ -511,6 +668,7 @@ export class AppProfileManager extends AppManager {
       }
 
       const requestState = this.appCommunitiesManager.captureFullCommunityRequest(id);
+      const settingsAskedAt = this.appNotificationsManager.getSettingsClock();
       return this.apiManager.invokeApiSingleProcess({
         method: 'channels.getFullChannel',
         params: {
@@ -525,7 +683,7 @@ export class AppProfileManager extends AppManager {
             return result.full_chat;
           }
 
-          return this.saveFullPeerResult(peerId, result) as ChatFull.communityFull;
+          return this.saveFullPeerResult(peerId, result, settingsAskedAt) as ChatFull.communityFull;
         }
       });
     }
@@ -547,13 +705,14 @@ export class AppProfileManager extends AppManager {
       }
     }
 
+    const settingsAskedAt = this.appNotificationsManager.getSettingsClock();
     return this.apiManager.invokeApiSingleProcess({
       method: 'messages.getFullChat',
       params: {
         chat_id: id
       },
       processResult: (result) => {
-        return this.saveFullPeerResult(peerId, result) as ChatFull.chatFull;
+        return this.saveFullPeerResult(peerId, result, settingsAskedAt) as ChatFull.chatFull;
       }
     });
   }
@@ -639,6 +798,32 @@ export class AppProfileManager extends AppManager {
 
       return found;
     });
+  }
+
+  /**
+   * What the admin editor starts from: the member as they are, or a plain member made up for someone
+   * not in the chat, whom promoting adds
+   */
+  public async getParticipantOrMissing(id: ChatId, peerId: PeerId): Promise<{
+    participant: ChannelParticipant | ChatParticipant,
+    missing: boolean
+  }> {
+    try {
+      return {participant: await this.getParticipant(id, peerId), missing: false};
+    } catch(err) {
+      if((err as ApiError)?.type !== 'USER_NOT_PARTICIPANT') {
+        throw err;
+      }
+
+      const userId = peerId.toUserId();
+      const date = tsNow(true);
+      return {
+        participant: this.appChatsManager.isChannel(id) || this.appChatsManager.isCommunity(id) ?
+          {_: 'channelParticipant', user_id: userId, date} :
+          {_: 'chatParticipant', user_id: userId, inviter_id: this.rootScope.myId.toUserId(), date},
+        missing: true
+      };
+    }
   }
 
   public getChannelParticipants(options: GetChannelParticipantsOptions) {
@@ -784,6 +969,7 @@ export class AppProfileManager extends AppManager {
     }
 
     const cutoffGeneration = this.appMessagesManager.getChannelAvailableMinIdRequestGeneration(peerId);
+    const settingsAskedAt = this.appNotificationsManager.getSettingsClock();
     return this.apiManager.invokeApiSingleProcess({
       method: 'channels.getFullChannel',
       params: {
@@ -804,7 +990,15 @@ export class AppProfileManager extends AppManager {
           fullChat.available_min_id ?? 0,
           true
         );
-        return this.saveFullPeerResult(peerId, result) as ChatFull.channelFull;
+        const saved = this.saveFullPeerResult(peerId, result, settingsAskedAt) as ChatFull.channelFull;
+        // * the group this supergroup was made from, which its history and shared media go on into, as
+        // * tdesktop learns it from here (ApplyChannelUpdate -> ApplyMigration): the service message that
+        // * says so comes with the top of the history only, and the old group's dialog may be gone
+        if(fullChat.migrated_from_chat_id) {
+          this.appMessagesManager.migrateChecks(fullChat.migrated_from_chat_id.toPeerId(true), peerId);
+        }
+
+        return saved;
       },
       processError: (error) => {
         switch(error.type) {
@@ -1121,9 +1315,19 @@ export class AppProfileManager extends AppManager {
     });
   }
 
-  public updateProfilePhoto(photoId: string, fallback?: boolean) {
+  public updateProfilePhoto(photoId: Photo.photo['id'], fallback?: boolean) {
     const photo = this.appPhotosManager.getPhoto(photoId);
     return this.setProfilePhoto({id: getPhotoInput(photo), fallback});
+  }
+
+  /** The old report of a photo, by a reason: profile photos have no option-based flow (`messages.report`) */
+  public reportProfilePhoto(peerId: PeerId, photoId: Photo.photo['id'], reason: ReportReason, message = '') {
+    return this.apiManager.invokeApi('account.reportProfilePhoto', {
+      peer: this.appPeersManager.getInputPeerById(peerId),
+      photo_id: getPhotoInput(this.appPhotosManager.getPhoto(photoId)),
+      reason,
+      message
+    });
   }
 
   public clearFallbackProfilePhoto() {
@@ -1281,6 +1485,21 @@ export class AppProfileManager extends AppManager {
     return true;
   }
 
+  /**
+   * A message the account sent a suspicious user (`isSuspiciousPeer`), once the server has it, ends
+   * that state, as on iOS: only the report and block offers go, so an Add Contact one stays, and
+   * their links show as links again.
+   */
+  public endSuspiciousPeer(peerId: PeerId) {
+    // * the settings still on the way were read before the send: they are ended as they come
+    if(this.peerSettingsLoading.has(peerId)) {
+      this.peerSettingsLoading.set(peerId, true);
+    }
+
+    if(!isSuspiciousPeer(peerId, this.peerSettings[peerId])) return;
+    this.modifyCachedPeerSettings(peerId, endSuspiciousPeerSettings);
+  }
+
   public getPeerSettings(peerId: PeerId, overwrite?: boolean) {
     if(this.appPeersManager.isMonoforum(peerId)) return this.peerSettings[peerId] ??= {
       _: 'peerSettings',
@@ -1288,7 +1507,11 @@ export class AppProfileManager extends AppManager {
     };
 
     if(this.peerSettings[peerId]) return this.peerSettings[peerId];
-    return this.apiManager.invokeApiSingleProcess({
+    if(!this.peerSettingsLoading.has(peerId)) {
+      this.peerSettingsLoading.set(peerId, false);
+    }
+
+    const promise = this.apiManager.invokeApiSingleProcess({
       method: 'messages.getPeerSettings',
       params: {
         peer: this.appPeersManager.getInputPeerById(peerId)
@@ -1298,9 +1521,17 @@ export class AppProfileManager extends AppManager {
         this.appChatsManager.saveApiChats(messagesPeerSettings.chats, true);
         this.appUsersManager.saveApiUsers(messagesPeerSettings.users);
 
-        return this.peerSettings[peerId] = messagesPeerSettings.settings;
+        const {settings} = messagesPeerSettings;
+        if(this.peerSettingsLoading.get(peerId)) {
+          endSuspiciousPeerSettings(settings);
+        }
+
+        return this.peerSettings[peerId] = settings;
       }
     });
+
+    promise.finally(() => this.peerSettingsLoading.delete(peerId)).catch(noop);
+    return promise;
   }
 
   /**
@@ -1396,12 +1627,16 @@ export class AppProfileManager extends AppManager {
 
     const participants = _participants.participants;
     for(let i = 0, length = participants.length; i < length; i++) {
-      if(participants[i].user_id === update.user_id) {
+      const participant = participants[i] as ChatParticipant.chatParticipant;
+      if(participant.user_id === update.user_id) {
+        // * the update says only who is an admin: who added the member and when stay (the administrators list shows
+        // * that inviter as the one who promoted, and canEditAdmin goes by it), and so does the member tag
         participants[i] = {
           _: update.is_admin ? 'chatParticipantAdmin' : 'chatParticipant',
           user_id: update.user_id,
-          inviter_id: this.appUsersManager.getSelf().id,
-          date: tsNow(true)
+          inviter_id: participant.inviter_id,
+          date: participant.date,
+          rank: participant.rank
         };
         return;
       }
@@ -1409,6 +1644,43 @@ export class AppProfileManager extends AppManager {
 
     return false;
   });
+
+  private onUpdateChatParticipantRank = (update: Update.updateChatParticipantRank) => {
+    this.applyParticipantRank(update.chat_id, update.user_id, update.rank, update.version);
+  };
+
+  /**
+   * Puts a member tag into the caches once the server has it, and tells the UI.
+   * A basic group's tags live in its full chat; a supergroup's in the participants it serves
+   */
+  public applyParticipantRank(chatId: ChatId, userId: UserId, rank: string, version?: number) {
+    if(this.appChatsManager.isChannel(chatId)) {
+      this.apiManager.clearCache('channels.getParticipants', (params) => (params.channel as InputChannel.inputChannel).channel_id === chatId);
+    } else {
+      let result: ReturnType<typeof applyChatParticipantRank>;
+      this.modifyCachedFullChat(chatId, (chatFull) => {
+        const chatParticipants = (chatFull as ChatFull.chatFull).participants;
+        if(chatParticipants?._ !== 'chatParticipants') {
+          return false;
+        }
+
+        result = applyChatParticipantRank(chatParticipants, userId, rank, version);
+        return result === 'applied';
+      });
+
+      // * an update older than the list says nothing about the tag now
+      if(result === 'old') {
+        return;
+      }
+
+      // * the tag itself is current either way, the rest of the list is refetched
+      if(result === 'gap') {
+        this.refreshFullPeer(chatId.toPeerId(true));
+      }
+    }
+
+    this.rootScope.dispatchEvent('chat_participant_rank', {chatId, userId, rank});
+  }
 
   private onUpdateUserTyping = (update: Update.updateUserTyping | Update.updateChatUserTyping | Update.updateChannelUserTyping) => {
     const fromId = (update as Update.updateUserTyping).user_id ?
@@ -1512,6 +1784,7 @@ export class AppProfileManager extends AppManager {
     const peerId = this.appPeersManager.getPeerId(update.peer_id);
     if(this.appPeersManager.isUser(peerId)) {
       const userId = peerId.toUserId();
+      this.usersBlocked.set(userId, !!update.pFlags.blocked);
       const userFull = this.usersFull[userId];
       if(userFull) {
         if(update.pFlags.blocked) {
@@ -1560,6 +1833,35 @@ export class AppProfileManager extends AppManager {
     }
 
     this.rootScope.dispatchEvent('auto_delete_period_update', {peerId, period: update.ttl_period});
+  };
+
+  /**
+   * The chat's own wallpaper, or none. `overridden`, a private chat's: set by the other side for both — what lets
+   * this side put its own back.
+   */
+  public setCachedChatWallPaper(peerId: PeerId, wallPaper: WallPaper | undefined, overridden?: boolean) {
+    this.chatWallPaperRevisions[peerId] = this.getChatWallPaperRevision(peerId) + 1;
+    this.modifyCachedFullPeer(peerId, (peerFull) => {
+      const fullWithWallPaper = peerFull as UserFull.userFull;
+      if(wallPaper) {
+        fullWithWallPaper.wallpaper = this.appThemesManager.saveWallPaper(wallPaper);
+      } else {
+        delete fullWithWallPaper.wallpaper;
+      }
+
+      if(peerId.isUser()) {
+        setBooleanFlag(fullWithWallPaper.pFlags, 'wallpaper_overridden', !!overridden);
+      }
+    });
+  }
+
+  public getChatWallPaperRevision(peerId: PeerId) {
+    return this.chatWallPaperRevisions[peerId] ?? 0;
+  }
+
+  private onUpdatePeerWallpaper = (update: Update.updatePeerWallpaper) => {
+    const peerId = this.appPeersManager.getPeerId(update.peer);
+    this.setCachedChatWallPaper(peerId, update.wallpaper, update.pFlags.wallpaper_overridden);
   };
 
   private onUpdateBotCommands = (update: Update.updateBotCommands) => {

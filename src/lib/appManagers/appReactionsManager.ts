@@ -15,7 +15,7 @@ import isEphemeralMessageId from '@appManagers/utils/messageId/isEphemeralMessag
 import reactionsEqual from '@appManagers/utils/reactions/reactionsEqual';
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 import availableReactionToReaction from '@appManagers/utils/reactions/availableReactionToReaction';
-import filterReactionsAtUniqCap, {DEFAULT_REACTIONS_UNIQ_MAX, isMessageAtUniqReactionCap} from '@appManagers/utils/reactions/filterReactionsAtUniqCap';
+import filterReactionsAtUniqCap, {isMessageAtUniqReactionCap, resolveReactionsUniqMax} from '@appManagers/utils/reactions/filterReactionsAtUniqCap';
 import {NULL_PEER_ID, SEND_PAID_REACTION_ANONYMOUS_PEER_ID} from '@appManagers/constants';
 import insertInDescendSortedArray from '@helpers/array/insertInDescendSortedArray';
 import {BroadcastEvents} from '@lib/rootScope';
@@ -27,6 +27,7 @@ import forEachReverse from '@helpers/array/forEachReverse';
 import fixEmoji from '@lib/richTextProcessor/fixEmoji';
 import getMessageThreadId from '@appManagers/utils/messages/getMessageThreadId';
 import removeParticipantReactions from '@appManagers/utils/reactions/removeParticipantReactions';
+import forgetFailedRequest from '@helpers/forgetFailedRequest';
 
 const SAVE_DOC_KEYS = [
   'static_icon' as const,
@@ -54,6 +55,8 @@ export type PeerAvailableReactions = {
   type: ChatReactions['_'],
   reactions: Reaction[],
   trulyAll?: boolean,
+  // the chat's own maximum of distinct reactions on a message (its full info's reactions_limit)
+  reactionsLimit?: number,
   // reactions_uniq_max reached: the message already carries the max distinct reactions,
   // so `reactions` is narrowed to the present kinds and the custom-emoji search/packs
   // must be hidden (no new distinct reaction may be introduced).
@@ -132,7 +135,11 @@ export class AppReactionsManager extends AppManager {
 
         this.setSavedReactionTags(savedPeerId, tags);
       },
-      updatePaidReactionPrivacy: this.onUpdatePaidReactionPrivacy
+      updatePaidReactionPrivacy: this.onUpdatePaidReactionPrivacy,
+      // * changed elsewhere — cleared on another device: the next picker asks again
+      updateRecentReactions: () => {
+        delete this.reactions.recent;
+      }
     });
 
     this.rootScope.addEventListener('messages_reactions', (arr) => {
@@ -163,7 +170,7 @@ export class AppReactionsManager extends AppManager {
 
   public resetAvailableReactions() {
     this.availableReactions = undefined;
-    this.getAvailableReactions();
+    return this.getAvailableReactions();
   }
 
   public getAvailableReactions() {
@@ -266,7 +273,8 @@ export class AppReactionsManager extends AppManager {
       const p: PeerAvailableReactions = {
         type: chatAvailableReactions._,
         reactions: filteredChatReactions,
-        trulyAll
+        trulyAll,
+        reactionsLimit: chatFull._ === 'communityFull' ? undefined : chatFull.reactions_limit
       };
 
       if(chatAvailableReactions._ === 'chatReactionsAll' && unshiftQuickReaction) {
@@ -326,6 +334,12 @@ export class AppReactionsManager extends AppManager {
 
   public getRecentReactions() {
     return this.getReactions('recent');
+  }
+
+  /** Forgets the reactions used lately (`messages.clearRecentReactions`), as the reaction picker offers */
+  public clearRecentReactions() {
+    this.reactions.recent = [];
+    return this.apiManager.invokeApi('messages.clearRecentReactions');
   }
 
   public getTagReactions(peerId?: PeerId) {
@@ -420,7 +434,7 @@ export class AppReactionsManager extends AppManager {
       // reactions_uniq_max — once a message already carries the max distinct reactions,
       // narrow the picker to the kinds already present (can't introduce a new distinct one)
       // and flag it so the UI hides the custom-emoji search/packs (tdesktop/iOS/Android parity).
-      const uniqMax = appConfig?.reactions_uniq_max ?? DEFAULT_REACTIONS_UNIQ_MAX;
+      const uniqMax = resolveReactionsUniqMax(peerAvailableReactions.reactionsLimit, appConfig?.reactions_uniq_max);
       peerAvailableReactions.atUniqCap = isMessageAtUniqReactionCap(messageReactionsResults, uniqMax);
       peerAvailableReactions.reactions = filterReactionsAtUniqCap(
         peerAvailableReactions.reactions,
@@ -1093,7 +1107,7 @@ export class AppReactionsManager extends AppManager {
       this.availableEffects = undefined;
     }
 
-    return this.availableEffects ??= this.apiManager.invokeApiSingleProcess({
+    return this.availableEffects ??= forgetFailedRequest(this.apiManager.invokeApiSingleProcess({
       method: 'messages.getAvailableEffects',
       processResult: (availableEffects) => {
         assumeType<MessagesAvailableEffects.messagesAvailableEffects>(availableEffects);
@@ -1107,7 +1121,7 @@ export class AppReactionsManager extends AppManager {
 
         return this.availableEffects = availableEffects.effects;
       }
-    });
+    }), () => this.availableEffects, () => this.availableEffects = undefined);
   }
 
   public getAvailableEffect(effect: DocId) {

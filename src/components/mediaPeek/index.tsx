@@ -9,13 +9,14 @@ import type {MyPhoto} from '@appManagers/appPhotosManager';
 import {Accessor, createRoot, createSignal, For, JSX, onCleanup, onMount, Setter, Show} from 'solid-js';
 import {Portal} from 'solid-js/web';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
-import {getAppWindow, getOverlayRoot} from '@helpers/appWindow';
+import {getAppWindow, getOverlayRoot, onAppWindowChange} from '@helpers/appWindow';
 import toArray from '@helpers/array/toArray';
 import deferredPromise, {bindPromiseToDeferred, CancellablePromise} from '@helpers/cancellablePromise';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import cancelSelection from '@helpers/dom/cancelSelection';
 import swallowNextClick from '@helpers/dom/swallowNextClick';
 import findUpClassName from '@helpers/dom/findUpClassName';
+import isDocumentRTL from '@helpers/dom/isDocumentRTL';
 import ListenerSetter from '@helpers/listenerSetter';
 import {MediaSize, makeMediaSize} from '@helpers/mediaSize';
 import {getMiddleware, Middleware, MiddlewareHelper} from '@helpers/middleware';
@@ -23,7 +24,7 @@ import classNames from '@helpers/string/classNames';
 import windowSize from '@helpers/windowSize';
 import {Message, MessageMedia, PhotoSize} from '@layer';
 import canSeeMessageMedia from '@appManagers/utils/messages/canSeeMessageMedia';
-import getMediaFromMessage from '@appManagers/utils/messages/getMediaFromMessage';
+import getMediaFromMessage, {getMediaFromMessageOrRich} from '@appManagers/utils/messages/getMediaFromMessage';
 import choosePhotoSize from '@appManagers/utils/photos/choosePhotoSize';
 import getStickerEffectThumb from '@appManagers/utils/stickers/getStickerEffectThumb';
 import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
@@ -35,8 +36,10 @@ import {getMediaSourceClip} from '@components/mediaViewer/clipPath';
 import getEffectiveCornerRadii from '@components/mediaViewer/cornerRadii';
 import shouldSnapshotImage from '@components/mediaViewer/shouldSnapshotImage';
 import snapshotRenderedMedia, {copyRenderedImage} from '@components/mediaViewer/snapshotRenderedMedia';
+import createSourceFloatings from '@components/mediaViewer/sourceFloatings';
 import {STICKER_EFFECT_MULTIPLIER} from '@components/wrappers/sticker';
 import styles from '@components/mediaPeek/mediaPeek.module.scss';
+import {setMediaPeekPress} from '@components/mediaPeek/press';
 
 export type MediaPeekKind = 'sticker' | 'gif' | 'photo' | 'video';
 
@@ -138,19 +141,30 @@ export async function getMediaPeekDocSource(element: HTMLElement): Promise<Media
  * What a message shows in its media slot, if a peek can show it: not a self-destructing one, not one
  * still being sent, not a paid one not yet bought. `index` picks an item of a paid album
  */
-export function getMessageMediaPeekSource(message: Message, index?: number): MediaPeekSource {
-  if(message?._ !== 'message' || message.pFlags.is_outgoing || !canSeeMessageMedia(message)) {
+export function getMessageMediaPeekSource(message: Message, index?: number, orRich?: boolean): MediaPeekSource {
+  if(message?._ !== 'message' || message.pFlags.is_outgoing) {
     return;
   }
 
-  // * only bought items have a media of their own: the rest are previews, made up from a stripped
-  // * thumbnail by getMediaFromMessage
-  const extendedMedia = (message.media as MessageMedia.messageMediaPaidMedia).extended_media;
-  if(extendedMedia && toArray(extendedMedia)[index ?? 0]?._ !== 'messageExtendedMedia') {
-    return;
+  let media: MediaPeekSource['media'];
+  if(orRich && !message.media && message.rich_message) {
+    // * a rich message has no media of its own: the shared media show it by the photo or video it stands for
+    media = getMediaFromMessageOrRich(message, index);
+  } else {
+    if(!canSeeMessageMedia(message)) {
+      return;
+    }
+
+    // * only bought items have a media of their own: the rest are previews, made up from a stripped
+    // * thumbnail by getMediaFromMessage
+    const extendedMedia = (message.media as MessageMedia.messageMediaPaidMedia).extended_media;
+    if(extendedMedia && toArray(extendedMedia)[index ?? 0]?._ !== 'messageExtendedMedia') {
+      return;
+    }
+
+    media = getMediaFromMessage(message, true, index);
   }
 
-  const media = getMediaFromMessage(message, true, index);
   return getMediaPeekKind(media) ? {media} : undefined;
 }
 
@@ -165,15 +179,24 @@ function getEntryLayout(kind: MediaPeekKind, media: MediaPeekSource['media'], re
     return {box: size, size, shift: 0};
   }
 
-  const hasEffect = kind === 'sticker' && !!getStickerEffectThumb(media as MyDocument);
-  const side = hasEffect ? 280 : (kind === 'gif' ? Math.min(480, windowHeight - 200) : 360);
+  if(kind === 'gif') {
+    const side = Math.min(480, windowWidth - MEDIA_MARGIN * 2, windowHeight - 200);
+    const box = makeMediaSize(side, side);
+    // * in its own shape, grown to fill the box: a GIF is mostly smaller than the box, and at its own
+    // * size it came out no bigger than where it was pressed. A square cell's crop grows into it whole
+    return {box, size: (getMediaDimensions(media) || box).aspect(box, false), shift: 0};
+  }
+
+  const hasEffect = !!getStickerEffectThumb(media as MyDocument);
+  const side = hasEffect ? 280 : 360;
   const box = makeMediaSize(side, side);
   const dimensions = rect.width !== rect.height && getMediaDimensions(media);
   return {
     box,
     size: dimensions ? dimensions.aspectFitted(box) : box,
-    // * the effect spreads behind the sticker, towards the middle of the chat
-    shift: hasEffect ? (side * STICKER_EFFECT_MULTIPLIER - side) / 3 * (isOut ? 1 : -1) : 0
+    // * the effect spreads behind the sticker, towards the middle of the chat (RTL swaps the sides
+    // * the messages are on, as `wrapSticker` does)
+    shift: hasEffect ? (side * STICKER_EFFECT_MULTIPLIER - side) / 3 * (isOut !== isDocumentRTL() ? 1 : -1) : 0
   };
 }
 
@@ -342,7 +365,9 @@ function MediaPeekItem(props: {
             class={styles.MediaPeekMedia}
             classList={{
               [styles.clip]: entry.clip,
-              [styles.gif]: entry.kind === 'gif'
+              [styles.gif]: entry.kind === 'gif',
+              // * a sticker fades as it is put away, rather than landing opaque on the small one
+              [styles.fading]: entry.kind === 'sticker'
             }}
             style={{
               'width': entry.size.width + 'px',
@@ -418,6 +443,10 @@ function startMediaPeek(element: HTMLElement, options: MediaPeekOptions & Requir
   // arrive, so it sticks open and can't switch.
   const activeWindow = getAppWindow();
   const activeDocument = activeWindow.document;
+  // * what the place it is opened from floats over its media - the message's time, a video's
+  // * duration and play button - goes while the peek has it, and fades back once it has landed, as
+  // * it does for the media viewer
+  const floatings = createSourceFloatings(TRANSITION_DURATION);
   // * alive while the button is held
   const gestureHelper = getMiddleware();
   const gesture = gestureHelper.get();
@@ -496,6 +525,7 @@ function startMediaPeek(element: HTMLElement, options: MediaPeekOptions & Requir
       entry.setOrigin(getEntryOrigin(entry));
     }
 
+    floatings.hide(entry.element);
     peek.show();
     activeWindow.setTimeout(() => startPlaying(entry), TRANSITION_DURATION);
     listenerSetter.add(activeDocument)('mousemove', onMouseMove);
@@ -524,6 +554,9 @@ function startMediaPeek(element: HTMLElement, options: MediaPeekOptions & Requir
 
     const previous = shown;
     shown = entry;
+    // * the one dragged onto keeps its own overlays hidden too: nothing flies back onto the one
+    // * left behind, so they all come back together when the peek closes
+    floatings.hide(entry.element);
     previous.setState('leaving');
     previous.playback.mute?.();
     entry.setState('switching');
@@ -563,6 +596,26 @@ function startMediaPeek(element: HTMLElement, options: MediaPeekOptions & Requir
     }
   };
 
+  // * what is left once the peek has flown back, or at once when there is nothing to fly back
+  let finished = false, closeTimeout: number;
+  const finish = () => {
+    if(finished) {
+      return;
+    }
+
+    finished = true;
+    activeWindow.clearTimeout(closeTimeout);
+    stopFollowingWindow();
+    peek?.dispose();
+    floatings.reveal();
+    if(lockedGroups) {
+      animationIntersector.setOnlyOnePlayableGroup(previousGroup);
+      animationIntersector.checkAnimations2(false);
+    }
+
+    isBusy = false;
+  };
+
   const onRelease = () => {
     if(!gesture()) {
       return;
@@ -577,8 +630,7 @@ function startMediaPeek(element: HTMLElement, options: MediaPeekOptions & Requir
 
     // * let go before the peek showed anything: the press was a click after all
     if(!shown) {
-      peek?.dispose();
-      isBusy = false;
+      finish();
       return;
     }
 
@@ -593,16 +645,19 @@ function startMediaPeek(element: HTMLElement, options: MediaPeekOptions & Requir
     releaseSingleMedia?.();
 
     peek.close();
-    activeWindow.setTimeout(() => {
-      peek.dispose();
-      if(lockedGroups) {
-        animationIntersector.setOnlyOnePlayableGroup(previousGroup);
-        animationIntersector.checkAnimations2(false);
-      }
-
-      isBusy = false;
-    }, TRANSITION_DURATION);
+    closeTimeout = activeWindow.setTimeout(finish, TRANSITION_DURATION);
   };
+
+  // * the app moving between the tab and its Document PiP window: a closed window's timers and
+  // * listeners never fire, so the press ends there and what was left to do is done at once - or
+  // * the overlays would stay hidden and no peek would open again
+  const stopFollowingWindow = onAppWindowChange(() => {
+    onRelease();
+    finish();
+  });
+
+  // * a slideshow paging under the press takes it before the peek shows, and stays still once it has
+  gesture.onClean(setMediaPeekPress({element, isShown: () => !!shown, cancel: onRelease}));
 
   const timeout = activeWindow.setTimeout(open, HOLD_DELAY);
   // * the message got deleted, the chat got closed
