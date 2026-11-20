@@ -64,8 +64,14 @@ const useFoldersStore = createRoot(() => {
   // * the folders' order as the events have left it, taken as they come - with a place for a folder still being
   // * read. A new folder is the last one until an order says otherwise, as the worker places it
   let order: number[] = [];
+  // * the support fork's Open Tickets folder is the client's own: no order the server sends names it, and its list
+  // * stands right after All (`appDialogsManager` places it there by its localId) - its tab has to stand there too,
+  // * or every tab after it opens the list of its neighbour
+  const rankOf = (folderId: number) => {
+    return folderId === FOLDER_ID_CRM_OPEN_TICKETS ? order.indexOf(FOLDER_ID_ALL) + .5 : order.indexOf(folderId);
+  };
   const sortByOrder = (items: StoredFolder[]) => {
-    return items.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+    return items.sort((a, b) => rankOf(a.id) - rankOf(b.id));
   };
 
   function updateFolderItem(folderId: number, payload: Partial<StoredFolder>) {

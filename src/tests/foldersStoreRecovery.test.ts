@@ -32,6 +32,9 @@ const mocks = vi.hoisted(() => {
       },
       filtersStorage: {
         isFilterIdAvailable: vi.fn(async() => true)
+      },
+      appCrmManager: {
+        getOpenTicketPeerIds: vi.fn(async(): Promise<PeerId[]> => [])
       }
     },
     addEventListener: vi.fn((event: string, listener: Listener) => {
@@ -259,5 +262,24 @@ describe('folders store under a burst of folder events', () => {
     await Promise.all([hydration, added]);
 
     expect(folderIds(store)).toEqual([0]);
+  });
+});
+
+// * the support fork's Open Tickets folder is the client's own: the orders the server sends never name it
+describe('the Open Tickets folder', () => {
+  const OPEN_TICKETS = -1000;
+
+  it('keeps its tab right after All when an order from the server comes', async() => {
+    const store = await openStore([
+      makeDialogFilter(0, 0),
+      makeDialogFilter(OPEN_TICKETS, 1),
+      makeDialogFilter(2, 2),
+      makeDialogFilter(3, 3)
+    ]);
+    expect(folderIds(store)).toEqual([0, OPEN_TICKETS, 2, 3]);
+
+    // * as the session's sync of the server's folders sends it, archive included
+    await mocks.emit('filter_order', [0, 1, 3, 2]);
+    expect(folderIds(store), 'a tab out of the place its list stands in').toEqual([0, OPEN_TICKETS, 3, 2]);
   });
 });
