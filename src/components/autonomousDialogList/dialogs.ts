@@ -512,25 +512,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
     const managers = bindManagersToSession(this.managers);
     const peerIds = await managers.appCrmManager.getOpenTicketPeerIds(!offsetIndex);
     setCrmOpenTicketPeerIds(peerIds);
-    // This folder is peer-driven rather than index-driven, so its chats are
-    // whatever the CRM says — NOT necessarily anything the paged dialog list has
-    // reached yet. `getDialogOnly` is cache-only, so relying on it alone leaves
-    // the folder empty until the user happens to scroll far enough in All.
-    // Fall back to reloadConversation, which batches the misses into a single
-    // messages.getPeerDialogs round-trip.
-    //
-    // Only for peers we can actually address: the CRM hands us a bare Telegram
-    // user id, and MTProto needs an access_hash to build an InputPeer. Asking for
-    // an unknown user throws while the batch is being assembled, which rejects
-    // EVERY promise in that batch — so one stranger would blank out the whole
-    // folder. Unknown peers are simply not reachable from this account.
-    const dialogs = (await Promise.all(peerIds.map(async(peerId) => {
-      const dialog = await managers.appMessagesManager.getDialogOnly(peerId);
-      if(dialog) return dialog;
-      if(!await managers.appUsersManager.hasUser(peerId.toUserId())) return undefined;
-      return managers.appMessagesManager.reloadConversation(peerId).catch(() => undefined as Dialog);
-    })))
-    .filter(Boolean) as Dialog[];
+    const dialogs = await managers.appMessagesManager.getConversationsByPeerIds(peerIds);
     dialogs.sort((a, b) => getDialogIndex(b, this.indexKey) - getDialogIndex(a, this.indexKey));
 
     let offset = 0;

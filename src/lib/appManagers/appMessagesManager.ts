@@ -6000,6 +6000,34 @@ export class AppMessagesManager extends AppManager {
     });
   }
 
+  /** Resolve CRM peers even before the ordinary chat list has paged that far. */
+  public async getConversationsByPeerIds(peerIds: PeerId[]): Promise<Dialog[]> {
+    const uniquePeerIds = [...new Set(peerIds)];
+    const missingPeers = uniquePeerIds.filter((peerId) => !this.getDialogOnly(peerId));
+    if(missingPeers.length) {
+      // getDialogs supplies account-specific access hashes, including archived
+      // chats. A bare CRM user id cannot be passed to getPeerDialogs safely.
+      try {
+        await this.fillConversations(GLOBAL_FOLDER_ID);
+      } catch(err) {
+        this.log.warn('CRM dialog discovery failed', err);
+      }
+    }
+
+    const dialogs = await Promise.all(uniquePeerIds.map(async(peerId) => {
+      const cached = this.getDialogOnly(peerId);
+      if(cached) return cached;
+      if(!peerId.isUser() || !this.appUsersManager.hasUser(peerId.toUserId())) return undefined;
+      try {
+        return await this.reloadConversation(peerId);
+      } catch{
+        // A deleted/unreachable peer must not discard the other conversations.
+        return undefined;
+      }
+    }));
+    return dialogs.filter(Boolean);
+  }
+
   /* public async getConversationsAll(query = '', folderId = 0) {
     const limit = 200, outDialogs: Dialog[] = [];
     for(; folderId < 2; ++folderId) {
