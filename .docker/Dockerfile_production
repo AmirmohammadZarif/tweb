@@ -1,5 +1,6 @@
 # Build stage
-FROM node:22 AS builder
+# The widget engine tests require WebAssembly.Suspending (JSPI).
+FROM node:26 AS builder
 
 WORKDIR /app
 
