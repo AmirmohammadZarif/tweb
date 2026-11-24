@@ -548,6 +548,21 @@ export default class ChatTopbar {
       // Read-only (onboarding) agents cannot issue links, so it is hidden.
       verify: () => !!this.peerId?.isUser() && !useIsCrmReadOnly()()
     }, {
+      icon: 'document',
+      text: 'Crm.ChannelReview.MenuButton',
+      onClick: async() => {
+        const peerId = this.peerId;
+        try {
+          const {baseUrl} = await this.managers.appCrmManager.getConfig();
+          if(this.peerId !== peerId) return;
+          this.chat.input.insertQuickReply({text: new URL('channel-review', baseUrl.replace(/\/+$/, '') + '/').href});
+          toastNew({langPackKey: 'Crm.ChannelReview.Inserted'});
+        } catch(error) {
+          toastNew({langPackKey: 'Crm.ChannelReview.Failed'});
+        }
+      },
+      verify: async() => !!this.peerId?.isUser() && !useIsCrmReadOnly()() && await this.managers.appCrmManager.isConnected()
+    }, {
       icon: 'lock',
       text: 'Crm.SecretRequest.MenuButton',
       onClick: () => {
